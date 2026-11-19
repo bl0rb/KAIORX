@@ -3,6 +3,17 @@
 KAIORX: native macOS-App (Swift 6, macOS 15+), die Claude Code und OpenAI
 Codex in getrennten Git-Worktrees orchestriert. Lokale Planungsunterlagen
 (nicht versioniert) liegen in `Plan/`, Einstieg `Plan/ARCHITEKTURPLAN.md`.
+Verbindlich für Code: `Plan/laufzeitvertrag.md` (Zustände, Schema, Ereignisse).
+Abweichungen vom Plan brauchen ein ADR in `docs/adr/`.
+
+## Build and test
+
+- Code lives in `Packages/KAIORXKit` (Swift 6 language mode, macOS 15).
+- Run tests with `scripts/test.sh` (Swift Testing; works with Command Line Tools only).
+- Dev CLI: `swift run --package-path Packages/KAIORXKit kaiorx-dev --db <tmp path> …`.
+  Without `--db` it writes to the real Application Support database.
+- Applied migrations in `CoreSchema` are never edited; schema changes are new migrations.
+- No Xcode on the dev machine yet: SwiftUI macros do not build, so no app target.
 
 ## Model escalation
 

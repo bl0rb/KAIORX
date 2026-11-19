@@ -3,12 +3,33 @@ KAIORX is a native macOS AI development environment that orchestrates multiple c
 
 ## Status
 
-Planning phase. The app is planned in Swift 6 for macOS 15+ on Apple silicon. There is no application code yet.
+Early implementation. Planned in Swift 6 for macOS 15+ on Apple silicon.
+
+Package B (local core) is in progress in `Packages/KAIORXKit`:
+
+- **Domain:** typed IDs, state machines for jobs, tasks and attempts, commands, events
+- **Storage:** single-writer SQLite store with migrations, an event journal and restart recovery
+- **Providers:** the adapter contract and a deterministic fake adapter
+- **Orchestration:** run coordinator
+
+No real Claude Code or Codex adapters exist yet. The Xcode app is not set up yet; until then, `kaiorx-dev` is a development CLI.
+
+## Build and test
+
+```sh
+scripts/test.sh                                      # all tests
+swift run --package-path Packages/KAIORXKit kaiorx-dev --help
+```
+
+With only the Command Line Tools installed (no Xcode), `scripts/test.sh` passes the Swift Testing macro plugin path explicitly. With Xcode, `swift test --package-path Packages/KAIORXKit` works directly.
 
 ## Repository
 
 | Path | Content |
 |---|---|
+| `Packages/KAIORXKit/` | Swift package: Domain, Storage, Providers, Orchestration, `kaiorx-dev` |
+| `docs/adr/` | Architecture decisions that change the plan (German) |
+| `scripts/test.sh` | Test runner |
 | `CLAUDE.md` | Project context and rule index for Claude Code |
 | `.claude/rules/` | Model escalation rules, loaded automatically by Claude Code |
 | `.claude/agents/` | Subagents `scout` (L1, read-only) and `escalation-reviewer` (L3) |
