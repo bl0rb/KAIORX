@@ -105,15 +105,20 @@ public struct GitOperationRecord: Sendable, Equatable, Codable, Identifiable {
     public var detail: String?
     /// For removals: decided without the unsaved-work check.
     public var force: Bool
+    /// For publications: the candidate and the user's approval it executes.
+    public var candidateID: TypedID<CandidateTag>?
+    public var approvalID: TypedID<ApprovalTag>?
     public var createdAt: Int64
     public var appliedAt: Int64?
 
     public init(
         id: GitOperationID, projectID: ProjectID, worktreeID: WorktreeID?, kind: GitOperationKind, ref: String?,
         expectedOld: String?, desiredNew: String?, state: GitOperationState, detail: String?, force: Bool = false,
-        createdAt: Int64, appliedAt: Int64?
+        candidateID: TypedID<CandidateTag>? = nil, approvalID: TypedID<ApprovalTag>? = nil, createdAt: Int64, appliedAt: Int64?
     ) {
         self.force = force
+        self.candidateID = candidateID
+        self.approvalID = approvalID
         self.id = id
         self.projectID = projectID
         self.worktreeID = worktreeID

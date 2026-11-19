@@ -19,6 +19,8 @@ Package C (workspace and safe runner) is also in progress:
 
 Package D (provider adapters) is in progress offline. Adapters exist for Claude Code (headless `stream-json`) and the Codex App Server (stdio JSON-RPC). They are tested against fixture programs, and the Codex messages are checked against the protocol schema of the installed version. Automatic runs stay blocked until the live, user-authorized subscription runs of package A pass. See `docs/adr/0003-anbieteradapter-offline.md`. The Xcode app is not set up yet; until then, `kaiorx-dev` is a development CLI.
 
+Package E (check and integrate) is in progress. A sealed author result is merged into the job's integration target as a candidate. The candidate is tested and reviewed by another provider, then approved by the user and published with a journaled compare-and-swap. It can be delivered as a new branch or reverted through the same chain. A task moves together with its candidate. See `docs/adr/0004-integration-und-freigabe.md`.
+
 ## Build and test
 
 ```sh

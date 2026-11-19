@@ -230,7 +230,13 @@ public actor WorkspaceService {
                 report.skipped[operation.id] = String(describing: error)
                 continue
             }
-            try await store.completeGitOperation(operation.id, as: outcome.0, detail: outcome.1, effects: outcome.2)
+            do {
+                try await store.completeGitOperation(operation.id, as: outcome.0, detail: outcome.1, effects: outcome.2)
+            } catch {
+                // One entry whose effects cannot be applied must not block the others.
+                report.skipped[operation.id] = "completion failed: \(error)"
+                continue
+            }
             switch outcome.0 {
             case .applied: report.applied.append(operation.id)
             case .failed: report.failed.append(operation.id)
@@ -345,20 +351,33 @@ public actor WorkspaceService {
             )
         }
         let integrationPrefix = "refs/kaiorx/integrations/"
-        if ref.hasPrefix(integrationPrefix), let job = JobID(string: String(ref.dropFirst(integrationPrefix.count))) {
+        let publication = operation.approvalID != nil && ref.hasPrefix(integrationPrefix)
+        if publication {
+            effects.candidatePublished = operation.candidateID
+        } else if ref.hasPrefix(integrationPrefix), let job = JobID(string: String(ref.dropFirst(integrationPrefix.count))) {
             effects.jobIntegration = (job, desired, ref)
         }
         let current = try await git.readRef(ref, in: repository)
         if current == desired { return (.applied, "found after restart", effects) }
         guard current == operation.expectedOld else {
+            if publication, let candidate = operation.candidateID {
+                // The target moved elsewhere: the candidate cannot be published any more.
+                return (.failed, "target moved to \(current ?? "nothing")", GitOperationEffects(candidateReleased: (candidate, .superseded)))
+            }
             return (.needsAttention, "ref is at \(current ?? "nothing"), expected \(operation.expectedOld ?? "nothing")", GitOperationEffects())
+        }
+        // A publication is repeated only while the user's approval still stands.
+        if publication, let approval = operation.approvalID, try await store.approval(approval)?.state != .granted {
+            let release = operation.candidateID.map { GitOperationEffects(candidateReleased: ($0, .accepted)) } ?? GitOperationEffects()
+            return (.failed, "approval no longer valid", release)
         }
         // The update never happened: repeat the same compare-and-swap.
         do {
             try await git.updateRef(ref, to: desired, expectedOld: operation.expectedOld, in: repository)
             return (.applied, "repeated on recovery", effects)
         } catch {
-            return (.needsAttention, String(describing: error), GitOperationEffects())
+            let release = publication ? operation.candidateID.map { GitOperationEffects(candidateReleased: ($0, .accepted)) } : nil
+            return (publication ? .failed : .needsAttention, String(describing: error), release ?? GitOperationEffects())
         }
     }
 

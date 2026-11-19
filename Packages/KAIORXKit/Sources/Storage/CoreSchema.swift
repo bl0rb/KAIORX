@@ -2,7 +2,7 @@
 /// consent, accounts, plans, worktrees, budgets, candidates and Git operations follow as new
 /// migrations with their packages; applied migrations are never edited.
 public enum CoreSchema {
-    public static let migrations: [Migration] = [v1, v2]
+    public static let migrations: [Migration] = [v1, v2, v3]
 
     static let v1 = Migration(version: 1, name: "core", sql: """
         CREATE TABLE project (
@@ -169,5 +169,98 @@ public enum CoreSchema {
         CREATE UNIQUE INDEX git_operation_open_worktree ON git_operation (worktree_id)
             WHERE state = 'prepared' AND kind <> 'updateRef';
         CREATE INDEX git_operation_state ON git_operation (state, created_at);
+        """)
+
+    /// Package E: integration candidates, their evidence, approvals and publication journal links.
+    static let v3 = Migration(version: 3, name: "integration", sql: """
+        CREATE TABLE candidate (
+            id TEXT PRIMARY KEY NOT NULL,
+            project_id TEXT NOT NULL REFERENCES project(id),
+            job_id TEXT NOT NULL REFERENCES job(id),
+            task_id TEXT REFERENCES task(id),
+            kind TEXT NOT NULL CHECK (kind IN ('implementation', 'revert')),
+            author_attempt_id TEXT REFERENCES attempt(id),
+            author_provider TEXT CHECK (author_provider IN ('claude', 'codex', 'fake')),
+            result_oid TEXT,
+            reverts_candidate_id TEXT REFERENCES candidate(id),
+            previous_target_oid TEXT NOT NULL,
+            candidate_oid TEXT,
+            target_ref TEXT NOT NULL CHECK (target_ref LIKE 'refs/kaiorx/integrations/%'),
+            worktree_id TEXT REFERENCES worktree(id),
+            state TEXT NOT NULL CHECK (state IN
+                ('conflicted', 'built', 'testing', 'reviewing', 'accepted', 'publishing', 'published', 'rejected', 'superseded')),
+            conflicts_json TEXT NOT NULL DEFAULT '[]',
+            version INTEGER NOT NULL CHECK (version >= 1),
+            created_at INTEGER NOT NULL,
+            -- An implementation needs its author attempt and result; a revert names what it reverts.
+            CHECK ((kind = 'implementation' AND author_attempt_id IS NOT NULL AND result_oid IS NOT NULL AND task_id IS NOT NULL)
+                OR (kind = 'revert' AND reverts_candidate_id IS NOT NULL)),
+            CHECK (state IN ('conflicted', 'rejected', 'superseded') OR candidate_oid IS NOT NULL)
+        ) STRICT;
+        CREATE INDEX candidate_job_state ON candidate (job_id, state);
+        -- At most one publication in flight per integration target.
+        CREATE UNIQUE INDEX candidate_one_publishing ON candidate (target_ref) WHERE state = 'publishing';
+
+        CREATE TABLE test_result (
+            id TEXT PRIMARY KEY NOT NULL,
+            candidate_id TEXT NOT NULL REFERENCES candidate(id),
+            candidate_oid TEXT NOT NULL,
+            profile_digest TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('passed', 'failed', 'crashed', 'timedOut', 'inputsModified', 'infrastructureError')),
+            exit_code INTEGER,
+            changed_test_inputs_json TEXT NOT NULL DEFAULT '[]',
+            summary TEXT NOT NULL,
+            at INTEGER NOT NULL
+        ) STRICT;
+        CREATE INDEX test_result_candidate ON test_result (candidate_id, at);
+
+        CREATE TABLE review (
+            id TEXT PRIMARY KEY NOT NULL,
+            candidate_id TEXT NOT NULL REFERENCES candidate(id),
+            candidate_oid TEXT NOT NULL,
+            reviewer_attempt_id TEXT REFERENCES attempt(id),
+            origin TEXT NOT NULL CHECK (origin IN ('provider', 'userImported')),
+            reviewer_provider TEXT CHECK (reviewer_provider IN ('claude', 'codex', 'fake')),
+            status TEXT NOT NULL CHECK (status IN ('approved', 'changesRequested', 'invalid')),
+            summary TEXT NOT NULL,
+            at INTEGER NOT NULL,
+            CHECK (origin = 'userImported' OR (reviewer_attempt_id IS NOT NULL AND reviewer_provider IS NOT NULL))
+        ) STRICT;
+        CREATE INDEX review_candidate ON review (candidate_id, at);
+
+        CREATE TABLE finding (
+            id TEXT PRIMARY KEY NOT NULL,
+            review_id TEXT NOT NULL REFERENCES review(id),
+            severity TEXT NOT NULL CHECK (severity IN ('blocking', 'major', 'minor', 'comment')),
+            path TEXT,
+            line INTEGER,
+            impact TEXT NOT NULL,
+            suggestion TEXT NOT NULL,
+            disposition TEXT NOT NULL CHECK (disposition IN ('open', 'accepted', 'rejected')),
+            reason TEXT,
+            CHECK (disposition = 'open' OR length(reason) > 0),
+            CHECK (severity <> 'blocking' OR disposition <> 'accepted')
+        ) STRICT;
+        CREATE INDEX finding_review ON finding (review_id);
+
+        CREATE TABLE approval (
+            id TEXT PRIMARY KEY NOT NULL,
+            candidate_id TEXT NOT NULL REFERENCES candidate(id),
+            candidate_oid TEXT NOT NULL,
+            expected_old_oid TEXT NOT NULL,
+            target_ref TEXT NOT NULL,
+            action TEXT NOT NULL CHECK (action IN ('publishIntegration')),
+            policy_version INTEGER NOT NULL,
+            actor TEXT NOT NULL CHECK (length(actor) > 0),
+            state TEXT NOT NULL CHECK (state IN ('granted', 'consumed', 'revoked')),
+            granted_at INTEGER NOT NULL,
+            resolved_at INTEGER,
+            CHECK ((state = 'granted') = (resolved_at IS NULL))
+        ) STRICT;
+        CREATE INDEX approval_candidate_state ON approval (candidate_id, state);
+
+        ALTER TABLE task ADD COLUMN integrated_oid TEXT;
+        ALTER TABLE git_operation ADD COLUMN candidate_id TEXT REFERENCES candidate(id);
+        ALTER TABLE git_operation ADD COLUMN approval_id TEXT REFERENCES approval(id);
         """)
 }

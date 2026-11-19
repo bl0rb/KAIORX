@@ -31,15 +31,23 @@ public struct GitOperationEffects: Sendable, Equatable {
     public var resultOID: String?
     public var savedTree: String?
     public var seal: (status: SealStatus, rejected: [String: String])?
+    /// Publication applied: candidate published, approval consumed, task integrated.
+    public var candidatePublished: CandidateID?
+    /// A publication that did not happen releases its candidate (back to `accepted`, or
+    /// `superseded` when the target moved), if it is still `publishing`.
+    public var candidateReleased: (id: CandidateID, to: CandidateState)?
     /// Records the job's base and integration ref once that ref exists.
     public var jobIntegration: (job: JobID, baseOID: String, ref: String)?
 
     public init(
         worktreeState: WorktreeState? = nil, resultOID: String? = nil, savedTree: String? = nil,
         seal: (status: SealStatus, rejected: [String: String])? = nil,
+        candidatePublished: CandidateID? = nil, candidateReleased: (id: CandidateID, to: CandidateState)? = nil,
         jobIntegration: (job: JobID, baseOID: String, ref: String)? = nil
     ) {
+        self.candidateReleased = candidateReleased
         self.seal = seal
+        self.candidatePublished = candidatePublished
         self.worktreeState = worktreeState
         self.resultOID = resultOID
         self.savedTree = savedTree
@@ -49,6 +57,8 @@ public struct GitOperationEffects: Sendable, Equatable {
     public static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.worktreeState == rhs.worktreeState && lhs.resultOID == rhs.resultOID && lhs.savedTree == rhs.savedTree
             && lhs.seal?.status == rhs.seal?.status && lhs.seal?.rejected == rhs.seal?.rejected
+            && lhs.candidatePublished == rhs.candidatePublished
+            && lhs.candidateReleased?.id == rhs.candidateReleased?.id && lhs.candidateReleased?.to == rhs.candidateReleased?.to
             && lhs.jobIntegration?.job == rhs.jobIntegration?.job && lhs.jobIntegration?.baseOID == rhs.jobIntegration?.baseOID
             && lhs.jobIntegration?.ref == rhs.jobIntegration?.ref
     }
@@ -95,13 +105,15 @@ extension Store {
     /// Journals a ref update. `expectedOld == nil` means the ref must not exist yet.
     @discardableResult
     public func prepareRefUpdate(
-        projectID: ProjectID, worktreeID: WorktreeID?, ref: String, expectedOld: String?, desiredNew: String
+        projectID: ProjectID, worktreeID: WorktreeID?, ref: String, expectedOld: String?, desiredNew: String,
+        candidateID: CandidateID? = nil, approvalID: ApprovalID? = nil
     ) throws -> GitOperationID {
         let db = try connection()
         let now = currentTime()
         return try db.transaction {
             try insertOperation(db, projectID: projectID, worktreeID: worktreeID, kind: .updateRef, ref: ref,
-                                expectedOld: expectedOld, desiredNew: desiredNew, now: now)
+                                expectedOld: expectedOld, desiredNew: desiredNew, candidateID: candidateID,
+                                approvalID: approvalID, now: now)
         }
     }
 
@@ -143,6 +155,12 @@ extension Store {
                     try changeWorktree(db, worktree, to: target, resultOID: effects.resultOID, savedTree: effects.savedTree,
                                        seal: effects.seal, now: now)
                 }
+            }
+            if let candidate = effects.candidatePublished {
+                try applyPublication(db, candidate: candidate, approval: operation.approvalID, operation: operation, now: now)
+            }
+            if let (candidate, target) = effects.candidateReleased {
+                try releaseCandidate(db, candidate, to: target, now: now)
             }
             if let integration = effects.jobIntegration {
                 try db.run(
@@ -190,20 +208,23 @@ extension Store {
 
     // MARK: Helpers
 
-    private func insertOperation(
+    func insertOperation(
         _ db: SQLiteConnection, projectID: ProjectID, worktreeID: WorktreeID?, kind: GitOperationKind, ref: String?,
-        expectedOld: String?, desiredNew: String?, force: Bool = false, now: Int64
+        expectedOld: String?, desiredNew: String?, force: Bool = false, candidateID: CandidateID? = nil,
+        approvalID: ApprovalID? = nil, now: Int64
     ) throws -> GitOperationID {
         let id = GitOperationID()
         do {
             try db.run(
                 """
-                INSERT INTO git_operation (id, project_id, worktree_id, kind, ref, expected_old, desired_new, state, force, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)
+                INSERT INTO git_operation (id, project_id, worktree_id, kind, ref, expected_old, desired_new, state, force,
+                                           candidate_id, approval_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?, ?, ?)
                 """,
                 [
                     .text(id.uuidString), .text(projectID.uuidString), .optional(worktreeID?.uuidString), .text(kind.rawValue),
-                    .optional(ref), .optional(expectedOld), .optional(desiredNew), .integer(force ? 1 : 0), .integer(now),
+                    .optional(ref), .optional(expectedOld), .optional(desiredNew), .integer(force ? 1 : 0),
+                    .optional(candidateID?.uuidString), .optional(approvalID?.uuidString), .integer(now),
                 ]
             )
         } catch let error as SQLiteError where error.primaryCode == SQLITE_CONSTRAINT {
@@ -279,14 +300,15 @@ extension Store {
     }
 
     private static let operationColumns =
-        "id, project_id, worktree_id, kind, ref, expected_old, desired_new, state, detail, created_at, applied_at, force"
+        "id, project_id, worktree_id, kind, ref, expected_old, desired_new, state, detail, created_at, applied_at, force, candidate_id, approval_id"
 
     private static func operation(from row: SQLRow) throws -> GitOperationRecord {
         GitOperationRecord(
             id: try parseID(row.requiredText(0)), projectID: try parseID(row.requiredText(1)),
             worktreeID: try row.text(2).map(parseID), kind: try parseEnum(row.requiredText(3)), ref: row.text(4),
             expectedOld: row.text(5), desiredNew: row.text(6), state: try parseEnum(row.requiredText(7)),
-            detail: row.text(8), force: row.int(11) == 1, createdAt: row.int(9), appliedAt: row.optionalInt(10)
+            detail: row.text(8), force: row.int(11) == 1, candidateID: try row.text(12).map(parseID),
+            approvalID: try row.text(13).map(parseID), createdAt: row.int(9), appliedAt: row.optionalInt(10)
         )
     }
 }

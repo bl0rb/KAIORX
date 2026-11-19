@@ -364,6 +364,11 @@ extension GitRunner {
         )
         guard result.termination == .exited(0) else {
             let actual = try await readRef(name, in: repository)
+            // Only a different value is a compare-and-swap mismatch; a lock or I/O failure with
+            // the ref still at the expected value is a transient error.
+            if actual == expectedOld {
+                throw GitError.failed(arguments: ["update-ref", name], termination: result.termination, stderr: result.stderr.text)
+            }
             throw WorkspaceError.refConflict(ref: name, expected: expectedOld, actual: actual)
         }
     }

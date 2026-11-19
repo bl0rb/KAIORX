@@ -19,6 +19,9 @@ public enum StoreError: Error, Equatable, Sendable {
     /// `running` and its exits to `ready`/`resultReady` belong to the author attempt; a command
     /// may not move a task there.
     case taskManagedByAttempt(taskID: TaskID, from: TaskState, to: TaskState)
+    /// `conflict`, `awaitingMerge` and `integrated` follow the task's integration candidate, and
+    /// a task whose candidate is being published can only be blocked; a command may not do that.
+    case taskManagedByIntegration(taskID: TaskID, from: TaskState, to: TaskState)
     /// The folder now holds a different repository than the one first attached.
     case repositoryMismatch(projectID: ProjectID, recorded: String, found: String)
     /// Another prepared Git operation for the same ref or worktree is still open.
@@ -560,10 +563,21 @@ public actor Store {
                 throw StoreError.taskManagedByAttempt(taskID: task.record.id, from: from, to: target)
             }
         }
+        // Domain errors come first; these moves are valid but belong to the integration chain.
+        guard from.allowsTransition(to: target, resumeState: task.record.resumeState) else { return }
+        let resumesFromHold = from == .blocked && target == task.record.resumeState
+        let integrationMove = target == .conflict || target == .integrated
+            || (target == .awaitingMerge && !resumesFromHold) || (from == .awaitingMerge && target == .verifying)
+        let publishing = try db.query(
+            "SELECT 1 FROM candidate WHERE task_id = ? AND state = 'publishing'", [.text(task.record.id.uuidString)]
+        ) { $0.int(0) }
+        if integrationMove || (!publishing.isEmpty && target != .blocked && !resumesFromHold) {
+            throw StoreError.taskManagedByIntegration(taskID: task.record.id, from: from, to: target)
+        }
     }
 
     /// Validates, applies and journals a task transition, keeping the resume state of side states.
-    private func changeTaskState(_ db: SQLiteConnection, _ task: LoadedTask, to target: TaskState, reason: String?, now: Int64) throws {
+    func changeTaskState(_ db: SQLiteConnection, _ task: LoadedTask, to target: TaskState, reason: String?, now: Int64) throws {
         let current = task.record.state
         try current.validateTransition(to: target, resumeState: task.record.resumeState)
         let resume = current.resumeState(after: target, current: task.record.resumeState)
@@ -576,6 +590,10 @@ public actor Store {
             payload: Canonical.encode(StateChange(entityID: task.record.id.uuidString, from: current.rawValue, to: target.rawValue, reason: reason)),
             dedupKey: nil, now: now
         )
+        if target == .ready || target == .needsChanges || (target.isTerminal && target != .integrated) {
+            // Back to an author or ended: its open integration candidates cannot be published.
+            try closeOpenCandidates(db, task: task.record.id, reason: "task \(target.rawValue)", now: now)
+        }
     }
 
     @discardableResult

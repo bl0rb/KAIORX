@@ -67,7 +67,7 @@ public enum JobState: String, LifecycleState {
 }
 
 /// Task ("Aufgabe"): `pending → ready → running → resultReady → verifying → awaitingMerge →
-/// integrated`. `blocked` returns to the interrupted stage; `conflict` and `needsChanges` return
+/// integrated`; `awaitingMerge → verifying` when the candidate must be checked again (ADR 0004). `blocked` returns to the interrupted stage; `conflict` and `needsChanges` return
 /// to that stage or to `ready` for a new author attempt. No result, permanent failure and
 /// cancellation are explicit terminal states.
 public enum TaskState: String, LifecycleState {
@@ -100,7 +100,8 @@ public enum TaskState: String, LifecycleState {
         case .running: next = [.resultReady, .ready]
         case .resultReady: next = [.verifying, .needsChanges]
         case .verifying: next = [.awaitingMerge, .needsChanges, .conflict]
-        case .awaitingMerge: next = [.integrated, .needsChanges, .conflict]
+        // A superseded candidate is rebuilt, or new findings reopen the review: back to verifying.
+        case .awaitingMerge: next = [.integrated, .verifying, .needsChanges, .conflict]
         case .conflict, .needsChanges: next = [.ready]
         case .blocked: next = []
         case .integrated, .noResult, .failed, .cancelled: next = []

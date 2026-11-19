@@ -13,11 +13,16 @@ public struct TestProfile: Sendable, Equatable, Codable {
     /// temporary folder is writable.
     public var writesWorktree: Bool
     public var outputLimit: Int
+    /// Paths (prefixes) whose changes count as changed test inputs: tests, fixtures, build and
+    /// CI scripts. Part of the confirmed profile and its digest.
+    public var testInputPrefixes: [String]
 
     public init(
         executable: String, arguments: [String] = [], workingDirectory: String = ".", timeoutSeconds: Int = 600,
-        environment: [String: String] = [:], writesWorktree: Bool = false, outputLimit: Int = 4 << 20
+        environment: [String: String] = [:], writesWorktree: Bool = false, outputLimit: Int = 4 << 20,
+        testInputPrefixes: [String] = []
     ) {
+        self.testInputPrefixes = testInputPrefixes
         self.executable = executable
         self.arguments = arguments
         self.workingDirectory = workingDirectory
@@ -25,6 +30,19 @@ public struct TestProfile: Sendable, Equatable, Codable {
         self.environment = environment
         self.writesWorktree = writesWorktree
         self.outputLimit = outputLimit
+    }
+
+    /// Changed paths that are test inputs: under a declared prefix, a file the profile names in
+    /// its arguments or working directory, or a Git hook location.
+    public func testInputs(in changed: [String]) -> [String] {
+        let named = Set((arguments + [workingDirectory]).map { $0.hasPrefix("./") ? String($0.dropFirst(2)) : $0 })
+        return changed.filter { path in
+            named.contains(path)
+                || (testInputPrefixes + [".githooks", ".husky", ".github/workflows"]).contains { prefix in
+                    let trimmed = prefix.hasSuffix("/") ? String(prefix.dropLast()) : prefix
+                    return path == trimmed || path.hasPrefix(trimmed + "/")
+                }
+        }
     }
 }
 
@@ -45,6 +63,13 @@ public struct TestReport: Sendable, Equatable {
     public var process: ProcessResult?
     /// New untracked files the run left in the worktree.
     public var untrackedOutputs: [String]
+
+    public init(commit: String, outcome: TestOutcome, process: ProcessResult?, untrackedOutputs: [String]) {
+        self.commit = commit
+        self.outcome = outcome
+        self.process = process
+        self.untrackedOutputs = untrackedOutputs
+    }
 }
 
 extension GitRunner {
@@ -61,6 +86,10 @@ extension GitRunner {
             return infrastructure("working directory leaves the worktree: \(relative)")
         }
         guard profile.executable.hasPrefix("/") else { return infrastructure("executable is not absolute") }
+        // Checked here: under the sandbox wrapper a missing program would look like a red test.
+        guard FileManager.default.isExecutableFile(atPath: profile.executable) else {
+            return infrastructure("executable not found: \(profile.executable)")
+        }
         do {
             guard try await isClean(worktree, at: commit) else { return infrastructure("worktree is not clean at \(commit)") }
         } catch {
