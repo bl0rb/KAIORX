@@ -19,6 +19,10 @@ Abweichungen vom Plan brauchen ein ADR in `docs/adr/`.
   (journal first). Never run Git or tools in the user's checkout in a way that writes there.
 - Confinement relies on `sandbox-exec` (ADR 0002); keep `Confinement.probe` and the
   isolation tests green.
+- Provider adapters (ADR 0003): never mark a version `liveVerified` in `CompatibilityMatrix`
+  without a passed live run by the account owner. A new Codex version needs a regenerated
+  schema in `Tests/ProvidersTests/Fixtures/` and passing contract tests. Do not run the real
+  `claude`/`codex` binaries for inference or log-in from code or tests.
 
 ## Model escalation
 

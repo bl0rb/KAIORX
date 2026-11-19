@@ -17,7 +17,7 @@ Package C (workspace and safe runner) is also in progress:
 - **ProcessHost:** child processes in their own process group, with an explicit environment, bounded output, stop/drain, and macOS sandbox confinement
 - **Workspace:** host Git with sanitized settings, a locked worktree per attempt outside the user's checkout, results committed to private refs, and test runs
 
-No real Claude Code or Codex adapters exist yet. The Xcode app is not set up yet; until then, `kaiorx-dev` is a development CLI.
+Package D (provider adapters) is in progress offline. Adapters exist for Claude Code (headless `stream-json`) and the Codex App Server (stdio JSON-RPC). They are tested against fixture programs, and the Codex messages are checked against the protocol schema of the installed version. Automatic runs stay blocked until the live, user-authorized subscription runs of package A pass. See `docs/adr/0003-anbieteradapter-offline.md`. The Xcode app is not set up yet; until then, `kaiorx-dev` is a development CLI.
 
 ## Build and test
 

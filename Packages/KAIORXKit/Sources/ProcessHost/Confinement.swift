@@ -11,8 +11,8 @@ public struct Confinement: Sendable, Equatable {
     /// the hidden worktrees folder).
     public var visibleRoots: [String]
     public var allowsNetwork: Bool
-    /// Exact paths that stay read-only even inside a writable root (for example a worktree's
-    /// `.git` link file).
+    /// Paths that stay read-only even inside a writable root (for example a worktree's `.git`
+    /// link file); a trailing `/` protects a whole folder.
     public var protectedPaths: [String]
 
     public init(
@@ -40,8 +40,11 @@ public struct Confinement: Sendable, Equatable {
             lines.append("(allow file-read* \(readable.map { "(subpath \(Self.quoted($0)))" }.joined(separator: " ")))")
         }
         lines.append("(allow file-write* \(writable.map { "(subpath \(Self.quoted($0)))" }.joined(separator: " ")))")
-        for path in protectedPaths.map(Self.resolved) {
-            lines.append("(deny file-write* (literal \(Self.quoted(path))))")
+        for path in protectedPaths {
+            // A trailing slash protects a whole folder.
+            let resolved = Self.resolved(path.hasSuffix("/") ? String(path.dropLast()) : path)
+            let filter = path.hasSuffix("/") ? "subpath" : "literal"
+            lines.append("(deny file-write* (\(filter) \(Self.quoted(resolved))))")
         }
         if !allowsNetwork {
             lines.append("(deny network*)")

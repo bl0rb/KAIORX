@@ -268,3 +268,22 @@ func isAlive(_ pid: pid_t) -> Bool {
         #expect(result.stdout.text == "0")
     }
 }
+
+@Suite struct StopAndProtectionTests {
+    @Test func stopCanSkipTheInterrupt() async throws {
+        let dir = try scratchDirectory()
+        let process = try await ProcessHost().launch(LaunchSpec(executable: "/bin/sleep", arguments: ["30"], workingDirectory: dir))
+        await process.stop(grace: .milliseconds(500), interruptFirst: false)
+        #expect(await process.wait().termination == .signaled(SIGTERM))
+    }
+
+    @Test func protectedFolderStaysReadOnlyInsideAWritableRoot() async throws {
+        let state = try scratchDirectory()
+        try FileManager.default.createDirectory(atPath: state + "/rules", withIntermediateDirectories: true)
+        let script = "echo x > rules/new && echo RULES; echo y > config.toml && echo CONFIG; echo z > sessions && echo sessions-ok; exit 0"
+        let result = try await ProcessHost().run(shell(script, in: state) {
+            $0.confinement = Confinement(writableRoots: [state], protectedPaths: [state + "/rules/", state + "/config.toml"])
+        })
+        #expect(result.stdout.text == "sessions-ok\n")
+    }
+}

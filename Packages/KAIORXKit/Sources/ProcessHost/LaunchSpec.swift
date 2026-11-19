@@ -23,13 +23,17 @@ public struct LaunchSpec: Sendable, Equatable {
     public var confinement: Confinement?
     /// Also deliver output chunks while the process runs.
     public var streamsOutput: Bool
+    /// Keep stdin open for `ManagedProcess.send` (for example JSON-RPC); `standardInput`, if
+    /// set, is written first.
+    public var interactiveInput: Bool
 
     public init(
         executable: String, arguments: [String] = [], workingDirectory: String,
         environment: [String: String] = [:], standardInput: Data? = nil, outputLimit: Int = 1 << 20,
         timeout: Duration? = nil, stopGrace: Duration = .seconds(2), confinement: Confinement? = nil,
-        streamsOutput: Bool = false
+        streamsOutput: Bool = false, interactiveInput: Bool = false
     ) {
+        self.interactiveInput = interactiveInput
         self.executable = executable
         self.arguments = arguments
         self.workingDirectory = workingDirectory
@@ -118,4 +122,7 @@ public enum ProcessHostError: Error, Equatable, Sendable {
     /// Empty key, `=` or NUL in a key, or NUL in a value: it could shadow another variable.
     case invalidEnvironment(String)
     case invalidArgument(String)
+    /// `send` on a process without interactive input, or after `closeInput`.
+    case inputClosed
+    case writeFailed(errno: Int32)
 }

@@ -524,3 +524,18 @@ extension Dictionary {
         #expect(GitRunner.isGitMetadataComponent("GIT~1:x"))
     }
 }
+
+@Suite struct AgentProfileTests {
+    @Test func keychainIsVisibleOnlyWhenTheCLINeedsIt() {
+        let layout = WorkspaceLayout(root: "/tmp/kaiorx-layout")
+        let claude = RoleProfile.agentCLI(stateDirectory: "/tmp/state", writesWorktree: true, protectedStateFiles: RoleProfile.claudeStateFiles, needsKeychain: true)
+            .confinement(worktree: "/tmp/w", runTemporaryDirectory: "/tmp/t", layout: layout, home: "/Users/x")
+        let codex = RoleProfile.agentCLI(stateDirectory: "/tmp/state", writesWorktree: true, protectedStateFiles: RoleProfile.codexStateFiles)
+            .confinement(worktree: "/tmp/w", runTemporaryDirectory: "/tmp/t", layout: layout, home: "/Users/x")
+        #expect(!claude.hiddenRoots.contains("/Users/x/Library/Keychains"))
+        #expect(codex.hiddenRoots.contains("/Users/x/Library/Keychains"))
+        #expect(codex.protectedPaths.contains("/tmp/state/config.toml"))
+        #expect(codex.protectedPaths.contains("/tmp/state/rules/"))
+        #expect(claude.allowsNetwork && codex.allowsNetwork)
+    }
+}

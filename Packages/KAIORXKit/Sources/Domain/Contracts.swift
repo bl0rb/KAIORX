@@ -91,14 +91,19 @@ public struct AttemptSpec: Sendable, Codable, Equatable {
     public var effectiveModel: String
     public var effort: String?
     public var workingDirectory: String?
+    /// Paths (relative to the working directory) an author may write; `nil`: the whole
+    /// working directory.
+    public var writablePaths: [String]?
     public var deadline: Int64?
     public var prompt: String
 
     public init(
         attemptID: AttemptID, taskID: TaskID, projectID: ProjectID, role: AttemptRole,
         provider: ProviderKind, runMode: RunMode, modelProfile: String, effectiveModel: String,
-        effort: String? = nil, workingDirectory: String? = nil, deadline: Int64? = nil, prompt: String
+        effort: String? = nil, workingDirectory: String? = nil, writablePaths: [String]? = nil, deadline: Int64? = nil,
+        prompt: String
     ) {
+        self.writablePaths = writablePaths
         self.attemptID = attemptID
         self.taskID = taskID
         self.projectID = projectID

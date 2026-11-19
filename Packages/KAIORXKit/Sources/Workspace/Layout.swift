@@ -45,6 +45,18 @@ public enum RoleProfile: Sendable, Equatable {
     case reviewer
     /// Runs a test profile; writes the worktree only when the profile allows it.
     case testRunner(writesWorktree: Bool)
+    /// The provider CLI itself (Claude Code, Codex App Server): writes its worktree and its own
+    /// state folder (login, sessions) and needs network to its provider. `needsKeychain` keeps
+    /// the login keychain readable (Claude keeps its subscription login there).
+    /// `protectedStateFiles` (relative to the state folder, `codexStateFiles` /
+    /// `claudeStateFiles`) stay read-only, so the agent cannot change its own configuration. Claude's profile has no command-running tools; Codex sandboxes the
+    /// commands it runs itself.
+    case agentCLI(stateDirectory: String, writesWorktree: Bool, protectedStateFiles: [String] = [], needsKeychain: Bool = false)
+
+    /// Files in `CODEX_HOME` that configure Codex itself (instructions, rules, skills).
+    public static let codexStateFiles = ["config.toml", "AGENTS.md", "rules/", "skills/", "prompts/"]
+    /// Files in `CLAUDE_CONFIG_DIR` that configure Claude Code itself.
+    public static let claudeStateFiles = ["settings.json", "settings.local.json", "CLAUDE.md", "agents/", "skills/", "commands/", "hooks/", "plugins/"]
 
     public func confinement(
         worktree: String, runTemporaryDirectory: String, layout: WorkspaceLayout,
@@ -55,13 +67,24 @@ public enum RoleProfile: Sendable, Equatable {
         case .author: [worktree, runTemporaryDirectory]
         case .reviewer: [runTemporaryDirectory]
         case .testRunner(let writesWorktree): writesWorktree ? [worktree, runTemporaryDirectory] : [runTemporaryDirectory]
+        case .agentCLI(let state, let writesWorktree, _, _): (writesWorktree ? [worktree] : []) + [runTemporaryDirectory, state]
         }
-        let secrets = WorkspaceLayout.secretHomePaths.map { home + "/" + $0 }
+        var visible = [worktree]
+        var network = false
+        // The link file decides which repository host Git would use; nobody else writes it.
+        var protected = [worktree + "/.git"]
+        var secretPaths = WorkspaceLayout.secretHomePaths
+        if case .agentCLI(let state, _, let files, let keychain) = self {
+            visible.append(state)
+            network = true
+            protected += files.map { state + "/" + $0 }
+            // Only for a CLI that keeps its login there (Claude Code).
+            if keychain { secretPaths.removeAll { $0 == "Library/Keychains" } }
+        }
+        let secrets = secretPaths.map { home + "/" + $0 }
         return Confinement(
             writableRoots: writable, hiddenRoots: [layout.root] + secrets + extraHidden,
-            visibleRoots: [worktree], allowsNetwork: false,
-            // The link file decides which repository host Git would use; nobody else writes it.
-            protectedPaths: [worktree + "/.git"]
+            visibleRoots: visible, allowsNetwork: network, protectedPaths: protected
         )
     }
 }

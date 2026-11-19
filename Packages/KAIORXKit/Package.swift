@@ -17,8 +17,8 @@ let package = Package(
             dependencies: ["Domain"],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
-        // Adapter contract and the deterministic fake adapter.
-        .target(name: "Providers", dependencies: ["Domain"]),
+        // Adapter contract, the deterministic fake, and the Claude Code and Codex adapters.
+        .target(name: "Providers", dependencies: ["Domain", "ProcessHost"]),
         // Child processes: own process group, explicit environment, bounded output, stop/drain,
         // optional sandbox confinement (ADR 0002).
         .target(name: "ProcessHost"),
@@ -31,8 +31,10 @@ let package = Package(
 
         .testTarget(name: "DomainTests", dependencies: ["Domain"]),
         .testTarget(name: "StorageTests", dependencies: ["Domain", "Storage"]),
-        .testTarget(name: "ProvidersTests", dependencies: ["Domain", "Providers"]),
-        .testTarget(name: "OrchestrationTests", dependencies: ["Domain", "Storage", "Providers", "Orchestration", "ProcessHost", "Workspace"]),
+        // Test support: fixture programs that speak the provider protocols, and a JSON Schema checker.
+        .target(name: "ProviderFixtures", dependencies: ["Providers"], path: "Tests/ProviderFixtures"),
+        .testTarget(name: "ProvidersTests", dependencies: ["Domain", "Providers", "ProcessHost", "ProviderFixtures"], exclude: ["Fixtures"]),
+        .testTarget(name: "OrchestrationTests", dependencies: ["Domain", "Storage", "Providers", "Orchestration", "ProcessHost", "Workspace", "ProviderFixtures"]),
         .testTarget(name: "ProcessHostTests", dependencies: ["ProcessHost"]),
         .testTarget(name: "WorkspaceTests", dependencies: ["ProcessHost", "Workspace"]),
     ]

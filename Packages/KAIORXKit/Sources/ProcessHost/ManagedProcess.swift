@@ -21,10 +21,14 @@ public final class ManagedProcess: Sendable {
         var stdout = CapturedOutput()
         var stderr = CapturedOutput()
         var cutOffRequested = false
+        /// Host end of an interactive stdin pipe.
+        var input: Int32?
     }
 
     private let state = Mutex(State())
     private let readerDone = DispatchSemaphore(value: 0)
+    /// Serialises writes to an interactive stdin, off the caller's thread.
+    private let inputQueue = DispatchQueue(label: "kaiorx.process.input")
     private let started = ContinuousClock.now
     private let outputLimit: Int
 
@@ -70,7 +74,7 @@ public final class ManagedProcess: Sendable {
         let stdoutPipe = try pipeOrCleanUp(sigpipeSafe: false)
         let stderrPipe = try pipeOrCleanUp(sigpipeSafe: false)
         // Only the host writes stdin; a child that exits early must not kill it with SIGPIPE.
-        let stdinPipe = spec.standardInput == nil ? nil : try pipeOrCleanUp(sigpipeSafe: true)
+        let stdinPipe = spec.standardInput == nil && !spec.interactiveInput ? nil : try pipeOrCleanUp(sigpipeSafe: true)
 
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
@@ -131,11 +135,16 @@ public final class ManagedProcess: Sendable {
         }
         let process = ManagedProcess(pid: pid, outputLimit: max(0, spec.outputLimit), output: stream)
 
-        if let stdinPipe, let data = spec.standardInput {
+        if let stdinPipe {
             let fd = stdinPipe.write
-            Thread.detachNewThread {
-                writeAll(data, to: fd)
-                close(fd)
+            if spec.interactiveInput {
+                process.state.withLock { $0.input = fd }
+                if let data = spec.standardInput { process.inputQueue.async { _ = writeAll(data, to: fd) } }
+            } else if let data = spec.standardInput {
+                Thread.detachNewThread {
+                    _ = writeAll(data, to: fd)
+                    close(fd)
+                }
             }
         }
         let (outFD, errFD) = (stdoutPipe.read, stderrPipe.read)
@@ -161,11 +170,34 @@ public final class ManagedProcess: Sendable {
 
     public var hasExited: Bool { state.withLock { $0.reaped } }
 
+    /// Writes to an interactive stdin. Writes are ordered and never block the caller's thread.
+    public func send(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            inputQueue.async { [self] in
+                guard let fd = state.withLock({ $0.input }) else {
+                    continuation.resume(throwing: ProcessHostError.inputClosed)
+                    return
+                }
+                let error = writeAll(data, to: fd)
+                if error == 0 { continuation.resume() } else { continuation.resume(throwing: ProcessHostError.writeFailed(errno: error)) }
+            }
+        }
+    }
+
+    /// Closes an interactive stdin (the child sees EOF) after pending writes.
+    public func closeInput() {
+        inputQueue.async { [self] in
+            if let fd = state.withLock({ state -> Int32? in defer { state.input = nil }; return state.input }) { close(fd) }
+        }
+    }
+
     /// Interrupt, then terminate, then kill the process group, waiting `grace` between steps.
     /// Returns at once if the process has already been reaped.
-    public func stop(reason: StopReason = .requested, grace: Duration = .seconds(2)) async {
+    /// `interruptFirst: false` skips SIGINT when the caller already asked politely (for example
+    /// over a protocol) and waited.
+    public func stop(reason: StopReason = .requested, grace: Duration = .seconds(2), interruptFirst: Bool = true) async {
         state.withLock { if $0.stopReason == nil, !$0.reaped { $0.stopReason = reason } }
-        for signal in [SIGINT, SIGTERM] {
+        for signal in interruptFirst ? [SIGINT, SIGTERM] : [SIGTERM] {
             guard signalGroup(signal) else { return }
             if await waitForExit(within: grace) { return }
         }
@@ -247,6 +279,7 @@ public final class ManagedProcess: Sendable {
             while waitpid(pid, &status, 0) < 0, errno == EINTR {}
             state.reaped = true
         }
+        closeInput()
         // Output may stay open if a process outside the group kept a pipe.
         var cutOff = false
         if readerDone.wait(timeout: .now() + 2) == .timedOut {
@@ -293,18 +326,20 @@ private func makePipe(sigpipeSafe: Bool) throws -> (read: Int32, write: Int32) {
     return (fds[0], fds[1])
 }
 
-private func writeAll(_ data: Data, to fd: Int32) {
+/// Returns 0 or the errno of the failed write.
+private func writeAll(_ data: Data, to fd: Int32) -> Int32 {
     data.withUnsafeBytes { buffer in
-        guard var pointer = buffer.baseAddress else { return }
+        guard var pointer = buffer.baseAddress else { return 0 }
         var remaining = buffer.count
         while remaining > 0 {
             let written = write(fd, pointer, remaining)
             if written < 0 {
                 if errno == EINTR { continue }
-                return
+                return errno
             }
             remaining -= written
             pointer += written
         }
+        return 0
     }
 }
