@@ -5,7 +5,7 @@ let package = Package(
     name: "KAIORXKit",
     platforms: [.macOS(.v15)],
     products: [
-        .library(name: "KAIORXKit", targets: ["Domain", "Storage", "Providers", "Orchestration"]),
+        .library(name: "KAIORXKit", targets: ["Domain", "Storage", "Providers", "Orchestration", "ProcessHost", "Workspace"]),
         .executable(name: "kaiorx-dev", targets: ["kaiorx-dev"]),
     ],
     targets: [
@@ -19,14 +19,21 @@ let package = Package(
         ),
         // Adapter contract and the deterministic fake adapter.
         .target(name: "Providers", dependencies: ["Domain"]),
+        // Child processes: own process group, explicit environment, bounded output, stop/drain,
+        // optional sandbox confinement (ADR 0002).
+        .target(name: "ProcessHost"),
+        // Host Git: worktrees per attempt, sealed results under private refs, test runs.
+        .target(name: "Workspace", dependencies: ["ProcessHost"]),
         // Starts attempts, persists their event streams, recovers after restart.
-        .target(name: "Orchestration", dependencies: ["Domain", "Storage", "Providers"]),
+        .target(name: "Orchestration", dependencies: ["Domain", "Storage", "Providers", "ProcessHost", "Workspace"]),
         // Development CLI until the Xcode app exists: open projects, start fake runs, list active runs.
         .executableTarget(name: "kaiorx-dev", dependencies: ["Domain", "Storage", "Providers", "Orchestration"]),
 
         .testTarget(name: "DomainTests", dependencies: ["Domain"]),
         .testTarget(name: "StorageTests", dependencies: ["Domain", "Storage"]),
         .testTarget(name: "ProvidersTests", dependencies: ["Domain", "Providers"]),
-        .testTarget(name: "OrchestrationTests", dependencies: ["Domain", "Storage", "Providers", "Orchestration"]),
+        .testTarget(name: "OrchestrationTests", dependencies: ["Domain", "Storage", "Providers", "Orchestration", "ProcessHost", "Workspace"]),
+        .testTarget(name: "ProcessHostTests", dependencies: ["ProcessHost"]),
+        .testTarget(name: "WorkspaceTests", dependencies: ["ProcessHost", "Workspace"]),
     ]
 )

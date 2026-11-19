@@ -2,7 +2,7 @@
 /// consent, accounts, plans, worktrees, budgets, candidates and Git operations follow as new
 /// migrations with their packages; applied migrations are never edited.
 public enum CoreSchema {
-    public static let migrations: [Migration] = [v1]
+    public static let migrations: [Migration] = [v1, v2]
 
     static let v1 = Migration(version: 1, name: "core", sql: """
         CREATE TABLE project (
@@ -113,5 +113,61 @@ public enum CoreSchema {
         CREATE INDEX event_project_seq ON event (project_id, seq);
         CREATE UNIQUE INDEX event_attempt_ordinal ON event (attempt_id, ordinal) WHERE attempt_id IS NOT NULL;
         CREATE UNIQUE INDEX event_attempt_dedup ON event (attempt_id, dedup_key) WHERE dedup_key IS NOT NULL;
+        """)
+
+    /// Package C: Git identity, worktrees and the journal of Git side effects.
+    static let v2 = Migration(version: 2, name: "workspace", sql: """
+        ALTER TABLE project ADD COLUMN object_format TEXT CHECK (object_format IN ('sha1', 'sha256'));
+        ALTER TABLE job ADD COLUMN base_oid TEXT;
+        ALTER TABLE job ADD COLUMN integration_ref TEXT;
+        CREATE UNIQUE INDEX job_integration_ref ON job (integration_ref) WHERE integration_ref IS NOT NULL;
+
+        CREATE TABLE worktree (
+            id TEXT PRIMARY KEY NOT NULL,
+            project_id TEXT NOT NULL REFERENCES project(id),
+            attempt_id TEXT UNIQUE REFERENCES attempt(id),
+            path_token TEXT NOT NULL UNIQUE,
+            base_oid TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('author', 'reviewer', 'qa', 'integration')),
+            owner_nonce TEXT NOT NULL CHECK (length(owner_nonce) >= 16),
+            state TEXT NOT NULL CHECK (state IN ('preparing', 'ready', 'frozen', 'removing', 'removed', 'needsAttention')),
+            result_oid TEXT,
+            saved_tree TEXT,
+            -- Outcome of sealing: committed result, no change at all, or only rejected changes.
+            seal_status TEXT CHECK (seal_status IN ('committed', 'empty', 'rejectedOnly')),
+            -- JSON object path -> rejection reason, kept with the result.
+            rejected_json TEXT,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            created_at INTEGER NOT NULL,
+            CHECK ((seal_status = 'committed') = (result_oid IS NOT NULL))
+        ) STRICT;
+        CREATE INDEX worktree_project_state ON worktree (project_id, state);
+
+        ALTER TABLE attempt ADD COLUMN worktree_id TEXT REFERENCES worktree(id);
+
+        -- Written and committed before the Git side effect; recovery compares it with Git.
+        CREATE TABLE git_operation (
+            id TEXT PRIMARY KEY NOT NULL,
+            project_id TEXT NOT NULL REFERENCES project(id),
+            worktree_id TEXT REFERENCES worktree(id),
+            kind TEXT NOT NULL CHECK (kind IN ('updateRef', 'addWorktree', 'removeWorktree')),
+            ref TEXT CHECK (ref IS NULL OR ref LIKE 'refs/kaiorx/%'),
+            expected_old TEXT,
+            desired_new TEXT,
+            state TEXT NOT NULL CHECK (state IN ('prepared', 'applied', 'failed', 'needsAttention')),
+            detail TEXT,
+            -- A removal decided with force (no unsaved-work check); recovery finishes it the same way.
+            force INTEGER NOT NULL DEFAULT 0 CHECK (force IN (0, 1)),
+            created_at INTEGER NOT NULL,
+            applied_at INTEGER,
+            CHECK (force = 0 OR kind = 'removeWorktree'),
+            CHECK ((kind = 'updateRef') = (ref IS NOT NULL AND desired_new IS NOT NULL)),
+            CHECK (kind = 'updateRef' OR worktree_id IS NOT NULL)
+        ) STRICT;
+        CREATE UNIQUE INDEX git_operation_open_ref ON git_operation (project_id, ref)
+            WHERE state = 'prepared' AND ref IS NOT NULL;
+        CREATE UNIQUE INDEX git_operation_open_worktree ON git_operation (worktree_id)
+            WHERE state = 'prepared' AND kind <> 'updateRef';
+        CREATE INDEX git_operation_state ON git_operation (state, created_at);
         """)
 }

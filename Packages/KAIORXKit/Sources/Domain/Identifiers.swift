@@ -48,3 +48,8 @@ public typealias AttemptID = TypedID<AttemptTag>
 public typealias CommandID = TypedID<CommandTag>
 public typealias EventID = TypedID<EventTag>
 public typealias ArtifactID = TypedID<ArtifactTag>
+
+public enum WorktreeTag {}
+public enum GitOperationTag {}
+public typealias WorktreeID = TypedID<WorktreeTag>
+public typealias GitOperationID = TypedID<GitOperationTag>

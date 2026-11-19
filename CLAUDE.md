@@ -14,6 +14,11 @@ Abweichungen vom Plan brauchen ein ADR in `docs/adr/`.
   Without `--db` it writes to the real Application Support database.
 - Applied migrations in `CoreSchema` are never edited; schema changes are new migrations.
 - No Xcode on the dev machine yet: SwiftUI macros do not build, so no app target.
+- Child processes only through `ProcessHost` (absolute executable, explicit environment);
+  Git only through `GitRunner` and Git side effects only through `WorkspaceService`
+  (journal first). Never run Git or tools in the user's checkout in a way that writes there.
+- Confinement relies on `sandbox-exec` (ADR 0002); keep `Confinement.probe` and the
+  isolation tests green.
 
 ## Model escalation
 

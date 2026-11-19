@@ -48,6 +48,9 @@ public enum CommandAction: Sendable, Codable, Equatable {
     /// An author attempt needs an active job and a `ready` task, which moves to `running`.
     case reserveAttempt(AttemptReservation)
     case transitionAttempt(id: AttemptID, to: AttemptState, expectedVersion: Int, errorClass: String?)
+    /// Records the Git identity of a project folder. A project keeps its first identity; a
+    /// different repository at the same folder is refused.
+    case attachRepository(projectID: ProjectID, gitCommonIdentity: String, objectFormat: String)
 
     // Stable JSON key for the persisted request digest instead of the synthesized `_0`.
     enum ReserveAttemptCodingKeys: String, CodingKey { case _0 = "reservation" }
@@ -61,6 +64,7 @@ public enum CommandAction: Sendable, Codable, Equatable {
         case .transitionTask: "transitionTask"
         case .reserveAttempt: "reserveAttempt"
         case .transitionAttempt: "transitionAttempt"
+        case .attachRepository: "attachRepository"
         }
     }
 }

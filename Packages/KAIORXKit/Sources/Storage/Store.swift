@@ -19,6 +19,11 @@ public enum StoreError: Error, Equatable, Sendable {
     /// `running` and its exits to `ready`/`resultReady` belong to the author attempt; a command
     /// may not move a task there.
     case taskManagedByAttempt(taskID: TaskID, from: TaskState, to: TaskState)
+    /// The folder now holds a different repository than the one first attached.
+    case repositoryMismatch(projectID: ProjectID, recorded: String, found: String)
+    /// Another prepared Git operation for the same ref or worktree is still open.
+    case gitOperationOpen(String)
+    case gitOperationNotPrepared(GitOperationID)
     /// A provider event arrived for an attempt that has not been started.
     case unexpectedEvent(attemptID: AttemptID, state: AttemptState)
     case corruptRow(String)
@@ -72,7 +77,7 @@ public actor Store {
     public nonisolated let migrationReport: MigrationReport
     private var db: SQLiteConnection?
     private var lockDescriptor: Int32
-    private let clock: @Sendable () -> Int64
+    let clock: @Sendable () -> Int64
 
     public init(
         path: String,
@@ -85,7 +90,7 @@ public actor Store {
         // processes started later must not inherit (and keep holding) the lock.
         let lock = open(Self.lockPath(for: path), O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard lock >= 0 else { throw SQLiteError(code: 14, message: "Cannot open lock file: errno \(errno)") }
-        guard flock(lock, LOCK_EX | LOCK_NB) == 0 else {
+        guard Self.acquireLock(lock) else {
             Darwin.close(lock)
             throw StoreError.databaseInUse(path: path)
         }
@@ -103,6 +108,19 @@ public actor Store {
         self.lockDescriptor = lock
         self.path = path
         self.clock = clock
+    }
+
+    /// `flock` with a short retry. A child being spawned on another thread briefly holds a copy of
+    /// every open file description, even `O_CLOEXEC` ones, until its exec; a store reopened in that
+    /// window would otherwise see its own released lock as taken. A real second process keeps the
+    /// lock and is still refused.
+    static func acquireLock(_ descriptor: Int32, attempts: Int = 100) -> Bool {
+        for _ in 0..<attempts {
+            if flock(descriptor, LOCK_EX | LOCK_NB) == 0 { return true }
+            guard errno == EWOULDBLOCK || errno == EINTR else { return false }
+            usleep(10_000)
+        }
+        return false
     }
 
     static func lockPath(for path: String) -> String {
@@ -129,6 +147,8 @@ public actor Store {
             lockDescriptor = -1
         }
     }
+
+    func currentTime() -> Int64 { clock() }
 
     func connection() throws -> SQLiteConnection {
         guard let db else { throw StoreError.closed }
@@ -292,6 +312,24 @@ public actor Store {
             }
             return reservation.attemptID.uuidString
 
+        case let .attachRepository(projectID, identity, objectFormat):
+            let recorded = try db.query(
+                "SELECT git_common_identity FROM project WHERE id = ?", [.text(projectID.uuidString)]
+            ) { (row: SQLRow) -> String? in row.text(0) }
+            guard let current = recorded.first else { throw StoreError.notFound(entity: "project", id: projectID.uuidString) }
+            if let current, current != identity {
+                throw StoreError.repositoryMismatch(projectID: projectID, recorded: current, found: identity)
+            }
+            try db.run(
+                "UPDATE project SET git_common_identity = ?, object_format = ? WHERE id = ?",
+                [.text(identity), .text(objectFormat), .text(projectID.uuidString)]
+            )
+            try appendEvent(
+                db, kind: .repositoryAttached, projectID: projectID.uuidString, taskID: nil, attemptID: nil,
+                payload: Canonical.encode(["gitCommonIdentity": identity, "objectFormat": objectFormat]), dedupKey: nil, now: now
+            )
+            return projectID.uuidString
+
         case let .transitionAttempt(id, target, expectedVersion, errorClass):
             let attempt = try loadAttempt(db, id)
             try checkVersion(entity: "attempt", id: id.uuidString, expected: expectedVersion, actual: attempt.record.version)
@@ -406,9 +444,12 @@ public actor Store {
     // MARK: Queries
 
     public func projects() throws -> [ProjectRecord] {
-        try connection().query("SELECT id, name, root_locator, created_at FROM project ORDER BY created_at, id") {
+        try connection().query(
+            "SELECT id, name, root_locator, git_common_identity, object_format, created_at FROM project ORDER BY created_at, id"
+        ) {
             ProjectRecord(id: try parseID($0.requiredText(0)), name: try $0.requiredText(1),
-                          rootLocator: try $0.requiredText(2), createdAt: $0.int(3))
+                          rootLocator: try $0.requiredText(2), gitCommonIdentity: $0.text(3), objectFormat: $0.text(4),
+                          createdAt: $0.int(5))
         }
     }
 
@@ -486,19 +527,19 @@ public actor Store {
 
     // MARK: Helpers
 
-    private struct StateChange: Encodable {
+    struct StateChange: Encodable {
         var entityID: String
         var from: String
         var to: String
         var reason: String?
     }
 
-    private struct LoadedTask {
+    struct LoadedTask {
         var record: TaskRecord
         var projectID: String
     }
 
-    private struct LoadedAttempt {
+    struct LoadedAttempt {
         var record: AttemptRecord
         var projectID: String
     }
@@ -598,7 +639,7 @@ public actor Store {
     }
 
     @discardableResult
-    private func appendEvent(
+    func appendEvent(
         _ db: SQLiteConnection, kind: EventKind, projectID: String, taskID: String?, attemptID: String?,
         payload: Data?, dedupKey: String?, now: Int64
     ) throws -> Int64 {
@@ -638,25 +679,25 @@ public actor Store {
         )
     }
 
-    private func requireExists(_ db: SQLiteConnection, table: String, id: String) throws {
+    func requireExists(_ db: SQLiteConnection, table: String, id: String) throws {
         let found = try db.query("SELECT 1 FROM \(table) WHERE id = ?", [.text(id)]) { $0.int(0) }
         if found.isEmpty { throw StoreError.notFound(entity: table, id: id) }
     }
 
-    private func checkVersion(entity: String, id: String, expected: Int, actual: Int) throws {
+    func checkVersion(entity: String, id: String, expected: Int, actual: Int) throws {
         guard expected == actual else {
             throw StoreError.versionConflict(entity: entity, id: id, expected: expected, actual: actual)
         }
     }
 
-    private func loadJob(_ db: SQLiteConnection, _ id: JobID) throws -> JobRecord {
+    func loadJob(_ db: SQLiteConnection, _ id: JobID) throws -> JobRecord {
         guard let job = try db.query("SELECT \(Self.jobColumns) FROM job WHERE id = ?", [.text(id.uuidString)], {
             try Self.job(from: $0)
         }).first else { throw StoreError.notFound(entity: "job", id: id.uuidString) }
         return job
     }
 
-    private func loadTask(_ db: SQLiteConnection, _ id: TaskID) throws -> LoadedTask {
+    func loadTask(_ db: SQLiteConnection, _ id: TaskID) throws -> LoadedTask {
         guard let task = try db.query(
             "SELECT \(Self.taskColumnList("t")), j.project_id FROM task t JOIN job j ON j.id = t.job_id WHERE t.id = ?",
             [.text(id.uuidString)], { LoadedTask(record: try Self.task(from: $0), projectID: try $0.requiredText(8)) }
@@ -664,26 +705,26 @@ public actor Store {
         return task
     }
 
-    private func loadAttempt(_ db: SQLiteConnection, _ id: AttemptID) throws -> LoadedAttempt {
+    func loadAttempt(_ db: SQLiteConnection, _ id: AttemptID) throws -> LoadedAttempt {
         guard let attempt = try db.query(
             """
             SELECT \(Self.attemptColumnList("a")), j.project_id
             FROM attempt a JOIN task t ON t.id = a.task_id JOIN job j ON j.id = t.job_id
             WHERE a.id = ?
             """,
-            [.text(id.uuidString)], { LoadedAttempt(record: try Self.attempt(from: $0), projectID: try $0.requiredText(16)) }
+            [.text(id.uuidString)], { LoadedAttempt(record: try Self.attempt(from: $0), projectID: try $0.requiredText(17)) }
         ).first else { throw StoreError.notFound(entity: "attempt", id: id.uuidString) }
         return attempt
     }
 
-    private static let jobColumns = "id, project_id, goal_artifact_id, state, state_reason, resume_state, version, created_at"
+    private static let jobColumns = "id, project_id, goal_artifact_id, state, state_reason, resume_state, version, created_at, base_oid, integration_ref"
 
     private static func job(from row: SQLRow) throws -> JobRecord {
         JobRecord(
             id: try parseID(row.requiredText(0)), projectID: try parseID(row.requiredText(1)),
             goalArtifactID: try parseID(row.requiredText(2)), state: try parseEnum(row.requiredText(3)),
             stateReason: row.text(4), resumeState: try row.text(5).map(parseEnum),
-            version: Int(row.int(6)), createdAt: row.int(7)
+            baseOID: row.text(8), integrationRef: row.text(9), version: Int(row.int(6)), createdAt: row.int(7)
         )
     }
 
@@ -710,7 +751,7 @@ public actor Store {
         let p = alias.map { "\($0)." } ?? ""
         return [
             "id", "task_id", "role", "ordinal", "provider", "mode", "model", "effort", "state", "spec_digest",
-            "session_handle", "reserved_at", "started_at", "ended_at", "error_class", "version",
+            "session_handle", "reserved_at", "started_at", "ended_at", "error_class", "version", "worktree_id",
         ].map { p + $0 }.joined(separator: ", ")
     }
 
@@ -722,17 +763,17 @@ public actor Store {
             model: try row.requiredText(6), effort: row.text(7), state: try parseEnum(row.requiredText(8)),
             specDigest: try row.requiredText(9), sessionHandle: row.text(10), reservedAt: row.int(11),
             startedAt: row.optionalInt(12), endedAt: row.optionalInt(13), errorClass: row.text(14),
-            version: Int(row.int(15))
+            worktreeID: try row.text(16).map(parseID), version: Int(row.int(15))
         )
     }
 }
 
-private func parseID<Tag>(_ text: String) throws -> TypedID<Tag> {
+func parseID<Tag>(_ text: String) throws -> TypedID<Tag> {
     guard let id = TypedID<Tag>(string: text) else { throw StoreError.corruptRow("Invalid ID \(text)") }
     return id
 }
 
-private func parseEnum<T: RawRepresentable>(_ text: String) throws -> T where T.RawValue == String {
+func parseEnum<T: RawRepresentable>(_ text: String) throws -> T where T.RawValue == String {
     guard let value = T(rawValue: text) else { throw StoreError.corruptRow("Unknown \(T.self) value \(text)") }
     return value
 }

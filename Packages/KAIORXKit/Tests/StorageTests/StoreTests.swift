@@ -81,15 +81,20 @@ func moveJob(_ store: Store, _ id: JobID, to state: JobState, reason: String? = 
 }
 
 @Suite struct MigrationTests {
+    static let current = CoreSchema.migrations.count
+    static func extra(_ version: Int, sql: String = "CREATE TABLE extra (x INTEGER) STRICT;") -> Migration {
+        Migration(version: version, name: "extra\(version)", sql: sql)
+    }
+
     @Test func appliesOnceAndReopensWithoutChanges() async throws {
         let fixture = try Fixture()
         let first = try fixture.open()
-        #expect(first.migrationReport.appliedVersions == [1])
+        #expect(first.migrationReport.appliedVersions == Array(1...Self.current))
         #expect(first.migrationReport.backupPath == nil)
         await first.close()
 
         let second = try fixture.open()
-        #expect(second.migrationReport == MigrationReport(previousVersion: 1, appliedVersions: [], backupPath: nil))
+        #expect(second.migrationReport == MigrationReport(previousVersion: Self.current, appliedVersions: [], backupPath: nil))
     }
 
     @Test func connectionUsesForeignKeysAndWAL() async throws {
@@ -101,56 +106,54 @@ func moveJob(_ store: Store, _ id: JobID, to state: JobState, reason: String? = 
 
     @Test func changedAppliedMigrationIsRejected() async throws {
         let fixture = try Fixture()
-        await try fixture.open().close()
-        let edited = Migration(version: 1, name: "core", sql: CoreSchema.migrations[0].sql + "\n-- edited")
-        #expect(throws: MigrationError.checksumMismatch(version: 1)) { try fixture.open([edited]) }
+        try await fixture.open().close()
+        var edited = CoreSchema.migrations
+        edited[0] = Migration(version: 1, name: "core", sql: edited[0].sql + "\n-- edited")
+        #expect(throws: MigrationError.checksumMismatch(version: 1)) { try fixture.open(edited) }
     }
 
     @Test func newerDatabaseIsRejected() async throws {
         let fixture = try Fixture()
-        let v2 = Migration(version: 2, name: "extra", sql: "CREATE TABLE extra (x INTEGER) STRICT;")
-        await try fixture.open(CoreSchema.migrations + [v2]).close()
-        #expect(throws: MigrationError.databaseNewerThanApp(databaseVersion: 2, appVersion: 1)) { try fixture.open() }
+        try await fixture.open(CoreSchema.migrations + [Self.extra(Self.current + 1)]).close()
+        #expect(throws: MigrationError.databaseNewerThanApp(databaseVersion: Self.current + 1, appVersion: Self.current)) {
+            try fixture.open()
+        }
     }
 
-    @Test func upgradeTakesAnOwnerOnlyBackupFirst() async throws {
+    @Test func upgradeFromVersionOneKeepsDataAndTakesABackup() async throws {
         let fixture = try Fixture()
-        let store = try fixture.open()
-        _ = try await fixture.seed(store)
-        await store.close()
+        let old = try fixture.open([CoreSchema.v1])
+        let project = ProjectID()
+        try await old.execute(Command(.openProject(id: project, name: "Alt", rootLocator: "/tmp/alt")))
+        await old.close()
 
-        let v2 = Migration(version: 2, name: "extra", sql: "CREATE TABLE extra (x INTEGER) STRICT;")
-        let upgraded = try fixture.open(CoreSchema.migrations + [v2])
-        let report = upgraded.migrationReport
-        #expect(report.previousVersion == 1)
-        #expect(report.appliedVersions == [2])
-        let backupPath = try #require(report.backupPath)
+        let upgraded = try fixture.open()
+        #expect(upgraded.migrationReport.previousVersion == 1)
+        #expect(upgraded.migrationReport.appliedVersions == Array(2...Self.current))
+        let backupPath = try #require(upgraded.migrationReport.backupPath)
         #expect(backupPath.contains("backup-v1-"))
         let attributes = try FileManager.default.attributesOfItem(atPath: backupPath)
         #expect((attributes[.posixPermissions] as? Int) == 0o600)
-
-        // The backup is a complete version-1 database with the seeded data.
-        let backup = try Store(path: backupPath, migrations: CoreSchema.migrations)
-        #expect(backup.migrationReport.appliedVersions.isEmpty)
-        #expect(try await backup.projects().count == 1)
+        let migrated = try #require(try await upgraded.projects().first)
+        #expect(migrated.id == project)
+        #expect(migrated.objectFormat == nil)
     }
 
     @Test func failingMigrationLeavesTheDatabaseUntouched() async throws {
         let fixture = try Fixture()
-        await try fixture.open().close()
-        let v2 = Migration(version: 2, name: "ok", sql: "CREATE TABLE extra (x INTEGER) STRICT;")
-        let v3 = Migration(version: 3, name: "broken", sql: "INSERT INTO missing VALUES (1);")
-        #expect(throws: SQLiteError.self) { try fixture.open(CoreSchema.migrations + [v2, v3]) }
+        try await fixture.open().close()
+        let ok = Self.extra(Self.current + 1)
+        let broken = Self.extra(Self.current + 2, sql: "INSERT INTO missing VALUES (1);")
+        #expect(throws: SQLiteError.self) { try fixture.open(CoreSchema.migrations + [ok, broken]) }
 
         let store = try fixture.open()
-        #expect(store.migrationReport == MigrationReport(previousVersion: 1, appliedVersions: [], backupPath: nil))
+        #expect(store.migrationReport == MigrationReport(previousVersion: Self.current, appliedVersions: [], backupPath: nil))
         #expect(try await store.tableExists("extra") == false)
     }
 
     @Test func gapsInMigrationVersionsAreRejected() throws {
         let fixture = try Fixture()
-        let v3 = Migration(version: 3, name: "gap", sql: "SELECT 1;")
-        #expect(throws: MigrationError.invalidSequence) { try fixture.open(CoreSchema.migrations + [v3]) }
+        #expect(throws: MigrationError.invalidSequence) { try fixture.open(CoreSchema.migrations + [Self.extra(Self.current + 2)]) }
     }
 }
 

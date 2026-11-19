@@ -5,12 +5,20 @@ public struct ProjectRecord: Sendable, Equatable, Codable, Identifiable {
     public var id: ProjectID
     public var name: String
     public var rootLocator: String
+    /// Resolved shared Git directory, once the repository is attached.
+    public var gitCommonIdentity: String?
+    public var objectFormat: String?
     public var createdAt: Int64
 
-    public init(id: ProjectID, name: String, rootLocator: String, createdAt: Int64) {
+    public init(
+        id: ProjectID, name: String, rootLocator: String, gitCommonIdentity: String? = nil,
+        objectFormat: String? = nil, createdAt: Int64
+    ) {
         self.id = id
         self.name = name
         self.rootLocator = rootLocator
+        self.gitCommonIdentity = gitCommonIdentity
+        self.objectFormat = objectFormat
         self.createdAt = createdAt
     }
 }
@@ -23,13 +31,19 @@ public struct JobRecord: Sendable, Equatable, Codable, Identifiable {
     public var stateReason: String?
     /// Stage a side state returns to.
     public var resumeState: JobState?
+    /// Commit the job starts from, and the private ref its integrations advance.
+    public var baseOID: String?
+    public var integrationRef: String?
     public var version: Int
     public var createdAt: Int64
 
     public init(
         id: JobID, projectID: ProjectID, goalArtifactID: ArtifactID, state: JobState,
-        stateReason: String?, resumeState: JobState? = nil, version: Int, createdAt: Int64
+        stateReason: String?, resumeState: JobState? = nil, baseOID: String? = nil, integrationRef: String? = nil,
+        version: Int, createdAt: Int64
     ) {
+        self.baseOID = baseOID
+        self.integrationRef = integrationRef
         self.id = id
         self.projectID = projectID
         self.goalArtifactID = goalArtifactID
@@ -83,14 +97,16 @@ public struct AttemptRecord: Sendable, Equatable, Codable, Identifiable {
     public var startedAt: Int64?
     public var endedAt: Int64?
     public var errorClass: String?
+    public var worktreeID: WorktreeID?
     public var version: Int
 
     public init(
         id: AttemptID, taskID: TaskID, role: AttemptRole, ordinal: Int, provider: ProviderKind,
         mode: RunMode, model: String, effort: String?, state: AttemptState, specDigest: String,
         sessionHandle: String?, reservedAt: Int64, startedAt: Int64?, endedAt: Int64?,
-        errorClass: String?, version: Int
+        errorClass: String?, worktreeID: WorktreeID? = nil, version: Int
     ) {
+        self.worktreeID = worktreeID
         self.id = id
         self.taskID = taskID
         self.role = role
