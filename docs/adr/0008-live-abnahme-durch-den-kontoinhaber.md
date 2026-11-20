@@ -79,6 +79,14 @@ Verbleibende Folge: Befehle, die Codex ohne Rückfrage als sicher ausführt, lau
 
 Außerdem schreibt das Kit die Standardfehlerausgabe des App-Servers getrennt redigiert mit (`…-<schritt>-stderr.log`, die letzten 200 Zeilen; überlange Zeilen nur bis zu einer Wort- oder Pfadgrenze, damit kein privater Wert über zwei Stücke verteilt der Redaktion entgeht), und ein Schritt, der mit einem Fehler endet, behält seine bisherige Aufzeichnung. So wird die Ursache des Abbruchs mit verborgenem Benutzerordner („app server exited“) beim nächsten Lauf sichtbar.
 
+## Dritter Live-Lauf (20. November 2026)
+
+Lauf `20261120-1220-6cff`; kein Anbieter hat bestanden.
+
+- **Codex:** Schreiben (nur `allowed/`, Datei außerhalb abgelehnt, Git unverändert, kein fremder Hook) und Abbruch bestanden jetzt, neben Identität, Anmeldung, Abrechnung und Kontingent. Die Freigabe nahm `/bin/zsh -lc 'cat FACTS.md'` an und lehnte die Ersatzschleife mit `<` ab, wie vorgesehen. Trotzdem endete `cat` wieder mit Exit 127: Die Ursache war nicht (nur) die verschachtelte Sandbox, sondern **`shell_environment_policy.inherit="none"` ohne `PATH`**. Codex startet Befehle ohne Login-Profil, also ohne `path_helper` (nachgestellt: `zsh -c` mit leerem `PATH` findet `cat` nicht, `zsh -lc` schon). Der App-Server bekommt jetzt zusätzlich `shell_environment_policy.set.PATH="/usr/bin:/bin:/usr/sbin:/sbin"`: nur Systemordner, keine des Benutzers. Werkzeuge außerhalb davon (zum Beispiel `rg` aus Homebrew) findet Codex damit nicht; es weicht auf `grep` aus.
+- **Verborgener Benutzerordner:** Der App-Server brach beim Start ab, weil er `CODEX_HOME` nicht auflösen konnte (`failed to canonicalize CODEX_HOME: Operation not permitted`). `realpath` braucht die Metadaten jedes Ordners darüber, und die lagen im verborgenen Benutzerordner. `Confinement` erlaubt jetzt für die Ordner über jedem sichtbaren oder beschreibbaren Pfad nur `file-read-metadata` auf genau diesen Ordner (`literal`), nicht deren Inhalt; Auflisten und Lesen bleiben verweigert (Test mit echtem `sandbox-exec`).
+- **Claude:** `auth status` meldete im Kit wieder `loggedIn: false`, obwohl der Kontoinhaber sich unmittelbar davor im selben Konfigurationsordner angemeldet hatte (Konto in `.claude.json` eingetragen). Die Ursache liegt also im Start durch das Kit (Umgebung oder Isolation beim Zugriff auf den Schlüsselbund) und wird mit einer Vergleichsmessung des Kontoinhabers eingegrenzt.
+
 ## Nicht in A
 
 SIWC-Anmeldung und Token-Erneuerung, natürlicher Ablauf einer Anmeldung (der Widerruf ist der Stellvertreter), absichtlich erschöpftes Kontingent, Installation verwalteter Hooks, gespeicherte erwartete Kontoidentität im Produkt (braucht eine Migration).

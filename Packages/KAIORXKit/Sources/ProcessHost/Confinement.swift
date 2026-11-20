@@ -38,6 +38,12 @@ public struct Confinement: Sendable, Equatable {
         }
         if !readable.isEmpty {
             lines.append("(allow file-read* \(readable.map { "(subpath \(Self.quoted($0)))" }.joined(separator: " ")))")
+            // Resolving a visible path (`realpath`, Codex canonicalizing `CODEX_HOME`) needs the
+            // metadata of each folder above it, also inside a hidden root; never their contents.
+            let ancestors = Set(readable.flatMap(Self.ancestors)).subtracting(readable).sorted()
+            if !ancestors.isEmpty {
+                lines.append("(allow file-read-metadata \(ancestors.map { "(literal \(Self.quoted($0)))" }.joined(separator: " ")))")
+            }
         }
         lines.append("(allow file-write* \(writable.map { "(subpath \(Self.quoted($0)))" }.joined(separator: " ")))")
         for path in protectedPaths {
@@ -68,6 +74,18 @@ public struct Confinement: Sendable, Equatable {
         let parent = url.deletingLastPathComponent().path(percentEncoded: false)
         guard parent != path, !parent.isEmpty else { return path }
         return URL(filePath: resolved(parent)).appending(path: url.lastPathComponent).path(percentEncoded: false)
+    }
+
+    /// The folders above an absolute path, `/` included.
+    static func ancestors(_ path: String) -> [String] {
+        var result: [String] = []
+        var current = path
+        while let slash = current.lastIndex(of: "/") {
+            current = slash == current.startIndex ? "/" : String(current[..<slash])
+            result.append(current)
+            if current == "/" { break }
+        }
+        return result
     }
 
     static func quoted(_ path: String) -> String {

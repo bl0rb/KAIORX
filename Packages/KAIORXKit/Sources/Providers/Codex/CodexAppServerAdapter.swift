@@ -176,8 +176,13 @@ public final class CodexAppServerAdapter: AgentAdapter {
         }
     }
 
-    /// Tool processes inherit no environment.
-    static let baseOverrides = ["-c", #"shell_environment_policy.inherit="none""#]
+    /// Tool processes inherit no environment, only a fixed system `PATH`: Codex runs commands
+    /// without the login profile (second live run: `cat` not found, exit 127), so without it
+    /// no program is found. Only system folders, never the user's.
+    static let baseOverrides = [
+        "-c", #"shell_environment_policy.inherit="none""#,
+        "-c", #"shell_environment_policy.set.PATH="/usr/bin:/bin:/usr/sbin:/sbin""#,
+    ]
 
     /// The documented provider settings for using the ChatGPT plan through SIWC.
     static func siwcOverrides(baseURL: String) -> [String] {

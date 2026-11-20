@@ -712,6 +712,7 @@ func received(_ root: String, _ spec: AttemptSpec) throws -> JSONValue {
         #expect(argv.contains(#"model_providers.kaiorx_siwc.env_key="ACCESS_TOKEN""#))
         #expect(argv.contains("model_providers.kaiorx_siwc.requires_openai_auth=false"))
         #expect(argv.contains(#"shell_environment_policy.inherit="none""#))
+        #expect(argv.contains(#"shell_environment_policy.set.PATH="/usr/bin:/bin:/usr/sbin:/sbin""#))
     }
 }
 

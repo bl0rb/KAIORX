@@ -286,4 +286,27 @@ func isAlive(_ pid: pid_t) -> Bool {
         })
         #expect(result.stdout.text == "sessions-ok\n")
     }
+
+    /// Third live run: Codex canonicalizes `CODEX_HOME` inside the hidden home folder; that needs
+    /// the metadata of every folder above it, but not their contents.
+    @Test func visibleRootInsideAHiddenOneCanBeResolvedWithoutListingItsParents() async throws {
+        let root = try scratchDirectory()
+        let home = root + "/home"
+        let state = home + "/Library/Support/state"
+        try FileManager.default.createDirectory(atPath: state, withIntermediateDirectories: true)
+        try "secret".write(toFile: home + "/canary", atomically: true, encoding: .utf8)
+        try "own".write(toFile: state + "/own", atomically: true, encoding: .utf8)
+        let script = """
+            /bin/realpath '\(state)' >/dev/null && echo resolved
+            /bin/cat own >/dev/null && echo own-read
+            /bin/ls '\(home)' >/dev/null 2>&1 && echo HOME-LISTED
+            /bin/ls '\(home)/Library' >/dev/null 2>&1 && echo LIBRARY-LISTED
+            /bin/cat '\(home)/canary' >/dev/null 2>&1 && echo CANARY-READ
+            exit 0
+            """
+        let result = try await ProcessHost().run(shell(script, in: state) {
+            $0.confinement = Confinement(writableRoots: [state], hiddenRoots: [home], visibleRoots: [state])
+        })
+        #expect(result.stdout.text == "resolved\nown-read\n", "\(result.stdout.text) / \(result.stderr.text)")
+    }
 }
