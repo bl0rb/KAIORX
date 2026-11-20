@@ -75,6 +75,7 @@ func received(_ root: String, _ spec: AttemptSpec) throws -> JSONValue {
         #expect(throws: ProviderError.versionNotInMatrix(provider: .claude, version: "9.9.9")) { try AdapterPolicy().check(.claude, identity: unknown) }
         try AdapterPolicy.fixtureTesting.check(.claude, identity: unknown)
         #expect(CompatibilityMatrix.entries.allSatisfy { $0.status == .offlineVerified })
+        #expect(CompatibilityMatrix.entry(for: .claude, version: "2.1.329") != nil)
     }
 }
 
@@ -614,5 +615,35 @@ func received(_ root: String, _ spec: AttemptSpec) throws -> JSONValue {
             """, in: root, name: "claude")
         let identity = try await BinaryIdentityCache().current(path, host: ProcessHost())
         #expect(identity.version == "9.9.9")
+    }
+}
+
+/// From the owner's live run (ADR 0008): Codex reads files through commands; only plain reads
+/// inside the worktree are accepted.
+@Suite struct CodexReadCommandTests {
+    func decide(_ command: String, actions: [JSONValue], cwd: String? = nil, extra: [String: JSONValue] = [:], root: String) throws -> String? {
+        var params: [String: JSONValue] = ["threadId": "thr-1", "turnId": "turn-1", "itemId": "c-1", "startedAtMs": 1, "command": .string(command), "commandActions": .array(actions)]
+        if let cwd { params["cwd"] = .string(cwd) }
+        for (key, value) in extra { params[key] = value }
+        let context = ApprovalContext(role: .reviewer, threadID: "thr-1", turnID: "turn-1", workingDirectory: root, writablePaths: nil)
+        return try CodexApprovals.decide("item/commandExecution/requestApproval", params: .object(params), context: context).0["decision"]?.string
+    }
+
+    @Test func plainReadsInsideTheWorktreeAreAcceptedEverythingElseDeclined() throws {
+        let root = try workspace() + "/work"
+        try Data("x".utf8).write(to: URL(filePath: root + "/FACTS.md"))
+        let read: JSONValue = ["type": "read", "command": "cat FACTS.md", "name": "FACTS.md", "path": "FACTS.md"]
+        #expect(try decide("/bin/zsh -lc 'cat FACTS.md'", actions: [read], cwd: root, root: root) == "accept")
+        #expect(try decide("/bin/zsh -lc 'rg -n Kennwort .'", actions: [["type": "search", "command": "rg -n Kennwort .", "query": "Kennwort", "path": "."]], root: root) == "accept")
+        #expect(try decide("/bin/zsh -lc 'cat FACTS.md; rm -rf x'", actions: [read], root: root) == "decline")
+        #expect(try decide("/bin/zsh -lc 'cat $(echo FACTS.md)'", actions: [read], root: root) == "decline")
+        #expect(try decide("/bin/zsh -lc 'cat FACTS.md > out'", actions: [read], root: root) == "decline")
+        #expect(try decide("/bin/zsh -lc 'cat /etc/passwd'", actions: [["type": "read", "command": "cat /etc/passwd", "name": "passwd", "path": "/etc/passwd"]], root: root) == "decline")
+        #expect(try decide("/bin/zsh -lc 'cat .git/config'", actions: [["type": "read", "command": "cat .git/config", "name": "config", "path": ".git/config"]], root: root) == "decline")
+        #expect(try decide("/bin/zsh -lc 'python3 x.py'", actions: [["type": "unknown", "command": "python3 x.py"]], root: root) == "decline")
+        #expect(try decide("/bin/zsh -lc 'cat FACTS.md'", actions: [], root: root) == "decline")
+        #expect(try decide("/bin/zsh -lc 'cat FACTS.md'", actions: [read], cwd: "/tmp", root: root) == "decline")
+        #expect(try decide("/bin/zsh -lc 'cat FACTS.md'", actions: [read], extra: ["networkApprovalContext": ["host": "example.org"]], root: root) == "decline")
+        #expect(try decide("/bin/zsh -lc 'cat FACTS.md'", actions: [read], extra: ["turnId": "other"], root: root) == "decline")
     }
 }

@@ -384,3 +384,25 @@ $out->({type => 'result', subtype => 'success', is_error => JSON::PP::false, usa
         #expect(exceptions == ["/Users/someone/.local/share/claude"])
     }
 }
+
+@Suite struct LiveRunFollowUpTests {
+    @Test func passedStepsAreNoRestriction() {
+        var run = ProviderRun(provider: .codex, configuredPath: "/x", nativePath: "/x", model: "m", configDirectory: "/c")
+        run.steps[.billing] = StepResult(status: .passed)
+        run.steps[.quota] = StepResult(status: .passed, limitation: "Erschöpfung nicht herbeigeführt")
+        run.steps[.read] = StepResult(status: .failed)
+        #expect(!run.restrictions.contains { $0.hasPrefix("Abrechnung") })
+        #expect(run.restrictions.contains("Kontingent beobachten: Erschöpfung nicht herbeigeführt"))
+        #expect(run.restrictions.contains("Lesender Auftrag: failed"))
+        #expect(run.restrictions.contains("Programm identifizieren: nicht ausgeführt"))
+    }
+
+    @Test func protocolItemsKeepTheirContentAccountsDoNot() throws {
+        let redactor = FixtureRedactor(denylist: [], paths: [])
+        var placeholders: [String: String] = [:]
+        let line = #"< {"method":"item/completed","params":{"item":{"id":"i-9","type":"agentMessage","text":"Das Kennwort lautet X.","phase":"final"},"threadId":"thr-77"},"account":{"email":"a@b.c","planType":"plus"}}"#
+        let out = try redactor.redact(line, placeholders: &placeholders)
+        #expect(out.contains("Das Kennwort lautet X.") && out.contains("\"phase\":\"final\""))
+        #expect(!out.contains("i-9") && !out.contains("thr-77") && !out.contains("a@b.c") && out.contains("\"planType\":\"plus\""))
+    }
+}

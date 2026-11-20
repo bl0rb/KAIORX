@@ -71,7 +71,7 @@ public struct FixtureRedactor: Sendable {
     static func walk(_ value: Any, key: String?, placeholders: inout [String: String], inside: Bool = false) -> Any {
         switch value {
         case let object as [String: Any]:
-            let identifyingObject = inside || key.map(identifying) == true
+            let identifyingObject = inside || key.map(identityObject) == true
             var result: [String: Any] = [:]
             for (k, v) in object { result[k] = walk(v, key: k, placeholders: &placeholders, inside: identifyingObject) }
             return result
@@ -94,6 +94,13 @@ public struct FixtureRedactor: Sendable {
     static func vocabulary(_ key: String) -> Bool {
         ["type", "subtype", "role", "method", "status", "model", "kind", "stop_reason", "tool_name", "toolname", "plantype", "plan_type",
          "subscriptiontype", "subscription_type", "authmethod", "auth_method"].contains(key.lowercased())
+    }
+
+    /// Objects that describe a person, account or organisation: everything inside is replaced.
+    /// (Protocol objects such as `item` or `thread` keep their content; only their identifiers go.)
+    static func identityObject(_ key: String) -> Bool {
+        let lower = key.lowercased()
+        return ["account", "organization", "organisation", "org", "user", "profile", "workspace", "owner", "member"].contains { lower == $0 || lower.hasSuffix($0) }
     }
 
     static func identifying(_ key: String) -> Bool {

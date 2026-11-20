@@ -106,6 +106,15 @@ public enum CompatibilityMatrix {
             schemaDigest: nil
         ),
         CompatibilityEntry(
+            provider: .claude, version: "2.1.329", status: .offlineVerified,
+            notes: """
+                Self-updated from 2.1.328 on 2026-11-20 during the owner's first live run; all 15 flags of the \
+                automatic profile exist in `claude --help` of this version. `claude auth status --json` fields \
+                recorded (loggedIn, authMethod, apiProvider, loginExpiresAt). Open: a passed live acceptance.
+                """,
+            schemaDigest: nil
+        ),
+        CompatibilityEntry(
             provider: .codex, version: "0.170.0", status: .offlineVerified,
             notes: """
                 Requests sent and fixture messages validated against `app-server generate-json-schema` of this \

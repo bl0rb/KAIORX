@@ -107,8 +107,21 @@ public actor AcceptanceRunner {
             case .parallel: return await parallelStep()
             }
         } catch {
-            return StepResult(status: .failed, evidence: ["Fehler: \(Self.errorClass(error))"])
+            // The detail helps diagnose a live failure; it is kept only if it passes redaction.
+            var evidence = ["Fehler: \(Self.errorClass(error))"]
+            if let detail = redactedDetail(String(describing: error)) { evidence.append("Detail: \(detail.prefix(400))") }
+            return StepResult(status: .failed, evidence: evidence)
         }
+    }
+
+    func redactedDetail(_ text: String) -> String? {
+        var placeholders: [String: String] = [:]
+        let canaries = state.canaries
+        let redactor = FixtureRedactor(
+            denylist: [NSUserName(), ProcessInfo.processInfo.hostName, context.home, canaries["neighbour"]!, canaries["home"]!, canaries["outside"]!, canaries["env"]!],
+            paths: [(folders.root, "<run>"), (context.home, "<home>")]
+        )
+        return try? redactor.redact(text, placeholders: &placeholders)
     }
 
     /// The error's type and case, without associated text that could carry private values.

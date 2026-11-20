@@ -93,8 +93,9 @@ public struct ProviderRun: Codable, Sendable {
     public var passed: Bool { StepID.allCases.filter { $0.required && $0 != .parallel }.allSatisfy { steps[$0]?.status == .passed } }
 
     public var restrictions: [String] {
-        StepID.allCases.compactMap { step in
-            guard let result = steps[step], result.status != .passed else { return step.required ? "\(step.title): nicht bestanden" : nil }
+        StepID.allCases.filter { $0 != .parallel }.compactMap { step in
+            guard let result = steps[step] else { return step.required ? "\(step.title): nicht ausgeführt" : nil }
+            if result.status == .passed { return result.limitation.map { "\(step.title): \($0)" } }
             return result.limitation.map { "\(step.title): \($0)" } ?? "\(step.title): \(result.status.rawValue)"
         }
     }

@@ -48,6 +48,18 @@ Eine unabhängige Prüfung fand 35 Befunde, 28 bestätigt (nach Entdoppeln 16), 
 - **Pfade:** Der Benutzerordner wird ohne abschließenden Schrägstrich geführt; sonst blieben die Ausnahmen beim verborgenen Benutzerordner leer.
 - **Belegprüfung:** Ein Eintrag muss genau das Programm des Berichts nennen, und alle Pflichtschritte nach dieser Version des Kits müssen bestanden sein (nicht nach den Angaben im Bericht). Der Quelltext-Test umfasst auch `App/`.
 
+## Erster Live-Lauf (20. November 2026)
+
+Der Kontoinhaber hat den ersten Lauf (`20261120-1023-2a9f`) ausgeführt; kein Anbieter hat bestanden. Ergebnisse:
+
+- **Claude:** Das Programm hatte sich während der Vorbereitung auf 2.1.329 aktualisiert; das Kit lehnte die nicht gelistete Version ab, wie vorgesehen. Die Anmeldung meldete `loggedIn: false`: Sie war mit dem alten Ordnerpfad mit doppeltem Schrägstrich erfolgt, und Claude bindet die Anmeldung an den genauen Pfad. 2.1.329 steht jetzt `offlineVerified` in der Matrix (alle 15 Startoptionen in `--help`). Die echten Felder von `claude auth status --json` sind bekannt: `loggedIn`, `authMethod`, `apiProvider`, `loginExpiresAt`, `configDirectory`.
+- **Codex:** Identität (gültige Signatur von OpenAI, Schema unverändert), Anmeldung (Plus), Schreiben, Abbruch und Kontingentsignale bestanden. Isolation scheiterte nur am lesbaren Benutzerordner. Der lesende Auftrag fand das Kennwort nicht: **Codex liest Dateien nur über Befehle** (`/bin/zsh -lc 'cat FACTS.md'`), und KAIORX lehnte jeden Befehl ab. Der Lauf mit verborgenem Benutzerordner endete mit einem Protokollfehler (die Ursache wird künftig redigiert mitgeschrieben).
+- **Verschachtelte Sandbox (offener Punkt aus ADR 0003):** Codex' eigene Sandbox arbeitet innerhalb von KAIORXs `sandbox-exec` nicht; Codex fragt dann „retry without sandbox?“. Angenommen wird das nur, wenn die Freigaberegeln erfüllt sind; die OS-Isolation von KAIORX bleibt in jedem Fall wirksam.
+
+Entscheidung des Kontoinhabers daraus: **Codex darf lesende Befehle ausführen.** Angenommen wird ein Befehl nur, wenn Codex jede Aktion als `read`, `listFiles` oder `search` einstuft, jeder genannte Pfad im Arbeitsordner liegt (nicht in `.git`, `.codex`, `.agents`, kein Symlink, kein `..`), der Arbeitsordner der des Versuchs ist, kein Netzwerk verlangt wird und der Befehl keine Shell-Operatoren enthält (`;`, `|`, `&`, `>`, `<`, `$`, Backtick, Backslash, Zeilenumbruch). Alles andere bleibt abgelehnt; Schreiben nur über geprüfte Dateiänderungen. Reviewer-Läufe sind auf OS-Ebene ohnehin schreibgeschützt.
+
+Weitere Korrekturen: Der Bericht führt bestandene Schritte nicht mehr als Einschränkung. Die Redaktion leert nur noch Personen-, Konto- und Organisationsobjekte vollständig, in Protokollobjekten (`item`, `thread`) nur die Kennungen. Die Ordner der Anmeldung haben keinen doppelten Schrägstrich mehr, und der Preflight legt sie an.
+
 ## Nicht in A
 
 SIWC-Anmeldung und Token-Erneuerung, natürlicher Ablauf einer Anmeldung (der Widerruf ist der Stellvertreter), absichtlich erschöpftes Kontingent, verschachtelte Codex-Sandbox, Installation verwalteter Hooks, gespeicherte erwartete Kontoidentität im Produkt (braucht eine Migration).

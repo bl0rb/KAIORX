@@ -234,7 +234,11 @@ struct ApprovalContext: Sendable {
 /// - File changes: authors only, for a change announced in this turn whose every path resolves
 ///   inside the worktree (and the writable paths), outside Git and agent metadata, and never
 ///   with an extra write root.
-/// - Commands: declined (Git and tests run on the host).
+/// - Commands: only reads (ADR 0008, from the owner's live run: Codex reads files only through
+///   commands). Accepted when Codex classifies every action as read, list or search, every
+///   named path stays readable inside the worktree, the working directory is the worktree, no
+///   network is asked for, and the command has no shell operators. Everything else is declined
+///   (Git and tests run on the host; writes only as checked file changes).
 /// - Extra permissions: none granted.
 /// - Requests with missing required fields, for another thread/turn, or of any other kind:
 ///   refused.
@@ -251,7 +255,14 @@ enum CodexApprovals {
                   paths.allSatisfy({ allowed($0, context: context) }) else { return decline }
             return (["decision": "accept"], "file change accept")
         case "item/commandExecution/requestApproval":
-            return (["decision": "decline"], "command declined")
+            let decline: (JSONValue, String) = (["decision": "decline"], "command declined")
+            guard refusal(params, required: ["itemId", "threadId", "turnId", "startedAtMs"], context: context) == nil,
+                  (params["networkApprovalContext"] ?? .null).isNull,
+                  let command = params["command"]?.string, plain(command),
+                  let actions = params["commandActions"]?.array, !actions.isEmpty,
+                  actions.allSatisfy({ readOnly($0, context: context) }) else { return decline }
+            if let cwd = params["cwd"]?.string, Confinement.resolved(cwd) != Confinement.resolved(context.workingDirectory) { return decline }
+            return (["decision": "accept"], "read command accept")
         case "item/permissions/requestApproval":
             return (["permissions": [:], "scope": "turn"], "extra permissions refused")
         default:
@@ -265,6 +276,29 @@ enum CodexApprovals {
         if let thread = context.threadID, params["threadId"]?.string != thread { return "other thread" }
         if let turn = context.turnID, params["turnId"]?.string != turn { return "other turn" }
         return nil
+    }
+
+    /// A command without shell operators, substitutions or line breaks (the quoted
+    /// `/bin/zsh -lc '…'` wrapper is fine).
+    static func plain(_ command: String) -> Bool {
+        !command.contains { ";|&><$`\\\n\r".contains($0) } && command.count <= 4096
+    }
+
+    /// A read, list or search action whose own command is plain and whose path (if any) is
+    /// readable inside the worktree.
+    static func readOnly(_ action: JSONValue, context: ApprovalContext) -> Bool {
+        guard let type = action["type"]?.string, ["read", "listFiles", "search"].contains(type),
+              let command = action["command"]?.string, plain(command) else { return false }
+        guard let path = action["path"]?.string else { return type != "read" }
+        return readable(path, context: context)
+    }
+
+    /// Inside the worktree, outside Git and agent metadata, no `..`, no symlink as last part.
+    static func readable(_ path: String, context: ApprovalContext) -> Bool {
+        var unrestricted = context
+        unrestricted.writablePaths = nil
+        if path == "." || path == context.workingDirectory { return true }
+        return allowed(path, context: unrestricted)
     }
 
     /// Checks that a path stays in the worktree. No `..` parts at all (they could climb out
