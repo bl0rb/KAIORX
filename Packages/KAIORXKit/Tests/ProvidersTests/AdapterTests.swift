@@ -191,6 +191,19 @@ func received(_ root: String, _ spec: AttemptSpec) throws -> JSONValue {
             == .completed(.cancelled))
     }
 
+    /// Fourth live run (revoke): signed out, Claude Code answers with a synthetic assistant
+    /// message and an error result. That is a refusal, not a model reply.
+    @Test func aSyntheticApiErrorMessageIsNoReply() throws {
+        var parser = ClaudeStreamParser()
+        let message = #"{"type":"assistant","error":"authentication_failed","is_api_error_message":true,"message":{"id":"m-x","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Not logged in · Please run /login"}],"usage":{"input_tokens":0,"output_tokens":0}},"session_id":"s"}"#
+        #expect(try parser.parse(message) == [.diagnostic(message: "claude api error: authentication_failed")])
+        let result = #"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login","session_id":"s"}"#
+        #expect(try parser.parse(result).last == .completed(.failed(reason: "authentication_failed: Not logged in · Please run /login")))
+        // An error kind that is not plain vocabulary is not passed on.
+        var other = ClaudeStreamParser()
+        #expect(try other.parse(#"{"type":"assistant","error":"bad kind: x","message":{"id":"m","content":[]}}"#) == [.diagnostic(message: "claude api error: api_error")])
+    }
+
     @Test func malformedLinesAreProtocolViolations() {
         var parser = ClaudeStreamParser()
         #expect(throws: ProviderError.self) { _ = try parser.parse("not json") }

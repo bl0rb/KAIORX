@@ -68,6 +68,8 @@ public struct ClaudeStreamParser: Sendable {
     private var currentMessageID: String?
     private var textCounters: [String: Int] = [:]
     private var usageSeen: Set<String> = []
+    /// Kind of a synthetic API error message (for example `authentication_failed` when signed out).
+    private var apiError: String?
     public private(set) var sessionStarted = false
     public private(set) var completed = false
 
@@ -101,6 +103,13 @@ public struct ClaudeStreamParser: Sendable {
             }
 
         case "assistant":
+            // Signed out, rate limited and similar: Claude Code writes the error as a synthetic
+            // assistant message (`model: "<synthetic>"`). No model replied; the result fails.
+            if value["is_api_error_message"]?.bool == true || value["error"] != nil {
+                let kind = value["error"]?.string.flatMap { $0.range(of: #"^[a-z_]{1,40}$"#, options: .regularExpression) != nil ? $0 : nil } ?? "api_error"
+                apiError = kind
+                return [.diagnostic(message: "claude api error: \(kind)")]
+            }
             guard let message = value["message"], let id = message["id"]?.string else {
                 throw ProviderError.protocolViolation("assistant message without id")
             }
@@ -144,7 +153,8 @@ public struct ClaudeStreamParser: Sendable {
             } else if cancelRequested {
                 events.append(.completed(.cancelled))
             } else {
-                let reason = [value["subtype"]?.string, value["result"]?.string.map { String($0.prefix(200)) }]
+                let subtype = value["subtype"]?.string.flatMap { $0 == "success" ? nil : $0 }
+                let reason = [apiError ?? subtype, value["result"]?.string.map { String($0.prefix(200)) }]
                     .compactMap { $0 }.joined(separator: ": ")
                 events.append(.completed(.failed(reason: reason.isEmpty ? "error" : reason)))
             }
