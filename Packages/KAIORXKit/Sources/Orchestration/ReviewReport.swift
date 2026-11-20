@@ -56,9 +56,12 @@ public enum ReviewReport {
             let line = Self.line(entry["line"])
             let severity = Self.severity(entry["severity"])
             if severity == .blocking { declaredBlocking = true }
-            if let severity, severity != .comment, let path, changedPaths.contains(path), let line, line > 0,
-               !impact.isEmpty, !suggestion.isEmpty {
-                findings.append(FindingDraft(severity: severity, path: path, line: line, impact: impact, suggestion: suggestion))
+            if let severity, severity != .comment, let path, changedPaths.contains(path), let line, line > 0 {
+                // A located finding keeps its severity; a missing impact or fix does not weaken it.
+                findings.append(FindingDraft(
+                    severity: severity, path: path, line: line, impact: impact.isEmpty ? String(describing: entry) : impact,
+                    suggestion: suggestion
+                ))
             } else {
                 // Without a valid location in the diff a finding cannot block or be tracked to a
                 // line, but a declared blocking or major one still needs the user's decision.
@@ -73,8 +76,9 @@ public enum ReviewReport {
         // Judged on what the reviewer declared: a blocking finding anywhere is not an approval.
         let blocking = declaredBlocking
         let status: ReviewStatus = switch verdict {
-        case "approve" where !blocking: .approved
-        case "approve", "changes": .changesRequested
+        case _ where blocking: .changesRequested
+        case "approve": .approved
+        case "changes": .changesRequested
         default: .invalid
         }
         return Parsed(status: status, summary: summary, findings: findings)
@@ -109,9 +113,10 @@ public enum ReviewReport {
     }
 
     /// Case-insensitive; a stated but unknown severity ("critical", "high") needs a decision.
-    /// A stated severity that is not a known string (a number, a list, "critical") is major.
+    /// A missing severity, or one that is not a known string (null, a number, a list,
+    /// "critical"), is major.
     static func severity(_ value: Any?) -> FindingSeverity? {
-        guard let value, !(value is NSNull) else { return nil }
+        guard let value, !(value is NSNull) else { return .major }
         guard let text = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !text.isEmpty else {
             return .major
         }

@@ -566,8 +566,17 @@ public actor Store {
         // Domain errors come first; these moves are valid but belong to the integration chain.
         guard from.allowsTransition(to: target, resumeState: task.record.resumeState) else { return }
         let resumesFromHold = from == .blocked && target == task.record.resumeState
+        // Leaving `conflict` for verification is the resolution's move, not a command's.
         let integrationMove = target == .conflict || target == .integrated
             || (target == .awaitingMerge && !resumesFromHold) || (from == .awaitingMerge && target == .verifying)
+            || (from == .conflict && target == .verifying)
+        // A revert task is the host's: no author can rework it, so it cannot go back to one.
+        let hostsRevert = try !db.query(
+            "SELECT 1 FROM candidate WHERE task_id = ? AND kind = 'revert' LIMIT 1", [.text(task.record.id.uuidString)]
+        ) { $0.int(0) }.isEmpty
+        if hostsRevert, target == .ready || target == .needsChanges {
+            throw StoreError.taskManagedByIntegration(taskID: task.record.id, from: from, to: target)
+        }
         let publishing = try db.query(
             "SELECT 1 FROM candidate WHERE task_id = ? AND state = 'publishing'", [.text(task.record.id.uuidString)]
         ) { $0.int(0) }
@@ -593,6 +602,16 @@ public actor Store {
         if target == .ready || target == .needsChanges || (target.isTerminal && target != .integrated) {
             // Back to an author or ended: its open integration candidates cannot be published.
             try closeOpenCandidates(db, task: task.record.id, reason: "task \(target.rawValue)", now: now)
+        }
+        if current == .blocked, target == .verifying {
+            // A hold taken during a conflict resumes at `verifying` (the side state's stage); the
+            // conflict is still open until its candidate is resolved.
+            let conflicted = try db.query(
+                "SELECT 1 FROM candidate WHERE task_id = ? AND state = 'conflicted' LIMIT 1", [.text(task.record.id.uuidString)]
+            ) { $0.int(0) }
+            if !conflicted.isEmpty {
+                try changeTaskState(db, try loadTask(db, task.record.id), to: .conflict, reason: "conflict still open", now: now)
+            }
         }
     }
 

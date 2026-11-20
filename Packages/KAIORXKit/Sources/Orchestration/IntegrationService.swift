@@ -37,6 +37,8 @@ public struct IntegrationRecoveryReport: Sendable, Equatable {
     public var removedReviewWorktrees: [WorktreeID] = []
     /// QA and integration worktrees of lost test runs and builds, removed.
     public var removedWorkWorktrees: [WorktreeID] = []
+    /// Worktrees recovery should have removed but could not (left in `needsAttention`).
+    public var stuckWorktrees: [WorktreeID] = []
 }
 
 /// Step 4 to 7 of the Git transaction per task (Plan/macos-und-git.md): build a candidate on the
@@ -125,7 +127,14 @@ public actor IntegrationService {
             if let done = try await git.finishedResolution(at: location, base: candidate.previousTargetOID, secondParent: secondParent) {
                 commit = done
             } else {
-                commit = try await git.resolve(resolutions, at: location)
+                do {
+                    commit = try await git.resolve(resolutions, at: location)
+                } catch MergeError.resolutionForUnknownPath(let path) where candidate.conflicts.contains(path) {
+                    // An interrupted earlier call staged some paths already: start the merge (or
+                    // revert) over so every conflict of the candidate takes the user's decision.
+                    try await git.restartConflicts(at: location)
+                    commit = try await git.resolve(resolutions, at: location)
+                }
             }
         } catch MergeError.nothingToCommit {
             // Resolved back to the current target: nothing to integrate.
@@ -322,7 +331,9 @@ public actor IntegrationService {
             review.origin == .userImported || (review.reviewerProvider != nil && review.reviewerProvider != candidate.authorProvider)
         }
         if !independent.contains(where: { $0.status == .approved }) { missing.append("no approving independent review for \(commit)") }
-        let reviewIDs = Set(reviews.map(\.id))
+        // Findings count from every review of this commit, readable verdict or not: an unreadable
+        // or foreign report only ever stores comments.
+        let reviewIDs = Set(try await store.reviews(candidate: id).filter { $0.candidateOID == commit }.map(\.id))
         let findings = try await store.findings(candidate: id).filter { reviewIDs.contains($0.reviewID) }
         if findings.contains(where: { $0.severity == .blocking }) { missing.append("blocking findings") }
         if findings.contains(where: { $0.severity.needsDecision && $0.disposition == .open }) { missing.append("undecided findings") }
@@ -334,7 +345,7 @@ public actor IntegrationService {
     /// The user's approval, bound to the candidate's commit and the target state it was built
     /// on. The gate is checked again: evidence may have arrived since acceptance.
     public func approve(_ id: CandidateID, actor: String) async throws -> ApprovalRecord {
-        let candidate = try await candidate(id, in: [.accepted])
+        let candidate = try await acceptedAfterEvaluation(id)
         try await requireTaskInVerification(candidate)
         try await requireGate(candidate)
         try await requireUnmovedTarget(candidate)
@@ -346,7 +357,7 @@ public actor IntegrationService {
     /// - The update failed with the target unchanged: retryable, candidate and approval stay.
     /// - Anything unclear: the journal entry stays prepared for `recover`.
     public func publish(_ id: CandidateID, approval: ApprovalID) async throws {
-        let candidate = try await candidate(id, in: [.accepted])
+        let candidate = try await acceptedAfterEvaluation(id)
         guard let commit = candidate.candidateOID else { throw IntegrationError.candidateNotIn(id, candidate.state) }
         try await requireTaskInVerification(candidate)
         let version = try await requireGate(candidate)
@@ -412,15 +423,23 @@ public actor IntegrationService {
         }
         for tree in try await store.worktrees()
         where (tree.kind == .qa || tree.kind == .integration) && tree.state != .removed && !kept.contains(tree.id) {
-            try? await workspace.remove(tree.id, force: true)
-            report.removedWorkWorktrees.append(tree.id)
+            do {
+                try await workspace.remove(tree.id, force: true)
+                report.removedWorkWorktrees.append(tree.id)
+            } catch {
+                report.stuckWorktrees.append(tree.id)
+            }
         }
         for tree in try await store.worktrees() where tree.kind == .reviewer && tree.state != .removed {
             var attempt: AttemptRecord?
             if let id = tree.attemptID { attempt = try await store.attempt(id) }
             if attempt == nil || attempt!.state.isTerminal || attempt!.state == .uncertain {
-                try? await workspace.remove(tree.id, force: true)
-                report.removedReviewWorktrees.append(tree.id)
+                do {
+                    try await workspace.remove(tree.id, force: true)
+                    report.removedReviewWorktrees.append(tree.id)
+                } catch {
+                    report.stuckWorktrees.append(tree.id)
+                }
             }
         }
         return (journal, report)
@@ -448,6 +467,26 @@ public actor IntegrationService {
     /// rejected on a blocking finding, back to reviewing when an accepted candidate gets new
     /// undecided findings (which revokes its approvals).
     private func evaluate(_ id: CandidateID) async throws {
+        do {
+            try await evaluateOnce(id)
+        } catch IntegrationStoreError.taskCannotFollow {
+            // The user holds the task: the evidence is recorded, the move waits. `approve` and
+            // `publish` evaluate again before they refuse a reviewing candidate.
+        }
+    }
+
+    /// A candidate in `accepted`, or one in `reviewing` whose gate passes now (its automatic
+    /// accept may have been refused while the task was held).
+    private func acceptedAfterEvaluation(_ id: CandidateID) async throws -> CandidateRecord {
+        let current = try await candidate(id, in: [.reviewing, .accepted])
+        if current.state == .reviewing {
+            try await requireTaskInVerification(current)
+            try await evaluate(id)
+        }
+        return try await candidate(id, in: [.accepted])
+    }
+
+    private func evaluateOnce(_ id: CandidateID) async throws {
         guard let candidate = try await store.candidate(id), candidate.state == .reviewing || candidate.state == .accepted else { return }
         // Bound to the version read before the gate: if evidence arrives meanwhile, its own
         // evaluation decides.
@@ -504,7 +543,19 @@ public actor IntegrationService {
         let operation = try await store.prepareRefUpdate(
             projectID: candidate.projectID, worktreeID: nil, ref: ref, expectedOld: nil, desiredNew: commit, candidateID: candidate.id
         )
-        try await git.updateRef(ref, to: commit, expectedOld: nil, in: repository)
+        do {
+            try await git.updateRef(ref, to: commit, expectedOld: nil, in: repository)
+        } catch {
+            // Close the entry so a retry can journal a new one; only an unclear state waits for recovery.
+            let current = try? await git.readRef(ref, in: repository)
+            if current == commit {
+                try await store.completeGitOperation(operation, as: .applied)
+                return
+            }
+            let state: GitOperationState = current == nil ? .failed : .needsAttention
+            try await store.completeGitOperation(operation, as: state, detail: String(describing: error))
+            throw error
+        }
         try await store.completeGitOperation(operation, as: .applied)
     }
 

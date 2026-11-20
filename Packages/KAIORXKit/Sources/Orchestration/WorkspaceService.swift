@@ -198,7 +198,9 @@ public actor WorkspaceService {
                 worktree: location.path, runTemporaryDirectory: temporary, layout: layout, extraHidden: storeFiles)
             : nil
         let report = await git.runTests(profile, in: location, commit: commit, runTemporaryDirectory: temporary, confinement: rules)
-        try await remove(record.id, force: true)
+        // A finished run keeps its verdict even if the cleanup fails: the worktree is then left
+        // in `needsAttention` for recovery.
+        try? await remove(record.id, force: true)
         try? FileManager.default.removeItem(atPath: temporary)
         return report
     }
@@ -366,10 +368,15 @@ public actor WorkspaceService {
             }
             return (.needsAttention, "ref is at \(current ?? "nothing"), expected \(operation.expectedOld ?? "nothing")", GitOperationEffects())
         }
-        // A publication is repeated only while the user's approval still stands.
+        // A publication is repeated only while the user's approval still stands and the task still
+        // waits for the merge (a hold taken meanwhile stops it).
         if publication, let approval = operation.approvalID, try await store.approval(approval)?.state != .granted {
             let release = operation.candidateID.map { GitOperationEffects(candidateReleased: ($0, .accepted)) } ?? GitOperationEffects()
             return (.failed, "approval no longer valid", release)
+        }
+        if publication, let candidateID = operation.candidateID, let taskID = try await store.candidate(candidateID)?.taskID,
+           let task = try await store.task(taskID), task.state != .awaitingMerge {
+            return (.failed, "task \(task.state.rawValue)", GitOperationEffects(candidateReleased: (candidateID, .accepted)))
         }
         // The update never happened: repeat the same compare-and-swap.
         do {

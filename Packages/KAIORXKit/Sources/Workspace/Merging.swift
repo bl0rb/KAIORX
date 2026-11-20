@@ -196,6 +196,32 @@ extension GitRunner {
         return try await output(["rev-parse", "HEAD"], at: worktree)
     }
 
+    /// Starts the merge or revert in progress over (abort, then the same merge or revert again),
+    /// so every conflict is open again. For a resolution an earlier call left half-staged.
+    @discardableResult
+    public func restartConflicts(at worktree: WorktreeLocation) async throws -> [ConflictEntry] {
+        let gitDir = URL(filePath: worktree.gitDirectory)
+        func exists(_ name: String) -> Bool { FileManager.default.fileExists(atPath: gitDir.appending(path: name).path(percentEncoded: false)) }
+        let outcome: MergeOutcome
+        if exists("MERGE_HEAD") {
+            let incoming = try await output(["rev-parse", "MERGE_HEAD"], at: worktree)
+            let saved = (try? String(contentsOf: gitDir.appending(path: "MERGE_MSG"), encoding: .utf8)) ?? ""
+            // The message without Git's appended "# Conflicts:" section.
+            let message = saved.components(separatedBy: "\n").prefix { !$0.hasPrefix("#") }.joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            try await run(["merge", "--abort"], at: worktree, environment: Self.mergeEnvironment)
+            outcome = try await merge(incoming, at: worktree, message: message.isEmpty ? "KAIORX: integrate \(incoming)" : message)
+        } else if exists("REVERT_HEAD") {
+            let reverted = try await output(["rev-parse", "REVERT_HEAD"], at: worktree)
+            try await run(["revert", "--abort"], at: worktree, environment: Self.mergeEnvironment)
+            outcome = try await revertMerge(reverted, at: worktree)
+        } else {
+            throw MergeError.noMergeInProgress
+        }
+        guard case .conflicted(let conflicts) = outcome else { throw MergeError.noMergeInProgress }
+        return conflicts
+    }
+
     /// The commit an earlier `resolve` made in this worktree, if no merge or revert is in progress
     /// and `HEAD` is exactly that commit: first parent `base`, second parent `secondParent` for a
     /// merge, a single parent for a revert.

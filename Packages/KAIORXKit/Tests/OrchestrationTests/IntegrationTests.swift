@@ -622,17 +622,26 @@ extension Store {
 
     @Test func aResultRejectedOnEvidenceCannotBeRebuilt() async throws {
         let h = try await IntegrationHarness()
-        let (_, tree) = try await h.authorResult("echo eins > a.txt")
+        func backToVerification(_ task: TaskID) async throws {
+            // The user takes the task out of needsChanges; the same result still cannot come back.
+            let version = try #require(try await h.base.store.task(task)).version
+            try await h.base.store.execute(Command(.transitionTask(id: task, to: .verifying, expectedVersion: version)))
+        }
+        let (task, tree) = try await h.authorResult("echo eins > a.txt")
         guard case .built(let blocked) = try await h.integration.buildCandidate(from: tree.id) else { Issue.record("not built"); return }
         try await h.integration.runTests(blocked.id, profile: h.passing)
         h.reviewer.set(.blocking)
         try await h.review(blocked.id)
         #expect(try await h.base.store.candidate(blocked.id)?.state == .rejected)
+        // While the task is back with its author nothing is built at all.
+        await #expect(throws: IntegrationError.taskNotInVerification(task, .needsChanges)) { _ = try await h.integration.buildCandidate(from: tree.id) }
+        try await backToVerification(task)
         await #expect(throws: IntegrationStoreError.rejectedBefore(blocked.id)) { _ = try await h.integration.buildCandidate(from: tree.id) }
 
-        let (_, red) = try await h.authorResult("echo zwei > b.txt")
+        let (redTask, red) = try await h.authorResult("echo zwei > b.txt")
         guard case .built(let failing) = try await h.integration.buildCandidate(from: red.id) else { Issue.record("not built"); return }
         try await h.integration.runTests(failing.id, profile: TestProfile(executable: "/bin/sh", arguments: ["-c", "exit 1"]))
+        try await backToVerification(redTask)
         await #expect(throws: IntegrationStoreError.rejectedBefore(failing.id)) { _ = try await h.integration.buildCandidate(from: red.id) }
         #expect(try await h.base.store.worktrees().filter { $0.kind == .integration }.allSatisfy { $0.state == .removed })
     }

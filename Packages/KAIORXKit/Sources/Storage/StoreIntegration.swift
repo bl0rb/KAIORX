@@ -71,6 +71,9 @@ public enum IntegrationStoreError: Error, Equatable, Sendable {
     case taskCannotFollow(TaskID, from: TaskState, to: TaskState)
     /// Evidence and decisions are taken only while the candidate's task is in verification.
     case taskNotInVerification(TaskID, TaskState)
+    /// The candidate is being published: its evidence is frozen until the publication is
+    /// applied or released.
+    case publicationInProgress(CandidateID)
 }
 
 /// Candidates, their test and review evidence, findings and approvals. Every change is one
@@ -186,9 +189,10 @@ extension Store {
     }
 
     /// Whether a task can take a new candidate: past its author's result, not held by the user
-    /// (`blocked`), not ended, and not on its way back to an author.
+    /// (`blocked`), not ended, and not on its way back to an author (`needsChanges` included:
+    /// only a new author result leaves it).
     public static func acceptsCandidate(_ task: TaskRecord) -> Bool {
-        let backToAuthor: Set<TaskState> = [.pending, .ready, .running]
+        let backToAuthor: Set<TaskState> = [.pending, .ready, .running, .needsChanges]
         if task.state.isTerminal || task.state == .blocked || backToAuthor.contains(task.state) { return false }
         if task.state.isSideState, let resume = task.resumeState, backToAuthor.contains(resume) { return false }
         return true
@@ -246,8 +250,13 @@ extension Store {
         }
     }
 
-    /// Evidence and decisions need the candidate's task in verification (atomically with them).
+    /// Evidence and decisions need an open candidate (not ended, not being published) whose task
+    /// is in verification, checked atomically with them.
     private func requireTaskInVerification(_ db: SQLiteConnection, _ candidate: CandidateRecord) throws {
+        if candidate.state == .publishing { throw IntegrationStoreError.publicationInProgress(candidate.id) }
+        if candidate.state.isTerminal {
+            throw IntegrationStoreError.staleEvidence(candidate: candidate.id, oid: candidate.candidateOID ?? "")
+        }
         guard let taskID = candidate.taskID else { return }
         let task = try loadTask(db, taskID).record
         guard Self.acceptsCandidate(task) else { throw IntegrationStoreError.taskNotInVerification(taskID, task.state) }
@@ -426,12 +435,12 @@ extension Store {
                 "SELECT f.severity, c.project_id, c.task_id, c.id FROM finding f JOIN review r ON r.id = f.review_id JOIN candidate c ON c.id = r.candidate_id WHERE f.id = ?",
                 [.text(id.uuidString)], { (try $0.requiredText(0), try $0.requiredText(1), $0.text(2), try $0.requiredText(3)) }
             ).first else { throw StoreError.notFound(entity: "finding", id: id.uuidString) }
-            let candidate = try loadCandidate(db, try parseID(row.3))
-            try requireTaskInVerification(db, candidate)
-            try bumpEvidence(db, candidate.id)
             if row.0 == FindingSeverity.blocking.rawValue, disposition == .accepted {
                 throw IntegrationStoreError.blockingFindingCannotBeAccepted(id)
             }
+            let candidate = try loadCandidate(db, try parseID(row.3))
+            try requireTaskInVerification(db, candidate)
+            try bumpEvidence(db, candidate.id)
             if (reason).isEmpty { throw DomainError.reasonRequired(entity: "finding", state: disposition.rawValue) }
             try db.run("UPDATE finding SET disposition = ?, reason = ? WHERE id = ?", [.text(disposition.rawValue), .text(reason), .text(id.uuidString)])
             try appendEvent(
