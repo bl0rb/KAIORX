@@ -117,6 +117,11 @@ public struct FixtureRedactor: Sendable {
     static func walk(_ value: Any, key: String?, placeholders: inout [String: String], inside: Bool = false) -> Any {
         switch value {
         case let object as [String: Any]:
+            // A streamed fragment (`stream_event.event.delta`) can hold part of a path or name that
+            // no replacement matches; the complete text follows in the assistant message.
+            if key == "delta" {
+                return object.mapValues { $0 is String ? "<fragment>" : $0 }.merging(object.filter { $0.key == "type" }) { _, kept in kept }
+            }
             let identifyingObject = inside || key.map(identityObject) == true
             var result: [String: Any] = [:]
             for (k, v) in object { result[k] = walk(v, key: k, placeholders: &placeholders, inside: identifyingObject) }

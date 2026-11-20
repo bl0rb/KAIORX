@@ -537,6 +537,24 @@ $out->({type => 'result', subtype => 'success', is_error => JSON::PP::false, usa
         }
     }
 
+    /// Final live run: streamed tool input arrives in fragments (`"/Users/ma"`, `"tze/…"`), so
+    /// no path replacement can match them. Fragments are dropped; the complete text and tool
+    /// input follow in the assistant message, where they are redacted as a whole.
+    @Test func streamedFragmentsAreDroppedNotGuessed() throws {
+        let redactor = FixtureRedactor(denylist: ["matzetest"], paths: [("/Users/matzetest", "<home>")])
+        var placeholders: [String: String] = [:]
+        for delta in [
+            #"{"type":"input_json_delta","partial_json":"{\"file_path\":\"/Us"}"#,
+            #"{"type":"input_json_delta","partial_json":"ers/matzetest/FACTS.md\"}"}"#,
+            #"{"type":"text_delta","text":"matzetest"}"#,
+            #"{"type":"thinking_delta","thinking":"matzetest"}"#,
+        ] {
+            let line = #"< {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":"# + delta + "}}"
+            let out = try redactor.redact(line, placeholders: &placeholders)
+            #expect(out.contains("<fragment>") && !out.contains("matzetest") && out.contains("_delta"), "\(out)")
+        }
+    }
+
     /// Claude derives folder names from paths (`/Users/x/a b` → `-Users-x-a-b`); those are
     /// replaced like the paths themselves.
     @Test func pathsAreAlsoReplacedInTheirDashedForm() throws {
