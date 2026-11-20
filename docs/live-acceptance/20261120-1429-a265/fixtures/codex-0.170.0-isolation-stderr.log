@@ -1,0 +1,12 @@
+[2m2026-11-20T13:37:37.751748Z[0m [31mERROR[0m [2mcodex_app_server[0m[2m:[0m Project-local config, hooks, and exec policies are disabled in the following folders until the project is trusted, but skills still load.
+    1. <repo-a>/.codex
+       To load project-local config, hooks, and exec policies, add <repo-a> as a trusted project in <config>/config.toml.
+
+[2m2026-11-20T13:37:37.752656Z[0m [31mERROR[0m [2mcodex_skills_extension::host_service[0m[2m:[0m failed to install system skills: io error while remove existing system skills dir: Operation not permitted (os error 1)
+[2m2026-11-20T13:37:37.756458Z[0m [31mERROR[0m [2mcodex_skills_extension::host_service[0m[2m:[0m failed to install system skills: io error while remove existing system skills dir: Operation not permitted (os error 1)
+[2m2026-11-20T13:37:37.756939Z[0m [31mERROR[0m [2mcodex_skills_extension::loader::host[0m[2m:[0m failed to walk skills root file://<home>/.agents/skills: Operation not permitted (os error 1)
+[2m2026-11-20T13:37:37.787760Z[0m [31mERROR[0m [2mcodex_skills_extension::host_service[0m[2m:[0m failed to install system skills: io error while remove existing system skills dir: Operation not permitted (os error 1)
+[2m2026-11-20T13:37:37.787865Z[0m [31mERROR[0m [2mcodex_skills_extension::host_service[0m[2m:[0m failed to install system skills: io error while remove existing system skills dir: Operation not permitted (os error 1)
+[2m2026-11-20T13:37:37.791422Z[0m [31mERROR[0m [2mcodex_skills_extension::host_service[0m[2m:[0m failed to install system skills: io error while remove existing system skills dir: Operation not permitted (os error 1)
+[2m2026-11-20T13:37:37.791585Z[0m [31mERROR[0m [2mcodex_skills_extension::loader::host[0m[2m:[0m failed to walk skills root file://<home>/.agents/skills: Operation not permitted (os error 1)
+[2m2026-11-20T13:37:47.606134Z[0m [31mERROR[0m [2mcodex_core::tools::router[0m[2m:[0m [3merror[0m[2m=[0mexec_command failed: CreateProcess { message: "Rejected(\"rejected by user\")" }

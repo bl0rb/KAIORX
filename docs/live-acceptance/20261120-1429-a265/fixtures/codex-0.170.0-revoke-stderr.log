@@ -1,0 +1,19 @@
+[2m2026-11-20T13:39:02.826441Z[0m [31mERROR[0m [2mcodex_skills_extension::host_service[0m[2m:[0m failed to install system skills: io error while remove existing system skills dir: Operation not permitted (os error 1)
+[2m2026-11-20T13:39:02.977015Z[0m [31mERROR[0m [2mcodex_app_server[0m[2m:[0m Project-local config, hooks, and exec policies are disabled in the following folders until the project is trusted, but skills still load.
+    1. <repo-a>/.codex
+       To load project-local config, hooks, and exec policies, add <repo-a> as a trusted project in <config>/config.toml.
+
+[2m2026-11-20T13:39:02.977933Z[0m [31mERROR[0m [2mcodex_skills_extension::host_service[0m[2m:[0m failed to install system skills: io error while remove existing system skills dir: Operation not permitted (os error 1)
+[2m2026-11-20T13:39:02.981978Z[0m [31mERROR[0m [2mcodex_skills_extension::host_service[0m[2m:[0m failed to install system skills: io error while remove existing system skills dir: Operation not permitted (os error 1)
+[2m2026-11-20T13:39:02.982358Z[0m [31mERROR[0m [2mcodex_skills_extension::loader::host[0m[2m:[0m failed to walk skills root file://<home>/.agents/skills: Operation not permitted (os error 1)
+[2m2026-11-20T13:39:03.010598Z[0m [31mERROR[0m [2mcodex_skills_extension::host_service[0m[2m:[0m failed to install system skills: io error while remove existing system skills dir: Operation not permitted (os error 1)
+[2m2026-11-20T13:39:03.010973Z[0m [31mERROR[0m [2mcodex_skills_extension::host_service[0m[2m:[0m failed to install system skills: io error while remove existing system skills dir: Operation not permitted (os error 1)
+[2m2026-11-20T13:39:03.014564Z[0m [31mERROR[0m [2mcodex_skills_extension::host_service[0m[2m:[0m failed to install system skills: io error while remove existing system skills dir: Operation not permitted (os error 1)
+[2m2026-11-20T13:39:03.014775Z[0m [31mERROR[0m [2mcodex_skills_extension::loader::host[0m[2m:[0m failed to walk skills root file://<home>/.agents/skills: Operation not permitted (os error 1)
+[2m2026-11-20T13:39:03.205611Z[0m [31mERROR[0m [2mcodex_api::endpoint::responses_websocket[0m[2m:[0m failed to connect to Responses WebSocket [3mstage[0m[2m=[0mUnknown
+[2m2026-11-20T13:39:03.316475Z[0m [31mERROR[0m [2mcodex_api::endpoint::responses_websocket[0m[2m:[0m failed to connect to Responses WebSocket [3mstage[0m[2m=[0mUnknown
+[2m2026-11-20T13:39:03.647354Z[0m [31mERROR[0m [2mcodex_api::endpoint::responses_websocket[0m[2m:[0m failed to connect to Responses WebSocket [3mstage[0m[2m=[0mUnknown
+[2m2026-11-20T13:39:04.197927Z[0m [31mERROR[0m [2mcodex_api::endpoint::responses_websocket[0m[2m:[0m failed to connect to Responses WebSocket [3mstage[0m[2m=[0mUnknown
+[2m2026-11-20T13:39:05.186623Z[0m [31mERROR[0m [2mcodex_api::endpoint::responses_websocket[0m[2m:[0m failed to connect to Responses WebSocket [3mstage[0m[2m=[0mUnknown
+[2m2026-11-20T13:39:07.077728Z[0m [31mERROR[0m [2mcodex_api::endpoint::responses_websocket[0m[2m:[0m failed to connect to Responses WebSocket [3mstage[0m[2m=[0mUnknown
+[2m2026-11-20T13:39:10.333365Z[0m [31mERROR[0m [2mcodex_api::endpoint::responses_websocket[0m[2m:[0m failed to connect to Responses WebSocket [3mstage[0m[2m=[0mUnknown
