@@ -37,8 +37,9 @@ public enum StepID: String, Codable, Sendable, CaseIterable, Comparable {
     /// Uses the subscription (a model turn): needs the owner's typed consent each time.
     public var usesInference: Bool {
         switch self {
-        case .read, .isolation, .hiddenHome, .author, .cancel, .parallel: true
-        case .identify, .auth, .billing, .quota, .revoke, .wrongAccount: false
+        case .read, .isolation, .author, .cancel, .parallel: true
+        // Covered by the read, which runs with the home folder hidden.
+        case .identify, .auth, .billing, .hiddenHome, .quota, .revoke, .wrongAccount: false
         }
     }
 
@@ -170,11 +171,12 @@ public struct RunFolders: Sendable {
     }
 }
 
-/// The confinement the product will use for an agent CLI (ADR 0003 role `agentCLI`).
+/// The confinement the product uses for an agent CLI (ADR 0003 role `agentCLI`): home hidden
+/// except the CLI's install folder (ADR 0008, point 6).
 public enum AgentConfinement {
     public static func make(
         provider: ProviderKind, spec: AttemptSpec, temporary: String, configDirectory: String, layout: WorkspaceLayout, home: String,
-        extraHidden: [String], hideHome: Bool = false, homeExceptions: [String] = []
+        extraHidden: [String], executable: String
     ) -> Confinement? {
         guard let worktree = spec.workingDirectory else { return nil }
         let profile = RoleProfile.agentCLI(
@@ -183,26 +185,8 @@ public enum AgentConfinement {
             needsKeychain: provider == .claude
         )
         return profile.confinement(
-            worktree: worktree, runTemporaryDirectory: temporary, layout: layout, home: home, extraHidden: extraHidden,
-            hideHome: hideHome, homeExceptions: homeExceptions
+            worktree: worktree, runTemporaryDirectory: temporary, layout: layout, home: home, extraHidden: extraHidden, executable: executable
         )
-    }
-
-    /// Folders below home a CLI needs to read when home is hidden: its own install folder.
-    public static func homeExceptions(nativePath: String, home: String) -> [String] {
-        let resolved = Confinement.resolved(nativePath)
-        let home = home.count > 1 && home.hasSuffix("/") ? String(home.dropLast()) : home
-        guard resolved.hasPrefix(home + "/") else { return [] }
-        // ~/.local/share/claude/versions/<v> → ~/.local/share/claude; nvm: the node version folder.
-        var url = URL(filePath: resolved).deletingLastPathComponent()
-        while url.path(percentEncoded: false).count > home.count + 1 {
-            let name = url.lastPathComponent
-            if name == "claude" || name.hasPrefix("v") && url.deletingLastPathComponent().lastPathComponent == "node" {
-                return [Confinement.resolved(url.path(percentEncoded: false))]
-            }
-            url.deleteLastPathComponent()
-        }
-        return [URL(filePath: resolved).deletingLastPathComponent().path(percentEncoded: false)]
     }
 }
 

@@ -265,9 +265,10 @@ $out->({type => 'result', subtype => 'success', is_error => JSON::PP::false, usa
 }
 
 @Suite struct RunnerTests {
-    /// The whole step order against the Claude fixture: identity, login, billing, read,
-    /// isolation probes (the home canary is readable today: a recorded failure), the read with
-    /// hidden home, author, cancel, then the revocation waits for the owner and passes on resume.
+    /// The whole step order against the Claude fixture: identity, login, billing, read (with the
+    /// home folder hidden, as in the product), isolation probes (home canary denied), the hidden
+    /// home step covered by the read without another turn, author, cancel, then the revocation
+    /// waits for the owner and passes on resume.
     @Test func aRunGoesThroughEveryStepAndWritesAPrivateReport() async throws {
         let root = try temporaryRoot("run")
         let home = try temporaryRoot("home")
@@ -293,8 +294,10 @@ $out->({type => 'result', subtype => 'success', is_error => JSON::PP::false, usa
         for step in [StepID.identify, .auth, .billing, .read, .hiddenHome, .author, .cancel] {
             #expect(steps[step]?.status == .passed, "\(step): \(steps[step].map { "\($0)" } ?? "nil")")
         }
-        #expect(steps[.isolation]?.status == .failed)
-        #expect(steps[.isolation]?.limitation?.contains("Benutzerordner") == true, "\(steps[.isolation]!)")
+        #expect(steps[.isolation]?.status == .passed, "\(steps[.isolation]!)")
+        #expect(steps[.isolation]?.evidence.contains("Benutzerordner lesen: verweigert") == true)
+        #expect(steps[.hiddenHome]?.evidence == ["Abgedeckt durch den lesenden Auftrag, der mit verborgenem Benutzerordner läuft"])
+        #expect(steps[.read]?.evidence.contains("Benutzerordner verborgen: ja") == true)
         #expect(steps[.isolation]?.evidence.contains("Nachbar-Repository lesen: verweigert") == true)
         #expect(steps[.isolation]?.evidence.contains("Git-Metadaten schreiben: verweigert") == true)
         #expect(steps[.revoke]?.status == .waitingForOwner)
@@ -316,7 +319,8 @@ $out->({type => 'result', subtype => 'success', is_error => JSON::PP::false, usa
         state = await resumed.state
         #expect(state.providers[0].steps[.revoke]?.status == .passed)
         #expect(state.providers[0].steps[.wrongAccount]?.status == .skipped)
-        #expect(!state.providers[0].passed)
+        // With the home folder hidden every required step passes against the fixture.
+        #expect(state.providers[0].passed, "\(state.providers[0].restrictions)")
         // The report and the fixtures hold nothing private.
         let report = AcceptanceReport.make(state, home: home)
         let text = String(decoding: try report.json(), as: UTF8.self) + report.markdown()
@@ -328,6 +332,28 @@ $out->({type => 'result', subtype => 'success', is_error => JSON::PP::false, usa
         }
         #expect(!FileManager.default.fileExists(atPath: home + "/.kaiorx-acceptance-test-run"))
         #expect(state.providers[0].accountFingerprint != nil)
+    }
+}
+
+@Suite struct HiddenHomeStepTests {
+    /// The read already runs with the home folder hidden (the product default); the optional
+    /// hidden-home step only refers to it and never starts another model turn.
+    @Test func theHiddenHomeStepIsCoveredByTheReadWithoutAnotherTurn() async throws {
+        let (runner, _, _) = try StandardErrorRecordingTests().runner()
+        await runner.setStep(.read, StepResult(status: .passed))
+        let covered = await runner.perform(.hiddenHome, provider: 0)
+        #expect(covered == StepResult(status: .passed, evidence: ["Abgedeckt durch den lesenden Auftrag, der mit verborgenem Benutzerordner läuft"]))
+        await runner.setStep(.read, StepResult(status: .failed))
+        let open = await runner.perform(.hiddenHome, provider: 0)
+        #expect(open.status == .skipped && open.limitation == "Nicht abgedeckt: der lesende Auftrag hat nicht bestanden")
+    }
+
+    /// A readable home folder is now a leak like any other, not a recorded restriction.
+    @Test func aReadableHomeIsAnIsolationLeak() {
+        let result = AcceptanceRunner.isolationResult(evidence: ["Benutzerordner lesen: möglich"], leaks: ["Benutzerordner lesen"], agentLeak: false)
+        #expect(result.status == .failed && result.limitation == "Isolation verletzt: Benutzerordner lesen")
+        #expect(AcceptanceRunner.isolationResult(evidence: [], leaks: [], agentLeak: false).status == .passed)
+        #expect(AcceptanceRunner.isolationResult(evidence: [], leaks: [], agentLeak: true).limitation == "Isolation verletzt: Agent las geschützte Inhalte")
     }
 }
 
@@ -426,12 +452,6 @@ $out->({type => 'result', subtype => 'success', is_error => JSON::PP::false, usa
         report.providers[0].steps.removeAll { $0.id == StepID.isolation.rawValue }
         sha = try write(report)
         #expect(EvidenceCheck.problems(entry(sha, builds: ["good"]), repositoryRoot: root) == ["Pflichtschritt nicht bestanden"])
-    }
-
-    @Test func homeExceptionsWorkWithATrailingSlash() {
-        let home = "/Users/someone/"
-        let exceptions = AgentConfinement.homeExceptions(nativePath: "/Users/someone/.local/share/claude/versions/2.1.328", home: home)
-        #expect(exceptions == ["/Users/someone/.local/share/claude"])
     }
 }
 

@@ -64,11 +64,14 @@ public enum RoleProfile: Sendable, Equatable {
     public static let claudeStateFiles = ["settings.json", "settings.local.json", "CLAUDE.md", "agents/", "skills/", "commands/", "hooks/", "plugins/"]
 
     /// `hideHome` hides the whole home folder except `homeExceptions` (read-only) and the roots
-    /// the role writes or sees; without it only the credential folders are hidden.
+    /// the role writes or sees; without it only the credential folders are hidden. `nil` is the
+    /// role's default: `agentCLI` hides home (ADR 0008, point 6: both CLIs ran that way in the
+    /// owner's live run), the other roles do not. For `agentCLI`, `executable` (the native CLI
+    /// binary) adds its install folder below home to the exceptions (`homeExceptions(executable:home:)`).
     public func confinement(
         worktree: String, runTemporaryDirectory: String, layout: WorkspaceLayout,
         home: String = FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false),
-        extraHidden: [String] = [], hideHome: Bool = false, homeExceptions: [String] = []
+        extraHidden: [String] = [], hideHome: Bool? = nil, homeExceptions: [String] = [], executable: String? = nil
     ) -> Confinement {
         let writable: [String] = switch self {
         case .author: [worktree, runTemporaryDirectory]
@@ -94,9 +97,12 @@ public enum RoleProfile: Sendable, Equatable {
             if keychain { secretPaths.removeAll { $0 == "Library/Keychains" } }
         }
         var secrets = secretPaths.map { home + "/" + $0 }
-        if hideHome {
+        var hidesHome = false
+        if case .agentCLI = self { hidesHome = true }
+        if hideHome ?? hidesHome {
             secrets.append(home)
             visible += homeExceptions
+            if case .agentCLI = self, let executable { visible += Self.homeExceptions(executable: executable, home: home) }
             // Keychains stay readable for a CLI that keeps its login there.
             if case .agentCLI(_, _, _, true) = self { visible.append(home + "/Library/Keychains") }
         }
@@ -104,5 +110,23 @@ public enum RoleProfile: Sendable, Equatable {
             writableRoots: writable, hiddenRoots: [layout.root] + secrets + extraHidden,
             visibleRoots: visible, allowsNetwork: network, protectedPaths: protected
         )
+    }
+    /// Folders below home a CLI needs to read when home is hidden: its own install folder
+    /// (`~/.local/share/claude/versions/<v>` → `~/.local/share/claude`; with nvm the node version
+    /// folder; otherwise the binary's folder). Empty when the binary is not below home. `home`
+    /// may end with `/` (the path of a directory URL).
+    public static func homeExceptions(executable: String, home: String) -> [String] {
+        let resolved = Confinement.resolved(executable)
+        let home = home.count > 1 && home.hasSuffix("/") ? String(home.dropLast()) : home
+        guard resolved.hasPrefix(home + "/") else { return [] }
+        var url = URL(filePath: resolved).deletingLastPathComponent()
+        while url.path(percentEncoded: false).count > home.count + 1 {
+            let name = url.lastPathComponent
+            if name == "claude" || name.hasPrefix("v") && url.deletingLastPathComponent().lastPathComponent == "node" {
+                return [Confinement.resolved(url.path(percentEncoded: false))]
+            }
+            url.deleteLastPathComponent()
+        }
+        return [URL(filePath: resolved).deletingLastPathComponent().path(percentEncoded: false)]
     }
 }

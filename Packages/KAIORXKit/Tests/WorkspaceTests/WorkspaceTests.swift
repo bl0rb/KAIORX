@@ -541,6 +541,60 @@ extension Dictionary {
         #expect(codex.protectedPaths.contains("/tmp/w/.codex/") && codex.protectedPaths.contains("/tmp/w/.agents"))
     }
 
+    /// ADR 0008, point 6: both CLIs ran with a hidden home folder in the owner's fourth live
+    /// run, so the agentCLI role hides it by default. Readable stay the CLI's install folder,
+    /// its state folder and, for Claude, the keychains; everything else in home is hidden.
+    @Test func agentCLIHidesTheHomeFolderExceptWhatTheCLINeeds() async throws {
+        let fixture = try await RepoFixture()
+        let repo = try await fixture.repository()
+        let path = try await fixture.worktree("agent", base: repo.headOID!)
+        let temp = try fixture.layout.runTemporaryDirectory("agent")
+        // Outside the run's temporary folder, which stays readable and writable.
+        let home = Confinement.resolved(NSTemporaryDirectory()) + "/kaiorx-home-" + UUID().uuidString
+        defer { try? FileManager.default.removeItem(atPath: home) }
+        let install = home + "/.local/share/claude/versions"
+        let state = home + "/Library/Application Support/KAIORX/claude-config"
+        for folder in [install, state, home + "/Library/Keychains", home + "/Documents"] {
+            try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        }
+        try "x".write(toFile: install + "/2.1.329", atomically: true, encoding: .utf8)
+        try "x".write(toFile: state + "/settings.json", atomically: true, encoding: .utf8)
+        try "x".write(toFile: home + "/Library/Keychains/login.keychain-db", atomically: true, encoding: .utf8)
+        try "secret".write(toFile: home + "/Documents/canary", atomically: true, encoding: .utf8)
+        let script = """
+            cat "$1/.local/share/claude/versions/2.1.329" >/dev/null && echo INSTALL
+            cat "$2/settings.json" >/dev/null && echo STATE
+            cat "$1/Library/Keychains/login.keychain-db" >/dev/null 2>&1 && echo KEYCHAIN
+            cat "$1/Documents/canary" >/dev/null 2>&1 && echo CANARY
+            ls "$1" >/dev/null 2>&1 && echo HOME-LISTED
+            exit 0
+            """
+        func run(keychain: Bool) async throws -> String {
+            let profile = RoleProfile.agentCLI(
+                stateDirectory: state, writesWorktree: false, protectedStateFiles: RoleProfile.claudeStateFiles, needsKeychain: keychain
+            )
+            return try await fixture.host.run(LaunchSpec(
+                executable: "/bin/sh", arguments: ["-c", script, "sh", home, state], workingDirectory: path,
+                environment: Environment.minimal(temporaryDirectory: temp), timeout: .seconds(10),
+                confinement: profile.confinement(
+                    worktree: path, runTemporaryDirectory: temp, layout: fixture.layout, home: home, executable: install + "/2.1.329"
+                )
+            )).stdout.text
+        }
+        #expect(try await run(keychain: true) == "INSTALL\nSTATE\nKEYCHAIN\n")
+        #expect(try await run(keychain: false) == "INSTALL\nSTATE\n")
+        // Other roles keep the home folder as before (only credential folders hidden).
+        let author = RoleProfile.author.confinement(worktree: path, runTemporaryDirectory: temp, layout: fixture.layout, home: home)
+        #expect(!author.hiddenRoots.contains(home))
+    }
+
+    @Test func homeExceptionsWorkWithATrailingSlash() {
+        let home = "/Users/someone/"
+        #expect(RoleProfile.homeExceptions(executable: "/Users/someone/.local/share/claude/versions/2.1.328", home: home)
+            == ["/Users/someone/.local/share/claude"])
+        #expect(RoleProfile.homeExceptions(executable: "/opt/homebrew/bin/codex", home: home) == [])
+    }
+
     /// Codex runs its commands without its own sandbox (ADR 0008): the OS profile alone keeps
     /// them away from Codex's start-up environment and the worktree's agent folders.
     @Test func codexCommandsCannotWriteItsEnvironmentOrAgentFolders() async throws {
