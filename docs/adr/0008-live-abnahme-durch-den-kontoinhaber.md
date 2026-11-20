@@ -1,6 +1,6 @@
 # ADR 0008 · Live-Abnahme durch den Kontoinhaber
 
-**Status:** angenommen, 20. November 2026 · **Betrifft:** Paket A, `Plan/anbieter.md` §5, `Plan/ARCHITEKTURPLAN.md` (Paket A, Qualitätsnachweis), ADR 0003, ADR 0006, ADR 0007
+**Status:** angenommen, 20. November 2026; Abnahme bestanden (Lauf `20261120-1429-a265`) · **Betrifft:** Paket A, `Plan/anbieter.md` §5, `Plan/ARCHITEKTURPLAN.md` (Paket A, Qualitätsnachweis), ADR 0003, ADR 0006, ADR 0007
 
 ## Kontext
 
@@ -98,6 +98,12 @@ Lauf `20261120-1240-0b6e`, Claude-Teil (Codex folgt nach dem Widerruf im selben 
 - **Verbergen übernommen (Punkt 6 erfüllt):** Beide Programme arbeiten mit verborgenem Benutzerordner. Die Rolle `agentCLI` verbirgt ihn jetzt standardmäßig; lesbar bleiben nur der Installationsordner des Programms (`RoleProfile.homeExceptions(executable:home:)`, aus dem aufgelösten Programm berechnet), der eigene Zustandsordner, Arbeitsordner und temporärer Ordner, bei Claude der Schlüsselbund. Die anderen Rollen bleiben unverändert. Das Kit misst genau diese Produktisolation: Jeder Auftrag läuft mit verborgenem Benutzerordner, die Probe „Benutzerordner lesen“ muss verweigert werden, und ein lesbarer Benutzerordner ist jetzt ein Isolationsbruch wie jeder andere statt einer Einschränkung. Der Schritt „Lesender Auftrag mit verborgenem Benutzerordner“ bleibt (damit ältere Laufzustände lesbar bleiben), startet aber keinen eigenen Auftrag mehr: Er verweist auf den lesenden Auftrag und gilt nur als bestanden, wenn dieser bestanden hat und laut seiner Isolation mit verborgenem Benutzerordner lief (die Angabe „Benutzerordner verborgen“ wird aus der tatsächlichen Isolation abgeleitet; ein Lesen aus einem älteren Kit deckt nichts ab). Die Prüfrunde dazu fand, dass die Installationsordner-Ausnahme bei einem Programm direkt im Benutzerordner den ganzen Benutzerordner samt Zugangsdaten-Ordnern wieder geöffnet hätte (die spätere Freigabe gewinnt im Profil). Eine Ausnahme ist deshalb nie der Benutzerordner selbst, kein Ordner, der einen Zugangsdaten-Ordner enthält, und keiner darin; dann bleibt nur das Programm selbst lesbar.
 - **App:** Die echten Adapter der App liefen bisher ohne Isolation, obwohl ihre Richtlinie eine verlangt (jeder Start wäre abgelehnt worden). App und Kit bauen die Isolation jetzt an einer Stelle (`RoleProfile.agentCLIConfinement`); die App nimmt dafür ihre eigenen Ordner (`claude-config`, `codex-home`, `tmp`, Arbeitsbereich unter `AppConfiguration.workspaceRoot`). Ohne Arbeitsordner gibt es keine Isolation, und der Adapter verweigert den Start. Unterschied zum Kit: Die App arbeitet in verknüpften Worktrees, deren gemeinsames Git-Verzeichnis im Checkout des Benutzers liegt und damit verborgen ist. Agenten führen kein Git aus (Claude ohne Befehlswerkzeuge, Codex nur freigegebene Lesebefehle); die eigene Git-Erkennung der CLIs beim Start findet dort nur kein Repository.
 
+## Abschließender Lauf (20. November 2026)
+
+Lauf `20261120-1429-a265` mit allen Korrekturen der vorigen Läufe: **beide Anbieter bestanden.** Claude 2.1.329 (`claudeSubscription`, Build `8c1729…`) und Codex 0.170.0 (`codexCliManaged`, Build `9248cf…`) bestanden jeden Pflichtschritt im selben Lauf, darunter Isolation mit verborgenem Benutzerordner und Widerruf. Optional offen: Kontingentsignale bei Claude nicht beobachtet, zweites Konto bei beiden übersprungen.
+
+Der Kontoinhaber hat den Bericht exportiert, `matrix.patch` selbst angewendet und mit Bericht und Aufzeichnungen committet; der Evidenztest prüft beide Einträge gegen `docs/live-acceptance/20261120-1429-a265/report.json`. Vor dem Commit wurden in der Codex-Widerrufsaufzeichnung OpenAI-Request-IDs und Cloudflare-Ray-IDs durch Platzhalter ersetzt (der Bericht blieb unverändert, seine Prüfsumme gilt). Das Kit ersetzt solche IDs künftig selbst.
+
 ## Nicht in A
 
 SIWC-Anmeldung und Token-Erneuerung, natürlicher Ablauf einer Anmeldung (der Widerruf ist der Stellvertreter), absichtlich erschöpftes Kontingent, Installation verwalteter Hooks, gespeicherte erwartete Kontoidentität im Produkt (braucht eine Migration).
@@ -105,4 +111,4 @@ SIWC-Anmeldung und Token-Erneuerung, natürlicher Ablauf einer Anmeldung (der Wi
 ## Folgen
 
 - Neue Targets `Acceptance`, `kaiorx-acceptance`, `AcceptanceTests`; drei Codex-Kontoschemas in den Fixtures (Digest unverändert).
-- Bis zum ersten bestandenen und committeten Bericht bleiben beide Versionen `offlineVerified`. Seit dem vierten Lauf verbirgt die Rolle `agentCLI` den Benutzerordner; der Isolationsschritt verlangt das, und ein lesbarer Benutzerordner lässt ihn scheitern.
+- Claude 2.1.329 und Codex 0.170.0 sind `liveVerified`, jeweils nur für den abgenommenen Build und Modus; jede andere Version oder jeder andere Build braucht einen eigenen bestandenen Lauf. Die Rolle `agentCLI` verbirgt den Benutzerordner, auch in der App; der Isolationsschritt verlangt das.

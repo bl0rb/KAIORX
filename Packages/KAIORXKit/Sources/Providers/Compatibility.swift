@@ -108,9 +108,12 @@ public enum CompatibilityMatrix {
         CompatibilityEntry(
             provider: .claude, version: "2.1.329", status: .liveVerified,
             notes: """
-                Self-updated from 2.1.328 on 2026-11-20 during the owner's first live run; all 15 flags of the \
-                automatic profile exist in `claude --help` of this version. `claude auth status --json` fields \
-                recorded (loggedIn, authMethod, apiProvider, loginExpiresAt). Open: a passed live acceptance.
+                Self-updated from 2.1.328 on 2026-11-20; all flags of the automatic profile exist in `claude --help` \
+                of this version. Live-verified by the owner on 2026-11-20 (run 20261120-1429-a265, subscription \
+                login, home folder hidden): read, write limited to the allowed path, isolation, cancel (recorded as \
+                unresolved, Claude confirms no cancel), revoke (a synthetic `authentication_failed` message, no \
+                model call). Needs `USER`/`LOGNAME` to find its keychain login. Open: quota signals were not \
+                observed, second-account detection was not tested.
                 """,
             schemaDigest: nil,
             builds: ["8c1729568b19cdadedd0a978bf692f9f279ef554c8a333c4e132b94fd8725550"],
@@ -120,7 +123,11 @@ public enum CompatibilityMatrix {
             provider: .codex, version: "0.170.0", status: .liveVerified,
             notes: """
                 Requests sent and fixture messages validated against `app-server generate-json-schema` of this \
-                binary. Open: SIWC login and token refresh, live turn with approvals, `account/rateLimits/read`.
+                binary. Live-verified by the owner on 2026-11-20 (run 20261120-1429-a265, CLI-managed login, home \
+                folder hidden): under KAIORX's confinement with `externalSandbox` and `untrusted` approvals, read \
+                via an approved `cat`, write via an approved patch limited to the allowed path, isolation, cancel, \
+                rate-limit signals, revoke (401 without a login). Open: SIWC login and token refresh, \
+                second-account detection.
                 """,
             schemaDigest: "22b6df4324c33a4945cab3ba72870108aca2745fe617552ccb85e46966091bf0",
             builds: ["9248cfeebec9b4cc3034d5114caab10fbf426cbfa79dba410c5fa1b72762abd6"],
