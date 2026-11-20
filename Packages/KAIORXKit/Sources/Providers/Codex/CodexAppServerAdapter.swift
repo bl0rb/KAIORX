@@ -26,6 +26,8 @@ public struct CodexConfiguration: Sendable {
     public var clientVersion: String
     /// Keep sent and received messages for contract tests.
     public var recordsTranscript: Bool
+    /// Raw protocol lines for the owner's acceptance recording (nil in the product).
+    public var lineSink: ProtocolLineSink?
 
     public init(
         executable: String, codexHome: String, temporaryRoot: String,
@@ -33,8 +35,9 @@ public struct CodexConfiguration: Sendable {
         authentication: Authentication = .cliManaged, policy: AdapterPolicy = AdapterPolicy(),
         confinement: @escaping @Sendable (AttemptSpec, String) -> Confinement? = { _, _ in nil },
         stopGrace: Duration = .seconds(5), requestTimeout: Duration = .seconds(60), clientVersion: String = "0.1.0",
-        recordsTranscript: Bool = false
+        recordsTranscript: Bool = false, lineSink: ProtocolLineSink? = nil
     ) {
+        self.lineSink = lineSink
         self.executable = executable
         self.codexHome = codexHome
         self.temporaryRoot = temporaryRoot
@@ -104,7 +107,7 @@ public final class CodexAppServerAdapter: AgentAdapter {
         ))
         let handle = CodexRunHandle(
             spec: spec, workingDirectory: workingDirectory, process: process, grace: configuration.stopGrace,
-            timeout: configuration.requestTimeout, recordsTranscript: configuration.recordsTranscript
+            timeout: configuration.requestTimeout, recordsTranscript: configuration.recordsTranscript, lineSink: configuration.lineSink
         )
         do {
             try await handle.open(clientVersion: configuration.clientVersion)
@@ -117,6 +120,49 @@ public final class CodexAppServerAdapter: AgentAdapter {
 
     public func reconcile(_ request: ReconcileRequest) async throws -> ReconcileResult {
         .unknown
+    }
+
+    /// Reads the signed-in account and its rate limits from the app server, then stops it: no
+    /// thread, no turn, no inference. For the owner's acceptance kit and the product preflight.
+    public func inspect(scratch: String) async throws -> CodexAccountReport {
+        let identity = try await identity.current(configuration.executable, host: host)
+        try FileManager.default.createDirectory(atPath: scratch, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(atPath: configuration.codexHome, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let spec = AttemptSpec(
+            attemptID: AttemptID(), taskID: TaskID(), projectID: ProjectID(), role: .reviewer, provider: .codex, runMode: .automatic,
+            modelProfile: "inspect", effectiveModel: "none", workingDirectory: scratch, prompt: ""
+        )
+        let confinement = configuration.confinement(spec, scratch)
+        if confinement == nil, configuration.policy.requiresConfinement { throw ProviderError.confinementRequired }
+        let process = try await host.launch(LaunchSpec(
+            executable: identity.resolvedPath, arguments: ["app-server", "--listen", "stdio://", "--strict-config"] + Self.baseOverrides,
+            workingDirectory: scratch,
+            environment: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": configuration.home, "TMPDIR": scratch, "LANG": "en_US.UTF-8", "CODEX_HOME": configuration.codexHome],
+            outputLimit: 64 << 10, stopGrace: configuration.stopGrace, confinement: confinement, streamsOutput: true, interactiveInput: true
+        ))
+        let connection = JSONRPCConnection(process: process, lineSink: configuration.lineSink)
+        await connection.setHandlers(notifications: { _, _ in }, requests: { method, _ in throw JSONRPCConnection.Refusal.unsupported(method) })
+        let reader = Task {
+            var framer = LineFramer()
+            for await chunk in process.output ?? AsyncStream(unfolding: { nil }) {
+                guard case .stdout(let data) = chunk else { continue }
+                for line in (try? framer.append(data)) ?? [] { try? await connection.receive(line) }
+            }
+            await connection.close(with: ProviderError.protocolViolation("app server exited"))
+        }
+        defer { reader.cancel() }
+        do {
+            _ = try await connection.request("initialize", CodexMessages.initialize(clientVersion: configuration.clientVersion), timeout: configuration.requestTimeout)
+            await connection.notify("initialized")
+            let account = try await connection.request("account/read", ["refreshToken": false], timeout: configuration.requestTimeout)
+            let limits = try? await connection.request("account/rateLimits/read", .null, timeout: configuration.requestTimeout)
+            process.closeInput()
+            await process.stop(grace: configuration.stopGrace)
+            return CodexAccountReport(account: account, rateLimits: limits)
+        } catch {
+            await process.stop(grace: configuration.stopGrace)
+            throw error
+        }
     }
 
     /// Tool processes inherit no environment.
@@ -262,14 +308,17 @@ final class CodexRunHandle: RunHandle {
         var cancelRequested = false
     }
 
-    init(spec: AttemptSpec, workingDirectory: String, process: ManagedProcess, grace: Duration, timeout: Duration, recordsTranscript: Bool) {
+    init(
+        spec: AttemptSpec, workingDirectory: String, process: ManagedProcess, grace: Duration, timeout: Duration, recordsTranscript: Bool,
+        lineSink: ProtocolLineSink? = nil
+    ) {
         self.attemptID = spec.attemptID
         self.spec = spec
         self.process = process
         self.grace = grace
         self.timeout = timeout
         self.state = Mutex(State(approval: ApprovalContext(role: spec.role, workingDirectory: workingDirectory, writablePaths: spec.writablePaths)))
-        self.connection = JSONRPCConnection(process: process, recordsTranscript: recordsTranscript)
+        self.connection = JSONRPCConnection(process: process, recordsTranscript: recordsTranscript, lineSink: lineSink)
         (events, continuation) = AsyncThrowingStream<AgentEvent, any Error>.makeStream()
     }
 

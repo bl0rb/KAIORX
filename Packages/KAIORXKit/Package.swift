@@ -31,6 +31,10 @@ let package = Package(
         // UI-independent state of the workspace (ADR 0007): projection, labels, decisions, editor
         // documents, diffs, terminal sessions, backup restore, app bootstrap. No SwiftUI/AppKit.
         .target(name: "Workbench", dependencies: ["Domain", "Storage", "Memory", "Providers", "ProcessHost", "Workspace", "Orchestration"]),
+        // The account owner's live acceptance kit (package A, ADR 0008): run by hand, never by
+        // tests, CI or an agent.
+        .target(name: "Acceptance", dependencies: ["Domain", "Providers", "ProcessHost", "Workspace", "Memory"]),
+        .executableTarget(name: "kaiorx-acceptance", dependencies: ["Acceptance", "Domain", "Providers", "ProcessHost", "Workspace", "Storage", "Workbench"]),
         // Development CLI until the Xcode app exists: open projects, start fake runs, list active runs.
         .executableTarget(name: "kaiorx-dev", dependencies: ["Domain", "Storage", "Providers", "Orchestration"]),
 
@@ -43,6 +47,7 @@ let package = Package(
         .testTarget(name: "OrchestrationTests", dependencies: ["Domain", "Storage", "Providers", "Orchestration", "ProcessHost", "Workspace", "ProviderFixtures", "Memory", "Workbench"]),
         .testTarget(name: "ProcessHostTests", dependencies: ["ProcessHost"]),
         .testTarget(name: "WorkspaceTests", dependencies: ["ProcessHost", "Workspace"]),
+        .testTarget(name: "AcceptanceTests", dependencies: ["Acceptance", "Domain", "Providers", "ProcessHost", "Workspace", "ProviderFixtures"]),
         .testTarget(name: "WorkbenchTests", dependencies: ["Domain", "Storage", "Memory", "Providers", "ProcessHost", "Workspace", "Orchestration", "Workbench", "ProviderFixtures"]),
     ]
 )

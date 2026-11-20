@@ -58,10 +58,12 @@ public enum RoleProfile: Sendable, Equatable {
     /// Files in `CLAUDE_CONFIG_DIR` that configure Claude Code itself.
     public static let claudeStateFiles = ["settings.json", "settings.local.json", "CLAUDE.md", "agents/", "skills/", "commands/", "hooks/", "plugins/"]
 
+    /// `hideHome` hides the whole home folder except `homeExceptions` (read-only) and the roots
+    /// the role writes or sees; without it only the credential folders are hidden.
     public func confinement(
         worktree: String, runTemporaryDirectory: String, layout: WorkspaceLayout,
         home: String = FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false),
-        extraHidden: [String] = []
+        extraHidden: [String] = [], hideHome: Bool = false, homeExceptions: [String] = []
     ) -> Confinement {
         let writable: [String] = switch self {
         case .author: [worktree, runTemporaryDirectory]
@@ -71,8 +73,11 @@ public enum RoleProfile: Sendable, Equatable {
         }
         var visible = [worktree]
         var network = false
-        // The link file decides which repository host Git would use; nobody else writes it.
+        // The link file decides which repository host Git would use; nobody else writes it. In a
+        // plain checkout `.git` is the repository itself: the whole folder stays read-only.
         var protected = [worktree + "/.git"]
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: worktree + "/.git", isDirectory: &isDirectory), isDirectory.boolValue { protected.append(worktree + "/.git/") }
         var secretPaths = WorkspaceLayout.secretHomePaths
         if case .agentCLI(let state, _, let files, let keychain) = self {
             visible.append(state)
@@ -81,7 +86,13 @@ public enum RoleProfile: Sendable, Equatable {
             // Only for a CLI that keeps its login there (Claude Code).
             if keychain { secretPaths.removeAll { $0 == "Library/Keychains" } }
         }
-        let secrets = secretPaths.map { home + "/" + $0 }
+        var secrets = secretPaths.map { home + "/" + $0 }
+        if hideHome {
+            secrets.append(home)
+            visible += homeExceptions
+            // Keychains stay readable for a CLI that keeps its login there.
+            if case .agentCLI(_, _, _, true) = self { visible.append(home + "/Library/Keychains") }
+        }
         return Confinement(
             writableRoots: writable, hiddenRoots: [layout.root] + secrets + extraHidden,
             visibleRoots: visible, allowsNetwork: network, protectedPaths: protected

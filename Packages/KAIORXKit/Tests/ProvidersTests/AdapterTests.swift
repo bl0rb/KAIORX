@@ -575,7 +575,7 @@ func received(_ root: String, _ spec: AttemptSpec) throws -> JSONValue {
         let adapter = CodexAppServerAdapter(
             configuration: CodexConfiguration(
                 executable: executable, codexHome: root + "/codex-home", temporaryRoot: root + "/runs", home: root,
-                policy: AdapterPolicy(requiresLiveVerification: false, requiresConfinement: true)
+                policy: .fixtureTestingConfined
             ),
             host: ProcessHost()
         )

@@ -16,14 +16,17 @@ public struct ClaudeCodeConfiguration: Sendable {
     /// allow network for the CLI itself; the profile has no command-running tools.
     public var confinement: @Sendable (AttemptSpec, _ temporaryDirectory: String) -> Confinement?
     public var stopGrace: Duration
+    /// Raw protocol lines for the owner's acceptance recording (nil in the product).
+    public var lineSink: ProtocolLineSink?
 
     public init(
         executable: String, configDirectory: String, temporaryRoot: String,
         home: String = FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false),
         policy: AdapterPolicy = AdapterPolicy(),
         confinement: @escaping @Sendable (AttemptSpec, String) -> Confinement? = { _, _ in nil },
-        stopGrace: Duration = .seconds(5)
+        stopGrace: Duration = .seconds(5), lineSink: ProtocolLineSink? = nil
     ) {
+        self.lineSink = lineSink
         self.executable = executable
         self.configDirectory = configDirectory
         self.temporaryRoot = temporaryRoot
@@ -44,6 +47,26 @@ public final class ClaudeCodeAdapter: AgentAdapter {
     public init(configuration: ClaudeCodeConfiguration, host: ProcessHost) {
         self.configuration = configuration
         self.host = host
+    }
+
+    /// `claude auth status --json` in KAIORX's own config folder, with the run environment and
+    /// confinement of a reviewer attempt. Reads the login state; no inference, no login. Only the
+    /// owner's acceptance kit and the product preflight call it, never tests (CLAUDE.md).
+    public func authStatus(scratch: String) async throws -> ClaudeAuthStatus {
+        let identity = try await identity.current(configuration.executable, host: host)
+        try FileManager.default.createDirectory(atPath: scratch, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let spec = AttemptSpec(
+            attemptID: AttemptID(), taskID: TaskID(), projectID: ProjectID(), role: .reviewer, provider: .claude, runMode: .automatic,
+            modelProfile: "auth", effectiveModel: "none", workingDirectory: scratch, prompt: ""
+        )
+        let confinement = configuration.confinement(spec, scratch)
+        if confinement == nil, configuration.policy.requiresConfinement { throw ProviderError.confinementRequired }
+        let result = try await host.run(LaunchSpec(
+            executable: identity.resolvedPath, arguments: ["auth", "status", "--json"], workingDirectory: scratch,
+            environment: ClaudeCommand.environment(configDirectory: configuration.configDirectory, temporaryDirectory: scratch, home: configuration.home),
+            outputLimit: 64 << 10, timeout: .seconds(30), confinement: confinement
+        ))
+        return ClaudeAuthStatus(output: result.stdout.text, exitCode: { if case .exited(let code) = result.termination { code } else { -1 } }())
     }
 
     /// Version and matrix status only; no login check (needs package A fixtures) and no inference.
@@ -75,7 +98,8 @@ public final class ClaudeCodeAdapter: AgentAdapter {
             standardInput: Data(spec.prompt.utf8), outputLimit: 64 << 10, stopGrace: configuration.stopGrace,
             confinement: confinement, streamsOutput: true
         ))
-        return ClaudeRunHandle(attemptID: spec.attemptID, process: process, grace: configuration.stopGrace)
+        configuration.lineSink?(true, spec.prompt)
+        return ClaudeRunHandle(attemptID: spec.attemptID, process: process, grace: configuration.stopGrace, lineSink: configuration.lineSink)
     }
 
     /// Runs without session persistence cannot be resumed; after a restart only a local
@@ -92,7 +116,7 @@ final class ClaudeRunHandle: RunHandle {
     private let grace: Duration
     private let cancelRequested = Flag()
 
-    init(attemptID: AttemptID, process: ManagedProcess, grace: Duration) {
+    init(attemptID: AttemptID, process: ManagedProcess, grace: Duration, lineSink: ProtocolLineSink? = nil) {
         self.attemptID = attemptID
         self.process = process
         self.grace = grace
@@ -106,6 +130,7 @@ final class ClaudeRunHandle: RunHandle {
                 for await chunk in process.output ?? AsyncStream(unfolding: { nil }) {
                     guard case .stdout(let data) = chunk else { continue }
                     for line in try framer.append(data) {
+                        lineSink?(false, line)
                         for event in try parser.parse(line, cancelRequested: cancelled.isSet) {
                             continuation.yield(event)
                         }

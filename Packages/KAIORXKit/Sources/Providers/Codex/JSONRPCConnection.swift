@@ -36,9 +36,13 @@ actor JSONRPCConnection {
     /// Requests that gave up waiting; their late responses are ignored.
     private var timedOut: Set<Int64> = []
 
-    init(process: ManagedProcess, recordsTranscript: Bool = false) {
+    /// Raw lines for the owner's acceptance recording.
+    let lineSink: ProtocolLineSink?
+
+    init(process: ManagedProcess, recordsTranscript: Bool = false, lineSink: ProtocolLineSink? = nil) {
         self.process = process
         self.recordsTranscript = recordsTranscript
+        self.lineSink = lineSink
     }
 
     func setHandlers(notifications: @escaping NotificationHandler, requests: @escaping RequestHandler) {
@@ -87,6 +91,7 @@ actor JSONRPCConnection {
         let message: JSONValue
         do { message = try JSONValue.parse(line) } catch { throw ProviderError.protocolViolation("invalid JSON-RPC frame") }
         if recordsTranscript { transcript.append((false, message)) }
+        lineSink?(false, line)
         let method = message["method"]?.string
         let id = message["id"]
         switch (method, id) {
@@ -137,6 +142,7 @@ actor JSONRPCConnection {
 
     private func enqueue(_ message: JSONValue) {
         if recordsTranscript { transcript.append((true, message)) }
+        lineSink?(true, message.description)
         outbox.append(message)
         guard !draining else { return }
         draining = true

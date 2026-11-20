@@ -59,6 +59,38 @@ public struct CompatibilityEntry: Sendable, Equatable, Codable {
     public var notes: String
     /// SHA-256 over the generated protocol schema (Codex), if any.
     public var schemaDigest: String?
+    /// SHA-256 of the native builds a live acceptance covered (any arch); empty before one.
+    public var builds: [String]
+    /// The committed acceptance report a `liveVerified` status rests on.
+    public var evidence: LiveEvidence?
+
+    public init(
+        provider: ProviderKind, version: String, status: VerificationStatus, notes: String, schemaDigest: String?,
+        builds: [String] = [], evidence: LiveEvidence? = nil
+    ) {
+        self.provider = provider
+        self.version = version
+        self.status = status
+        self.notes = notes
+        self.schemaDigest = schemaDigest
+        self.builds = builds
+        self.evidence = evidence
+    }
+}
+
+/// Where the proof of a live acceptance lies: a report in the repository (relative path) and the
+/// SHA-256 of that file, so the entry cannot point at a changed report.
+public struct LiveEvidence: Sendable, Equatable, Codable {
+    public var reportPath: String
+    public var reportSHA256: String
+    /// The auth mode the run used (`claudeSubscription`, `codexCliManaged`).
+    public var mode: String
+
+    public init(reportPath: String, reportSHA256: String, mode: String) {
+        self.reportPath = reportPath
+        self.reportSHA256 = reportSHA256
+        self.mode = mode
+    }
 }
 
 public enum CompatibilityMatrix {
@@ -90,26 +122,64 @@ public enum CompatibilityMatrix {
 
 /// Whether an adapter may start automatic runs.
 public struct AdapterPolicy: Sendable, Equatable {
-    /// Require a `liveVerified` matrix entry for the probed version (the product default).
-    public var requiresLiveVerification: Bool
-    /// Refuse to start without OS confinement for the provider process (the product default).
-    public var requiresConfinement: Bool
+    enum Gate: Sendable, Equatable {
+        /// The product: a `liveVerified` matrix entry for the probed version and build.
+        case liveVerified
+        /// The owner's live acceptance run (package A): an `offlineVerified` or `liveVerified`
+        /// entry for the version, and exactly this binary (SHA-256). Used only by the owner-run
+        /// acceptance kit (a source-scan test keeps it there).
+        case ownerAcceptance(binarySHA256: String)
+        /// Fixture programs stand in for the CLIs (tests only).
+        case fixtures
+    }
 
-    public init(requiresLiveVerification: Bool = true, requiresConfinement: Bool = true) {
-        self.requiresLiveVerification = requiresLiveVerification
+    let gate: Gate
+    /// Refuse to start without OS confinement for the provider process.
+    public let requiresConfinement: Bool
+
+    /// The product default: live-verified versions only, always confined.
+    public init() {
+        self.init(gate: .liveVerified, requiresConfinement: true)
+    }
+
+    init(gate: Gate, requiresConfinement: Bool) {
+        self.gate = gate
         self.requiresConfinement = requiresConfinement
     }
 
+    public var requiresLiveVerification: Bool { gate == .liveVerified }
+
     /// Test fixtures stand in for the real binaries; never use this for a provider binary.
-    public static let fixtureTesting = AdapterPolicy(requiresLiveVerification: false, requiresConfinement: false)
+    public static let fixtureTesting = AdapterPolicy(gate: .fixtures, requiresConfinement: false)
+
+    /// Fixtures, but confined like the product (tests of the confinement wiring).
+    public static let fixtureTestingConfined = AdapterPolicy(gate: .fixtures, requiresConfinement: true)
+
+    /// The owner's live acceptance of exactly this binary; always confined.
+    public static func ownerAcceptance(binarySHA256: String) -> AdapterPolicy {
+        AdapterPolicy(gate: .ownerAcceptance(binarySHA256: binarySHA256), requiresConfinement: true)
+    }
 
     func check(_ provider: ProviderKind, identity: BinaryIdentity) throws {
-        guard requiresLiveVerification else { return }
-        guard let entry = CompatibilityMatrix.entry(for: provider, version: identity.version) else {
-            throw ProviderError.versionNotInMatrix(provider: provider, version: identity.version)
-        }
-        guard entry.status == .liveVerified else {
-            throw ProviderError.notLiveVerified(provider: provider, version: identity.version)
+        switch gate {
+        case .fixtures:
+            return
+        case .ownerAcceptance(let sha):
+            guard CompatibilityMatrix.entry(for: provider, version: identity.version) != nil else {
+                throw ProviderError.versionNotInMatrix(provider: provider, version: identity.version)
+            }
+            guard identity.sha256 == sha else { throw ProviderError.binaryChanged(identity.resolvedPath) }
+        case .liveVerified:
+            guard let entry = CompatibilityMatrix.entry(for: provider, version: identity.version) else {
+                throw ProviderError.versionNotInMatrix(provider: provider, version: identity.version)
+            }
+            guard entry.status == .liveVerified else {
+                throw ProviderError.notLiveVerified(provider: provider, version: identity.version)
+            }
+            // A live acceptance binds the build that passed; another build of the same version waits.
+            if !entry.builds.isEmpty, !entry.builds.contains(identity.sha256) {
+                throw ProviderError.notLiveVerified(provider: provider, version: identity.version)
+            }
         }
     }
 }

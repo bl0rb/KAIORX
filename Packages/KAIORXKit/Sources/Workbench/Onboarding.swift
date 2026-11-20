@@ -45,16 +45,26 @@ public struct ProbeResults: Sendable, Equatable {
 }
 
 public enum Onboarding {
-    /// Where the provider CLIs are usually installed; the first executable match wins.
+    /// Where the provider CLIs are usually installed; the first executable match wins. Node
+    /// version managers (nvm) put `codex` under `~/.nvm/versions/node/<v>/bin`, newest first.
     public static func candidatePaths(_ provider: ProviderKind, home: String = NSHomeDirectory()) -> [String] {
         let name = provider == .claude ? "claude" : "codex"
         var paths = ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)", "\(home)/.local/bin/\(name)", "\(home)/.npm-global/bin/\(name)"]
         if provider == .claude { paths.append("\(home)/.claude/local/claude") }
+        let nvm = home + "/.nvm/versions/node"
+        let versions = ((try? FileManager.default.contentsOfDirectory(atPath: nvm)) ?? [])
+            .sorted { $0.compare($1, options: .numeric) == .orderedDescending }
+        paths += versions.map { "\(nvm)/\($0)/bin/\(name)" }
         return paths
     }
 
+    /// The native executable of the first installed CLI (an npm launcher resolves to its
+    /// vendored binary, which the adapters can start without Node).
     public static func locate(_ provider: ProviderKind, home: String = NSHomeDirectory()) -> String? {
-        candidatePaths(provider, home: home).first { FileManager.default.isExecutableFile(atPath: $0) }
+        for path in candidatePaths(provider, home: home) where FileManager.default.isExecutableFile(atPath: path) {
+            if let native = try? NativeBinary.resolve(path) { return native }
+        }
+        return nil
     }
 
     /// Runs the local probes: Git, `--version` of each CLI found, the sandbox check.

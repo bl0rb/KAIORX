@@ -28,6 +28,9 @@ Abweichungen vom Plan brauchen ein ADR in `docs/adr/`.
   without a passed live run by the account owner. A new Codex version needs a regenerated
   schema in `Tests/ProvidersTests/Fixtures/` and passing contract tests. Do not run the real
   `claude`/`codex` binaries for inference or log-in from code or tests.
+- `kaiorx-acceptance` (ADR 0008) is the owner's live acceptance kit: never run it (it refuses agent
+  contexts anyway), never set `liveVerified` by hand; only an owner-exported report with its
+  `matrix.patch` does that, checked by the evidence test.
 
 ## Model escalation
 

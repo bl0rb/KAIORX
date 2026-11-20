@@ -20,4 +20,4 @@ These checks need the account owner, a Developer ID certificate, or a second Mac
 7. **Your checkout stays untouched:** with uncommitted work in the checkout, run a job to publication. `git status` and `HEAD` of the checkout must be byte-identical before and after.
 8. **Display:** check with Increase Contrast and in Dark Mode.
 9. **Restore:** in Settings, mark a migration backup for restore and restart. Consents must be revoked. A backup older than a forget must be refused.
-10. **Live provider runs (package A):** before any version is marked `liveVerified`, do one small, owner-authorized run per provider.
+10. **Live provider runs (package A):** follow `docs/live-acceptance/README.md` (`kaiorx-acceptance`). A version becomes `liveVerified` only through the exported, owner-committed report and `matrix.patch`.

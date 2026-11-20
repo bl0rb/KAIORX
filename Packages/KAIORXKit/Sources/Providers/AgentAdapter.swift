@@ -25,3 +25,7 @@ public protocol RunHandle: Sendable {
     /// Orderly interrupt. Early and repeated calls are allowed.
     func cancel(reason: String) async
 }
+
+/// Receives every protocol line of a run (`outgoing`: written to the provider), for the owner's
+/// acceptance recording. Lines are raw: the receiver must redact before keeping anything.
+public typealias ProtocolLineSink = @Sendable (_ outgoing: Bool, _ line: String) -> Void

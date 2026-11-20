@@ -27,6 +27,8 @@ Package G (memory and sources) is in progress. Confirmed task, project and globa
 
 Package H (workspace and beta) is in progress. The native app (`KAIORX.xcodeproj`, SwiftUI and AppKit) shows projects, jobs and tasks, a filtered monitor with a bounded timeline, candidate review with per-file diffs against the first parent, and decision sheets that name the action, its scope and what a rejection means. Approvals bind to the commit shown and expire. The app also has an editor that writes only to your own checkout and only on Save, a PTY terminal (SwiftTerm) with a filtered environment, onboarding with local checks, and restore of migration backups protected by a purge ledger. The UI-independent logic lives in the `Workbench` target. A signed, notarized beta needs the owner's Developer ID (`scripts/release.sh`, `docs/beta-checklist.md`). See `docs/adr/0007-arbeitsoberflaeche-und-beta.md`.
 
+Package A (live acceptance) has an owner-only kit, `kaiorx-acceptance`. The account owner runs it by hand in Terminal.app to check one provider version live: binary identity, subscription-only login, billing, read and write tasks on synthetic data, isolation probes, cancellation and revocation. It writes a report with redacted recordings, plus a proposed matrix change that the owner reviews and commits. It never runs from tests, CI or an agent. See `docs/live-acceptance/README.md` and `docs/adr/0008-live-abnahme-durch-den-kontoinhaber.md`.
+
 ## Build and test
 
 ```sh
@@ -47,6 +49,7 @@ xcodebuild -project KAIORX.xcodeproj -scheme KAIORX -skipPackagePluginValidation
 | `KAIORX.xcodeproj`, `App/` | The macOS app (SwiftUI/AppKit, SwiftTerm pinned to 1.99.3) |
 | `Tests/UITests/` | XCUITests of the app |
 | `App/Assets.xcassets`, `Design/branding/` | App icon ("Constellation K") and its source artwork (SVG, 1024 px) |
+| `docs/live-acceptance/` | Owner guide for the live acceptance; committed reports and recordings |
 | `scripts/release.sh`, `docs/beta-checklist.md` | Owner-run signing, notarization and the manual beta checks |
 | `docs/adr/` | Architecture decisions that change the plan (German) |
 | `scripts/test.sh` | Package test runner |

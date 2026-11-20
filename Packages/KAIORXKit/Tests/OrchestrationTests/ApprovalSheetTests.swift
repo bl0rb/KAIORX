@@ -65,9 +65,10 @@ import Testing
     @Test func recoveryDoesNotPublishWithAnExpiredApproval() async throws {
         let (h, candidate) = try await accepted()
         let before = try await h.target()
-        let approval = try await h.integration.approve(candidate.id, actor: WorkbenchActor.user, shown: nil, ttl: 1)
+        // Long enough to journal the publication even under load, then let it run out.
+        let approval = try await h.integration.approve(candidate.id, actor: WorkbenchActor.user, shown: nil, ttl: 3_000)
         _ = try await h.base.store.preparePublication(candidate: candidate.id, approval: approval.id)
-        try await Task.sleep(for: .milliseconds(20))
+        try await Task.sleep(for: .milliseconds(3_100))
         _ = try await h.integration.recover()
         #expect(try await h.target() == before)
         #expect(try await h.base.store.candidate(candidate.id)?.state == .accepted)
