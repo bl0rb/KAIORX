@@ -13,3 +13,8 @@
 # Swift
 .build/
 .swiftpm/
+
+# Xcode
+build/
+xcuserdata/
+*.xcuserstate

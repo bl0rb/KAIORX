@@ -7,11 +7,12 @@ import Foundation
 /// the app (ADR 0002).
 public actor ProcessHost {
     private var processes: [UUID: ManagedProcess] = [:]
+    private var terminals: [UUID: TerminalProcess] = [:]
     private var isDraining = false
 
     public init() {}
 
-    public var activeCount: Int { processes.count }
+    public var activeCount: Int { processes.count + terminals.count }
     public var acceptsLaunches: Bool { !isDraining }
 
     public func launch(_ spec: LaunchSpec) throws -> ManagedProcess {
@@ -42,6 +43,11 @@ public actor ProcessHost {
     @discardableResult
     public func drain(timeout: Duration, grace: Duration = .seconds(2)) async -> Int {
         isDraining = true
+        // Terminals are hung up at once: an interactive shell does not finish on its own.
+        let open = Array(terminals.values)
+        await withTaskGroup(of: Void.self) { group in
+            for terminal in open { group.addTask { await terminal.hangUp(grace: grace) } }
+        }
         let deadline = ContinuousClock.now + timeout
         while !processes.isEmpty, ContinuousClock.now < deadline {
             await pause(.milliseconds(10))
@@ -55,7 +61,7 @@ public actor ProcessHost {
                 }
             }
         }
-        return remaining.count
+        return remaining.count + open.count
     }
 
     /// Accepts launches again after a drain.
@@ -65,5 +71,17 @@ public actor ProcessHost {
 
     private func forget(_ id: UUID) {
         processes[id] = nil
+    }
+
+    func trackTerminal(_ terminal: TerminalProcess) {
+        terminals[terminal.id] = terminal
+        Task {
+            _ = await terminal.wait()
+            self.forgetTerminal(terminal.id)
+        }
+    }
+
+    private func forgetTerminal(_ id: UUID) {
+        terminals[id] = nil
     }
 }

@@ -562,7 +562,9 @@ extension Store {
     public func forgetMemory(_ entries: [MemoryEntryID]) throws -> ForgetReport {
         let db = try connection()
         let now = currentTime()
-        return try db.transaction { try forget(db, entries: entries, now: now) }
+        let report = try db.transaction { try forget(db, entries: entries, now: now) }
+        try PurgeLedger.record([(report.purgeJob, now)], database: path)
+        return report
     }
 
     /// Forgets every memory entry of a project (and what was derived from them elsewhere).
@@ -574,7 +576,7 @@ extension Store {
                 try parseID($0.requiredText(0)) as MemoryEntryID
             }
             return try forget(db, entries: entries, now: now)
-        }
+        }.recordingLedger(database: path, at: now)
     }
 
     func forget(_ db: SQLiteConnection, entries: [MemoryEntryID], now: Int64) throws -> ForgetReport {
@@ -721,6 +723,8 @@ extension Store {
         var outcome = PurgeOutcome()
         let jobs = try db.query("SELECT id, at FROM purge_job WHERE state = 'pending' ORDER BY at, id") { (try parseID($0.requiredText(0)) as PurgeJobID, $0.int(1)) }
         guard !jobs.isEmpty else { return outcome }
+        // A crash between the forget and its ledger line is caught up here (before any restore).
+        try PurgeLedger.record(jobs, database: path)
         let url = URL(filePath: path)
         let folder = url.deletingLastPathComponent().path(percentEncoded: false)
         let prefix = url.lastPathComponent + ".backup-"
@@ -1046,5 +1050,12 @@ extension Store {
             """,
             [.text(project.uuidString)]
         ) { (try parseID($0.requiredText(0)) as MemoryRevisionID, try $0.requiredText(1)) }
+    }
+}
+
+extension ForgetReport {
+    func recordingLedger(database: String, at time: Int64) throws -> ForgetReport {
+        try PurgeLedger.record([(purgeJob, time)], database: database)
+        return self
     }
 }

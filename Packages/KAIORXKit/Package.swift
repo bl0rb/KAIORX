@@ -5,7 +5,7 @@ let package = Package(
     name: "KAIORXKit",
     platforms: [.macOS(.v15)],
     products: [
-        .library(name: "KAIORXKit", targets: ["Domain", "Storage", "Providers", "Orchestration", "ProcessHost", "Workspace", "Memory"]),
+        .library(name: "KAIORXKit", targets: ["Domain", "Storage", "Providers", "Orchestration", "ProcessHost", "Workspace", "Memory", "Workbench"]),
         .executable(name: "kaiorx-dev", targets: ["kaiorx-dev"]),
     ],
     targets: [
@@ -28,6 +28,9 @@ let package = Package(
         .target(name: "Workspace", dependencies: ["ProcessHost"]),
         // Starts attempts, persists their event streams, recovers after restart.
         .target(name: "Orchestration", dependencies: ["Domain", "Storage", "Providers", "ProcessHost", "Workspace", "Memory"]),
+        // UI-independent state of the workspace (ADR 0007): projection, labels, decisions, editor
+        // documents, diffs, terminal sessions, backup restore, app bootstrap. No SwiftUI/AppKit.
+        .target(name: "Workbench", dependencies: ["Domain", "Storage", "Memory", "Providers", "ProcessHost", "Workspace", "Orchestration"]),
         // Development CLI until the Xcode app exists: open projects, start fake runs, list active runs.
         .executableTarget(name: "kaiorx-dev", dependencies: ["Domain", "Storage", "Providers", "Orchestration"]),
 
@@ -37,8 +40,9 @@ let package = Package(
         // Test support: fixture programs that speak the provider protocols, and a JSON Schema checker.
         .target(name: "ProviderFixtures", dependencies: ["Providers"], path: "Tests/ProviderFixtures"),
         .testTarget(name: "ProvidersTests", dependencies: ["Domain", "Providers", "ProcessHost", "ProviderFixtures"], exclude: ["Fixtures"]),
-        .testTarget(name: "OrchestrationTests", dependencies: ["Domain", "Storage", "Providers", "Orchestration", "ProcessHost", "Workspace", "ProviderFixtures", "Memory"]),
+        .testTarget(name: "OrchestrationTests", dependencies: ["Domain", "Storage", "Providers", "Orchestration", "ProcessHost", "Workspace", "ProviderFixtures", "Memory", "Workbench"]),
         .testTarget(name: "ProcessHostTests", dependencies: ["ProcessHost"]),
         .testTarget(name: "WorkspaceTests", dependencies: ["ProcessHost", "Workspace"]),
+        .testTarget(name: "WorkbenchTests", dependencies: ["Domain", "Storage", "Memory", "Providers", "ProcessHost", "Workspace", "Orchestration", "Workbench", "ProviderFixtures"]),
     ]
 )

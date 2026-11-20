@@ -227,8 +227,10 @@ public struct ApprovalRecord: Sendable, Equatable, Codable, Identifiable {
     public var state: ApprovalState
     public var grantedAt: Int64
     public var resolvedAt: Int64?
+    /// After this time the approval no longer allows publication (nil: rows from before v8).
+    public var expiresAt: Int64?
 
-    public init(id: ApprovalID, candidateID: CandidateID, candidateOID: String, expectedOldOID: String, targetRef: String, action: ApprovalAction, policyVersion: Int, actor: String, state: ApprovalState, grantedAt: Int64, resolvedAt: Int64? = nil) {
+    public init(id: ApprovalID, candidateID: CandidateID, candidateOID: String, expectedOldOID: String, targetRef: String, action: ApprovalAction, policyVersion: Int, actor: String, state: ApprovalState, grantedAt: Int64, resolvedAt: Int64? = nil, expiresAt: Int64? = nil) {
         self.id = id
         self.candidateID = candidateID
         self.candidateOID = candidateOID
@@ -240,7 +242,10 @@ public struct ApprovalRecord: Sendable, Equatable, Codable, Identifiable {
         self.state = state
         self.grantedAt = grantedAt
         self.resolvedAt = resolvedAt
+        self.expiresAt = expiresAt
     }
+
+    public func isExpired(at time: Int64) -> Bool { expiresAt.map { time >= $0 } ?? false }
 }
 
 extension EventKind {

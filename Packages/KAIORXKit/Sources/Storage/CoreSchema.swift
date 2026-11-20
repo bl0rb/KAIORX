@@ -2,7 +2,7 @@
 /// consent, accounts, plans, worktrees, budgets, candidates and Git operations follow as new
 /// migrations with their packages; applied migrations are never edited.
 public enum CoreSchema {
-    public static let migrations: [Migration] = [v1, v2, v3, v4, v5, v6, v7]
+    public static let migrations: [Migration] = [v1, v2, v3, v4, v5, v6, v7, v8]
 
     static let v1 = Migration(version: 1, name: "core", sql: """
         CREATE TABLE project (
@@ -669,5 +669,11 @@ public enum CoreSchema {
     /// get a session handle again (no resume), even from a late `started` event.
     static let v7 = Migration(version: 7, name: "memoryChecks", sql: """
         ALTER TABLE attempt ADD COLUMN resume_blocked_at INTEGER;
+        """)
+
+    /// Package H (ADR 0007): an approval expires; open approvals are found by state and expiry.
+    static let v8 = Migration(version: 8, name: "approvalExpiry", sql: """
+        ALTER TABLE approval ADD COLUMN expires_at INTEGER;
+        CREATE INDEX approval_state_expiry ON approval (state, expires_at);
         """)
 }

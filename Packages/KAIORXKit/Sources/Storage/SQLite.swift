@@ -71,10 +71,18 @@ struct SQLRow {
 final class SQLiteConnection {
     private var handle: OpaquePointer?
 
-    init(path: String) throws {
+    /// `readOnly` opens a finished file (a backup) immutably: no `-wal`/`-shm` files are created
+    /// next to it and nothing is written.
+    init(path: String, readOnly: Bool = false) throws {
         var db: OpaquePointer?
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
-        let rc = sqlite3_open_v2(path, &db, flags, nil)
+        let flags = (readOnly ? SQLITE_OPEN_READONLY | SQLITE_OPEN_URI : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE) | SQLITE_OPEN_FULLMUTEX
+        var name = path
+        if readOnly {
+            var allowed = CharacterSet.urlPathAllowed
+            allowed.remove(charactersIn: "?#%")
+            name = "file:" + (path.addingPercentEncoding(withAllowedCharacters: allowed) ?? path) + "?mode=ro&immutable=1"
+        }
+        let rc = sqlite3_open_v2(name, &db, flags, nil)
         guard rc == SQLITE_OK, let db else {
             let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "Cannot open database"
             sqlite3_close_v2(db)
@@ -179,6 +187,18 @@ final class SQLiteConnection {
         Darwin.close(fd)
         let destination = try SQLiteConnection(path: path)
         defer { destination.close() }
+        guard let backup = sqlite3_backup_init(try destination.db(), "main", try db(), "main") else {
+            throw destination.error(sqlite3_errcode(try destination.db()))
+        }
+        let rc = sqlite3_backup_step(backup, -1)
+        let finish = sqlite3_backup_finish(backup)
+        guard rc == SQLITE_DONE else { throw SQLiteError(code: rc, message: "Backup step failed") }
+        guard finish == SQLITE_OK else { throw destination.error(finish) }
+    }
+
+    /// Copies this whole database into `destination` (replacing its content) with the online
+    /// backup API, so WAL content and page format are handled by SQLite.
+    func copy(into destination: SQLiteConnection) throws {
         guard let backup = sqlite3_backup_init(try destination.db(), "main", try db(), "main") else {
             throw destination.error(sqlite3_errcode(try destination.db()))
         }

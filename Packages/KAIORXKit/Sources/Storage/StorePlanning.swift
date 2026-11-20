@@ -404,18 +404,32 @@ extension Store {
         }
     }
 
-    /// Revokes a consent: no new reservation under it from now on.
-    public func revokeConsent(_ id: ConsentID) throws {
+    /// Revokes a consent: no new reservation under it from now on. `reason` names why (for
+    /// example `restored` after a backup restore); nil for the user's own revocation.
+    public func revokeConsent(_ id: ConsentID, reason: String? = nil) throws {
+        let db = try connection()
+        let now = currentTime()
+        try db.transaction { try revokeConsent(db, id, reason: reason, now: now) }
+    }
+
+    func revokeConsent(_ db: SQLiteConnection, _ id: ConsentID, reason: String?, now: Int64) throws {
+        let consent = try loadConsent(db, id)
+        guard consent.revokedAt == nil else { return }
+        try db.run("UPDATE consent SET revoked_at = ? WHERE id = ?", [.integer(now), .text(id.uuidString)])
+        try appendEvent(
+            db, kind: .policyDecided, projectID: consent.draft.projectID.uuidString, taskID: nil, attemptID: nil,
+            payload: Canonical.encode(["consentID": id.uuidString, "action": "revoked", "reason": reason ?? "user"]), dedupKey: nil, now: now
+        )
+    }
+
+    /// Revokes every open consent in one transaction (after restoring a backup: nothing granted
+    /// then counts now).
+    public func revokeAllConsents(reason: String) throws {
         let db = try connection()
         let now = currentTime()
         try db.transaction {
-            let consent = try loadConsent(db, id)
-            guard consent.revokedAt == nil else { return }
-            try db.run("UPDATE consent SET revoked_at = ? WHERE id = ?", [.integer(now), .text(id.uuidString)])
-            try appendEvent(
-                db, kind: .policyDecided, projectID: consent.draft.projectID.uuidString, taskID: nil, attemptID: nil,
-                payload: Canonical.encode(["consentID": id.uuidString, "action": "revoked"]), dedupKey: nil, now: now
-            )
+            let ids = try db.query("SELECT id FROM consent WHERE revoked_at IS NULL ORDER BY granted_at, id") { try parseID($0.requiredText(0)) as ConsentID }
+            for id in ids { try revokeConsent(db, id, reason: reason, now: now) }
         }
     }
 

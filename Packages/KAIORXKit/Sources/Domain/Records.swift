@@ -172,12 +172,15 @@ public struct EventRecord: Sendable, Equatable, Codable {
     public var payloadID: ArtifactID?
     public var payload: Data?
     public var dedupKey: String?
+    /// Set when a forget removed the payload (ADR 0006 §7).
+    public var payloadPurgedAt: Int64?
 
     public init(
         seq: Int64, eventID: EventID, schemaVersion: Int, projectID: ProjectID, taskID: TaskID?,
         attemptID: AttemptID?, ordinal: Int?, kind: EventKind, at: Int64, payloadID: ArtifactID?,
-        payload: Data?, dedupKey: String?
+        payload: Data?, dedupKey: String?, payloadPurgedAt: Int64? = nil
     ) {
+        self.payloadPurgedAt = payloadPurgedAt
         self.seq = seq
         self.eventID = eventID
         self.schemaVersion = schemaVersion

@@ -368,9 +368,11 @@ public actor WorkspaceService {
             }
             return (.needsAttention, "ref is at \(current ?? "nothing"), expected \(operation.expectedOld ?? "nothing")", GitOperationEffects())
         }
-        // A publication is repeated only while the user's approval still stands and the task still
-        // waits for the merge (a hold taken meanwhile stops it).
-        if publication, let approval = operation.approvalID, try await store.approval(approval)?.state != .granted {
+        // A publication is repeated only while the user's approval still stands (granted and not
+        // expired, ADR 0007) and the task still waits for the merge (a hold taken meanwhile stops it).
+        let now = await store.now()
+        if publication, let approval = operation.approvalID, let record = try await store.approval(approval),
+           record.state != .granted || record.isExpired(at: now) {
             let release = operation.candidateID.map { GitOperationEffects(candidateReleased: ($0, .accepted)) } ?? GitOperationEffects()
             return (.failed, "approval no longer valid", release)
         }

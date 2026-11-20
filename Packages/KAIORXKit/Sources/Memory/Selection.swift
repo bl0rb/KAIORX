@@ -110,6 +110,34 @@ public enum SecretScanner {
         ("assignment", #"(?i)\b(?:password|passwd|secret|api[_\-]?key|access[_\-]?token|auth[_\-]?token)\s*[:=]\s*["']?[^\s"']{8,}"#),
     ]
 
+    /// Every match with its full range (UTF-8 byte offsets); a private key reaches to its END
+    /// line (or the end of the text), a quoted assignment to the closing quote.
+    public static func ranges(_ text: String) -> [(kind: String, range: Range<Int>)] {
+        var result: [(String, Range<Int>)] = []
+        let bytes = text.utf8.count
+        for (kind, pattern) in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            for match in regex.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+                guard let range = Range(match.range, in: text) else { continue }
+                let start = text[..<range.lowerBound].utf8.count
+                var end = text[..<range.upperBound].utf8.count
+                if kind == "privateKey" {
+                    let rest = text[range.upperBound...]
+                    if let close = rest.range(of: #"-----END [A-Z ]*PRIVATE KEY-----"#, options: .regularExpression) {
+                        end = text[..<close.upperBound].utf8.count
+                    } else {
+                        end = bytes
+                    }
+                } else if kind == "assignment", let quote = text[range].first(where: { $0 == "\"" || $0 == "'" }),
+                          let close = text[range.upperBound...].firstIndex(of: quote) {
+                    end = text[..<text.index(after: close)].utf8.count
+                }
+                result.append((kind, start..<end))
+            }
+        }
+        return result.sorted { $0.1.lowerBound < $1.1.lowerBound }
+    }
+
     public static func scan(_ text: String) -> [SecretFinding] {
         var findings: [SecretFinding] = []
         for (kind, pattern) in patterns {

@@ -583,6 +583,55 @@ public actor Store {
         }
     }
 
+    /// The newest event's `seq` (0 without events).
+    public func latestEventSeq() throws -> Int64 {
+        try connection().query("SELECT COALESCE(MAX(seq), 0) FROM event") { $0.int(0) }.first ?? 0
+    }
+
+    /// Event headers after a cursor, oldest first, without payloads (for UI projection); with
+    /// `project`, only that project's events.
+    public func eventHeaders(after seq: Int64 = 0, project: ProjectID? = nil, limit: Int = 500) throws -> [EventRecord] {
+        var values: [SQLValue] = [.integer(seq)]
+        if let project { values.append(.text(project.uuidString)) }
+        values.append(.integer(Int64(limit)))
+        return try connection().query(
+            """
+            SELECT seq, event_id, schema_version, project_id, task_id, attempt_id, ordinal, kind, at, payload_id, dedup_key
+            FROM event WHERE seq > ? \(project == nil ? "" : "AND project_id = ?") ORDER BY seq LIMIT ?
+            """,
+            values
+        ) { row in
+            EventRecord(
+                seq: row.int(0), eventID: try parseID(row.requiredText(1)), schemaVersion: Int(row.int(2)),
+                projectID: try parseID(row.requiredText(3)), taskID: try row.text(4).map(parseID),
+                attemptID: try row.text(5).map(parseID), ordinal: row.optionalInt(6).map(Int.init),
+                kind: EventKind(rawValue: try row.requiredText(7)), at: row.int(8),
+                payloadID: try row.text(9).map(parseID), payload: nil, dedupKey: row.text(10)
+            )
+        }
+    }
+
+    /// One attempt's events (with payloads) in ordinal order, a page at a time.
+    public func attemptEvents(_ attempt: AttemptID, afterOrdinal: Int = 0, limit: Int = 500) throws -> [EventRecord] {
+        try connection().query(
+            """
+            SELECT e.seq, e.event_id, e.schema_version, e.project_id, e.task_id, e.attempt_id, e.ordinal,
+                   e.kind, e.at, e.payload_id, a.inline_content, e.dedup_key, e.payload_purged_at
+            FROM event e LEFT JOIN artifact a ON a.id = e.payload_id
+            WHERE e.attempt_id = ? AND e.ordinal > ? ORDER BY e.ordinal LIMIT ?
+            """,
+            [.text(attempt.uuidString), .integer(Int64(afterOrdinal)), .integer(Int64(limit))]
+        ) { row in
+            EventRecord(
+                seq: row.int(0), eventID: try parseID(row.requiredText(1)), schemaVersion: Int(row.int(2)),
+                projectID: try parseID(row.requiredText(3)), taskID: try row.text(4).map(parseID),
+                attemptID: try row.text(5).map(parseID), ordinal: row.optionalInt(6).map(Int.init),
+                kind: EventKind(rawValue: try row.requiredText(7)), at: row.int(8),
+                payloadID: try row.text(9).map(parseID), payload: row.blob(10), dedupKey: row.text(11), payloadPurgedAt: row.optionalInt(12)
+            )
+        }
+    }
+
     public func snapshot() throws -> StoreSnapshot {
         StoreSnapshot(
             projects: try projects(), jobs: try jobs(), tasks: try tasks(), attempts: try attempts(),

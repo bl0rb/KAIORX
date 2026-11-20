@@ -58,6 +58,8 @@ public enum IntegrationStoreError: Error, Equatable, Sendable {
     case staleEvidence(candidate: CandidateID, oid: String)
     case blockingFindingCannotBeAccepted(FindingID)
     case approvalNotUsable(ApprovalID, ApprovalState)
+    /// The approval's time ran out; it is revoked and a new decision is needed.
+    case approvalExpired(ApprovalID)
     /// Evidence changed since the caller checked the gate.
     case evidenceChanged(CandidateID)
     case openRevertExists(CandidateID)
@@ -458,7 +460,9 @@ extension Store {
 
     /// The user's approval to publish exactly this commit on top of exactly `expectedOldOID`.
     @discardableResult
-    public func grantApproval(candidate id: CandidateID, expectedOldOID: String, policyVersion: Int, actor: String) throws -> ApprovalRecord {
+    public func grantApproval(
+        candidate id: CandidateID, expectedOldOID: String, policyVersion: Int, actor: String, ttl: Int64? = nil
+    ) throws -> ApprovalRecord {
         let db = try connection()
         let now = currentTime()
         return try db.transaction {
@@ -469,16 +473,18 @@ extension Store {
             try requireAwaitingMerge(db, candidate)
             let approval = ApprovalRecord(
                 id: ApprovalID(), candidateID: id, candidateOID: oid, expectedOldOID: expectedOldOID, targetRef: candidate.targetRef,
-                action: .publishIntegration, policyVersion: policyVersion, actor: actor, state: .granted, grantedAt: now, resolvedAt: nil
+                action: .publishIntegration, policyVersion: policyVersion, actor: actor, state: .granted, grantedAt: now, resolvedAt: nil,
+                expiresAt: ttl.map { now + $0 }
             )
             try db.run(
                 """
-                INSERT INTO approval (id, candidate_id, candidate_oid, expected_old_oid, target_ref, action, policy_version, actor, state, granted_at)
-                VALUES (?, ?, ?, ?, ?, 'publishIntegration', ?, ?, 'granted', ?)
+                INSERT INTO approval (id, candidate_id, candidate_oid, expected_old_oid, target_ref, action, policy_version, actor, state, granted_at,
+                    expires_at)
+                VALUES (?, ?, ?, ?, ?, 'publishIntegration', ?, ?, 'granted', ?, ?)
                 """,
                 [
                     .text(approval.id.uuidString), .text(id.uuidString), .text(oid), .text(expectedOldOID), .text(candidate.targetRef),
-                    .integer(Int64(policyVersion)), .text(actor), .integer(now),
+                    .integer(Int64(policyVersion)), .text(actor), .integer(now), .optional(approval.expiresAt),
                 ]
             )
             try appendEvent(
@@ -499,11 +505,25 @@ extension Store {
     public func preparePublication(candidate id: CandidateID, approval approvalID: ApprovalID, expectedVersion: Int? = nil) throws -> GitOperationID {
         let db = try connection()
         let now = currentTime()
+        // An expired approval is revoked (committed) before the refusal is thrown.
+        let expired: Bool = try db.transaction {
+            let approval = try loadApproval(db, approvalID)
+            guard approval.state == .granted, approval.isExpired(at: now) else { return false }
+            try db.run("UPDATE approval SET state = 'revoked', resolved_at = ? WHERE id = ? AND state = 'granted'", [.integer(now), .text(approvalID.uuidString)])
+            let candidate = try loadCandidate(db, approval.candidateID)
+            try appendEvent(
+                db, kind: .approvalResolved, projectID: candidate.projectID.uuidString, taskID: candidate.taskID?.uuidString, attemptID: nil,
+                payload: Canonical.encode(["approvalID": approvalID.uuidString, "state": "revoked", "reason": "expired"]), dedupKey: nil, now: now
+            )
+            return true
+        }
+        if expired { throw IntegrationStoreError.approvalExpired(approvalID) }
         return try db.transaction {
             let candidate = try loadCandidate(db, id)
             if let expectedVersion, candidate.version != expectedVersion { throw IntegrationStoreError.evidenceChanged(id) }
             let approval = try loadApproval(db, approvalID)
             guard approval.state == .granted else { throw IntegrationStoreError.approvalNotUsable(approvalID, approval.state) }
+            guard !approval.isExpired(at: now) else { throw IntegrationStoreError.approvalExpired(approvalID) }
             try requireAwaitingMerge(db, candidate)
             guard approval.candidateID == id, approval.candidateOID == candidate.candidateOID,
                   approval.expectedOldOID == candidate.previousTargetOID, let oid = candidate.candidateOID else {
@@ -716,14 +736,14 @@ extension Store {
     }
 
     private static let approvalColumns =
-        "id, candidate_id, candidate_oid, expected_old_oid, target_ref, action, policy_version, actor, state, granted_at, resolved_at"
+        "id, candidate_id, candidate_oid, expected_old_oid, target_ref, action, policy_version, actor, state, granted_at, resolved_at, expires_at"
 
     private static func approval(from row: SQLRow) throws -> ApprovalRecord {
         ApprovalRecord(
             id: try parseID(row.requiredText(0)), candidateID: try parseID(row.requiredText(1)), candidateOID: try row.requiredText(2),
             expectedOldOID: try row.requiredText(3), targetRef: try row.requiredText(4), action: try parseEnum(row.requiredText(5)),
             policyVersion: Int(row.int(6)), actor: try row.requiredText(7), state: try parseEnum(row.requiredText(8)),
-            grantedAt: row.int(9), resolvedAt: row.optionalInt(10)
+            grantedAt: row.int(9), resolvedAt: row.optionalInt(10), expiresAt: row.optionalInt(11)
         )
     }
 

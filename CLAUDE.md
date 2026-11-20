@@ -13,7 +13,12 @@ Abweichungen vom Plan brauchen ein ADR in `docs/adr/`.
 - Dev CLI: `swift run --package-path Packages/KAIORXKit kaiorx-dev --db <tmp path> …`.
   Without `--db` it writes to the real Application Support database.
 - Applied migrations in `CoreSchema` are never edited; schema changes are new migrations.
-- No Xcode on the dev machine yet: SwiftUI macros do not build, so no app target.
+- The app is `KAIORX.xcodeproj` (`App/`, UI tests in `Tests/UITests`); UI-independent logic goes
+  into the `Workbench` target. Xcode 27.2 is at `/Applications/Xcode.app` but `xcode-select` points
+  to the Command Line Tools: build with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`
+  and `-skipPackagePluginValidation`. UI tests use `-KAIORXUITest` (temp DB/repo, fake providers).
+- The editor saves only into the user's checkout on explicit Save (ADR 0007); everything else
+  stays read-only. The user terminal runs via `ProcessHost.launchTerminal` with its own env list.
 - Child processes only through `ProcessHost` (absolute executable, explicit environment);
   Git only through `GitRunner` and Git side effects only through `WorkspaceService`
   (journal first). Never run Git or tools in the user's checkout in a way that writes there.

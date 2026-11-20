@@ -55,7 +55,11 @@ enum Migrator {
         let before = try validatedVersion(db, migrations: migrations)
         var backupPath: String?
         if before > 0, before < (migrations.last?.version ?? 0), let databasePath {
-            let path = "\(databasePath).backup-v\(before)-\(now)"
+            // Two backups of one version in the same millisecond (a restore, then the upgrade):
+            // the next free millisecond, so no backup is overwritten or refused.
+            var time = now
+            while FileManager.default.fileExists(atPath: "\(databasePath).backup-v\(before)-\(time)") { time += 1 }
+            let path = "\(databasePath).backup-v\(before)-\(time)"
             try db.backup(to: path)
             backupPath = path
         }
@@ -76,7 +80,7 @@ enum Migrator {
 
     /// Current database version after checking it is not newer than the app and that every applied
     /// migration is unchanged.
-    private static func validatedVersion(_ db: SQLiteConnection, migrations: [Migration]) throws -> Int {
+    static func validatedVersion(_ db: SQLiteConnection, migrations: [Migration]) throws -> Int {
         let applied = try db.query("SELECT version, checksum FROM schema_migration ORDER BY version") {
             (version: Int($0.int(0)), checksum: try $0.requiredText(1))
         }

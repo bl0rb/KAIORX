@@ -13,6 +13,9 @@ public enum BuildOutcome: Sendable, Equatable {
 }
 
 public enum IntegrationError: Error, Equatable, Sendable {
+    /// The candidate changed after the decision sheet showed it: a new decision is needed.
+    case shownStateChanged(CandidateID)
+    case reasonRequired
     case jobWithoutIntegration(JobID)
     case resultNotSealed(WorktreeID)
     case candidateNotIn(CandidateID, CandidateState)
@@ -341,10 +344,15 @@ public actor IntegrationService {
 
     /// Why the candidate cannot be published yet; empty when only the approval is missing.
     public func gate(_ id: CandidateID) async throws -> [String] {
-        guard let candidate = try await store.candidate(id), let commit = candidate.candidateOID else { return ["no commit"] }
-        var missing: [String] = []
+        try await gateItems(id).map(\.description)
+    }
+
+    /// The same as `gate`, typed, for the user interface.
+    public func gateItems(_ id: CandidateID) async throws -> [GateItem] {
+        guard let candidate = try await store.candidate(id), let commit = candidate.candidateOID else { return [.noCommit] }
+        var missing: [GateItem] = []
         let tests = try await store.testResults(candidate: id).filter { $0.candidateOID == commit }
-        if tests.last?.status != .passed { missing.append("no passing test for \(commit)") }
+        if tests.last?.status != .passed { missing.append(.noPassingTest(commit)) }
         let reviews = try await store.reviews(candidate: id).filter { $0.candidateOID == commit && $0.status != .invalid }
         var planned: (risk: PlanTaskRisk, testProfile: String?, writePaths: [String]?)?
         if let taskID = candidate.taskID { planned = try await store.plannedTask(taskID) }
@@ -354,20 +362,20 @@ public actor IntegrationService {
             (review.origin == .userImported && !sensitive)
                 || (review.origin == .provider && review.reviewerProvider != nil && review.reviewerProvider != candidate.authorProvider)
         }
-        if !independent.contains(where: { $0.status == .approved }) { missing.append("no approving independent review for \(commit)") }
+        if !independent.contains(where: { $0.status == .approved }) { missing.append(.noIndependentReview(commit)) }
         // Findings count from every review of this commit, readable verdict or not: an unreadable
         // or foreign report only ever stores comments.
         if let planned, sensitive {
             // ADR 0005 §9: a sensitive task needs a named test profile and an approving human review.
-            if planned.testProfile == nil { missing.append("no test profile for a sensitive task") }
+            if planned.testProfile == nil { missing.append(.noTestProfileForSensitiveTask) }
             if !reviews.contains(where: { $0.origin == .userImported && $0.status == .approved }) {
-                missing.append("no approving human review for a sensitive task")
+                missing.append(.noHumanReviewForSensitiveTask)
             }
         }
         let reviewIDs = Set(try await store.reviews(candidate: id).filter { $0.candidateOID == commit }.map(\.id))
         let findings = try await store.findings(candidate: id).filter { reviewIDs.contains($0.reviewID) }
-        if findings.contains(where: { $0.severity == .blocking }) { missing.append("blocking findings") }
-        if findings.contains(where: { $0.severity.needsDecision && $0.disposition == .open }) { missing.append("undecided findings") }
+        if findings.contains(where: { $0.severity == .blocking }) { missing.append(.blockingFindings) }
+        if findings.contains(where: { $0.severity.needsDecision && $0.disposition == .open }) { missing.append(.undecidedFindings) }
         return missing
     }
 
@@ -393,11 +401,32 @@ public actor IntegrationService {
     /// The user's approval, bound to the candidate's commit and the target state it was built
     /// on. The gate is checked again: evidence may have arrived since acceptance.
     public func approve(_ id: CandidateID, actor: String) async throws -> ApprovalRecord {
+        try await approve(id, actor: actor, shown: nil, ttl: nil)
+    }
+
+    /// The approval from the decision sheet: `shown` is what the sheet displayed (commit, target
+    /// state, target ref); any difference to the candidate now refuses, so the user approves
+    /// exactly what they saw. `ttl` (milliseconds) limits how long the approval allows publishing.
+    public func approve(_ id: CandidateID, actor: String, shown: ShownApproval?, ttl: Int64?) async throws -> ApprovalRecord {
         let candidate = try await acceptedAfterEvaluation(id)
+        if let shown, shown.candidateOID != candidate.candidateOID || shown.expectedOldOID != candidate.previousTargetOID
+            || shown.targetRef != candidate.targetRef {
+            throw IntegrationError.shownStateChanged(id)
+        }
         try await requireTaskInVerification(candidate)
         try await requireGate(candidate)
         try await requireUnmovedTarget(candidate)
-        return try await store.grantApproval(candidate: id, expectedOldOID: candidate.previousTargetOID, policyVersion: policyVersion, actor: actor)
+        return try await store.grantApproval(
+            candidate: id, expectedOldOID: candidate.previousTargetOID, policyVersion: policyVersion, actor: actor, ttl: ttl
+        )
+    }
+
+    /// The user rejects a candidate (built, testing, reviewing, accepted or conflicted) with a
+    /// reason; its task follows (`needsChanges`, a revert task ends).
+    public func rejectCandidate(_ id: CandidateID, reason: String) async throws {
+        guard !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw IntegrationError.reasonRequired }
+        guard let candidate = try await store.candidate(id) else { throw IntegrationError.candidateNotIn(id, .rejected) }
+        try await reject(candidate, reason: reason)
     }
 
     /// Publishes exactly the approved commit with `update-ref <target> <C> <P>`.
@@ -637,6 +666,43 @@ public actor IntegrationService {
         case .timedOut: return (.timedOut, nil, "timed out")
         case .inputsModified(let paths): return (.inputsModified, nil, "changed versioned files: \(paths.joined(separator: ", "))")
         case .infrastructureError(let message): return (.infrastructureError, nil, message)
+        }
+    }
+}
+
+/// What the approval sheet showed; the approval binds to exactly this.
+public struct ShownApproval: Sendable, Equatable {
+    public var candidateOID: String?
+    public var expectedOldOID: String
+    public var targetRef: String
+
+    public init(candidateOID: String?, expectedOldOID: String, targetRef: String) {
+        self.candidateOID = candidateOID
+        self.expectedOldOID = expectedOldOID
+        self.targetRef = targetRef
+    }
+}
+
+/// One reason a candidate cannot be published yet.
+public enum GateItem: Sendable, Equatable, Hashable, CustomStringConvertible {
+    case noCommit
+    case noPassingTest(String)
+    case noIndependentReview(String)
+    case noTestProfileForSensitiveTask
+    case noHumanReviewForSensitiveTask
+    case blockingFindings
+    case undecidedFindings
+
+    /// The historical English text (logs, tests).
+    public var description: String {
+        switch self {
+        case .noCommit: "no commit"
+        case .noPassingTest(let commit): "no passing test for \(commit)"
+        case .noIndependentReview(let commit): "no approving independent review for \(commit)"
+        case .noTestProfileForSensitiveTask: "no test profile for a sensitive task"
+        case .noHumanReviewForSensitiveTask: "no approving human review for a sensitive task"
+        case .blockingFindings: "blocking findings"
+        case .undecidedFindings: "undecided findings"
         }
     }
 }
