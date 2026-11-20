@@ -489,3 +489,52 @@ struct FakeGate: CapabilityGate {
         await AppBootstrap.shutdown(services)
     }
 }
+
+/// The app's real adapters get the product confinement (ADR 0002, ADR 0008 point 6): the same
+/// `agentCLI` profile the owner's acceptance measures, home hidden, state folder writable.
+@Suite struct ProviderAdapterConfinementTests {
+    func spec(_ provider: ProviderKind, role: AttemptRole, worktree: String?) -> AttemptSpec {
+        AttemptSpec(
+            attemptID: AttemptID(), taskID: TaskID(), projectID: ProjectID(), role: role, provider: provider, runMode: .automatic,
+            modelProfile: "m", effectiveModel: "m", workingDirectory: worktree, prompt: "p"
+        )
+    }
+
+    @Test func bothRealAdaptersAreConfinedWithTheHomeFolderHidden() throws {
+        let support = try temporaryFolder("support")
+        let home = try temporaryFolder("home")
+        let bin = try temporaryFolder("bin")
+        let adapters = ProviderAdapters.make(host: ProcessHost(), support: support, home: home + "/") { provider in bin + "/" + provider.rawValue }
+        let worktree = AppConfiguration.workspaceRoot(support: support) + "/worktrees/w1"
+        let temporary = support + "/tmp/run-1"
+        #expect(adapters.count == 2)
+        for adapter in adapters {
+            let parts: (@Sendable (AttemptSpec, String) -> Confinement?, String, AdapterPolicy)? = switch adapter {
+            case let claude as ClaudeCodeAdapter: (claude.configuration.confinement, claude.configuration.configDirectory, claude.configuration.policy)
+            case let codex as CodexAppServerAdapter: (codex.configuration.confinement, codex.configuration.codexHome, codex.configuration.policy)
+            default: nil
+            }
+            let (configure, state, policy) = try #require(parts)
+            #expect(policy.requiresConfinement)
+            let provider = adapter.provider
+            let author = try #require(configure(spec(provider, role: .author, worktree: worktree), temporary))
+            let resolvedHome = Confinement.resolved(home)
+            #expect(author.hiddenRoots.map(Confinement.resolved).contains(resolvedHome))
+            #expect(author.hiddenRoots.map(Confinement.resolved).contains(Confinement.resolved(AppConfiguration.workspaceRoot(support: support))))
+            #expect(Set(author.writableRoots) == [worktree, temporary, state])
+            #expect(author.allowsNetwork)
+            #expect(author.visibleRoots.map(Confinement.resolved).contains(resolvedHome + "/Library/Keychains") == (provider == .claude))
+            #expect(!author.visibleRoots.contains { resolvedHome.hasPrefix(Confinement.resolved($0)) })
+            let reviewer = try #require(configure(spec(provider, role: .reviewer, worktree: worktree), temporary))
+            #expect(!reviewer.writableRoots.contains(worktree))
+            // No worktree: no confinement, so the adapter refuses to start (fail closed).
+            #expect(configure(spec(provider, role: .reviewer, worktree: nil), temporary) == nil)
+        }
+    }
+
+    @Test func aMissingCLIGetsNoAdapter() throws {
+        let support = try temporaryFolder("support")
+        let adapters = ProviderAdapters.make(host: ProcessHost(), support: support, home: try temporaryFolder("home")) { $0 == .codex ? "/opt/codex" : nil }
+        #expect(adapters.map(\.provider) == [.codex])
+    }
+}

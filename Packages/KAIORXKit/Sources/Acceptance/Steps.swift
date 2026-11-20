@@ -171,21 +171,17 @@ public struct RunFolders: Sendable {
     }
 }
 
-/// The confinement the product uses for an agent CLI (ADR 0003 role `agentCLI`): home hidden
-/// except the CLI's install folder (ADR 0008, point 6).
+/// The confinement the product uses for an agent CLI (`RoleProfile.agentCLIConfinement`, shared
+/// with the app's adapters), plus the kit's own hidden folders.
 public enum AgentConfinement {
     public static func make(
         provider: ProviderKind, spec: AttemptSpec, temporary: String, configDirectory: String, layout: WorkspaceLayout, home: String,
         extraHidden: [String], executable: String
     ) -> Confinement? {
-        guard let worktree = spec.workingDirectory else { return nil }
-        let profile = RoleProfile.agentCLI(
-            stateDirectory: configDirectory, writesWorktree: spec.role == .author,
-            protectedStateFiles: provider == .claude ? RoleProfile.claudeStateFiles : RoleProfile.codexStateFiles,
-            needsKeychain: provider == .claude
-        )
-        return profile.confinement(
-            worktree: worktree, runTemporaryDirectory: temporary, layout: layout, home: home, extraHidden: extraHidden, executable: executable
+        RoleProfile.agentCLIConfinement(
+            provider == .claude ? .claude : .codex, writesWorktree: spec.role == .author, worktree: spec.workingDirectory,
+            runTemporaryDirectory: temporary, stateDirectory: configDirectory, layout: layout, home: home, executable: executable,
+            extraHidden: extraHidden
         )
     }
 }

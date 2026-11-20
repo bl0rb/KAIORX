@@ -33,8 +33,11 @@ public struct AppConfiguration: Sendable {
     public static func standard(adapters: @escaping @Sendable (ProcessHost) -> [any AgentAdapter]) throws -> AppConfiguration {
         let database = try AppPaths.defaultDatabaseURL()
         let folder = try AppPaths.supportFolder()
-        return AppConfiguration(databasePath: database.path(percentEncoded: false), workspaceRoot: folder + "/workspace", adapters: adapters)
+        return AppConfiguration(databasePath: database.path(percentEncoded: false), workspaceRoot: workspaceRoot(support: folder), adapters: adapters)
     }
+
+    /// Where the real app keeps worktrees and its other workspace files.
+    public static func workspaceRoot(support: String) -> String { support + "/workspace" }
 }
 
 /// Why the app cannot open normally; the recovery screen offers restore or quit, never a crash.

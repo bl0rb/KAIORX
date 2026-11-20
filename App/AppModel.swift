@@ -311,22 +311,12 @@ struct UITestGate: CapabilityGate {
     func accessRestored(_ provider: ProviderKind, account: AccountID) async -> Bool { true }
 }
 
-/// The real adapters for CLIs that are installed. They only run when the user starts a task;
-/// automatic runs stay locked by the compatibility gate until a live acceptance (ADR 0003).
+/// The real adapters for CLIs that are installed, each under the product confinement
+/// (`ProviderAdapters`). They only run when the user starts a task; automatic runs stay locked
+/// by the compatibility gate until a live acceptance (ADR 0003).
 enum RealAdapters {
     static func make(host: ProcessHost) -> [any AgentAdapter] {
         guard let support = try? AppPaths.supportFolder() else { return [] }
-        var adapters: [any AgentAdapter] = []
-        if let claude = Onboarding.locate(.claude) {
-            adapters.append(ClaudeCodeAdapter(configuration: ClaudeCodeConfiguration(
-                executable: claude, configDirectory: support + "/claude-config", temporaryRoot: support + "/tmp"
-            ), host: host))
-        }
-        if let codex = Onboarding.locate(.codex) {
-            adapters.append(CodexAppServerAdapter(configuration: CodexConfiguration(
-                executable: codex, codexHome: support + "/codex-home", temporaryRoot: support + "/tmp"
-            ), host: host))
-        }
-        return adapters
+        return ProviderAdapters.make(host: host, support: support) { Onboarding.locate($0) }
     }
 }

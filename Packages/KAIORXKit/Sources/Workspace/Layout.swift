@@ -136,4 +136,29 @@ public enum RoleProfile: Sendable, Equatable {
         }
         return [opens(candidate) ? candidate : resolved]
     }
+
+    /// A provider CLI KAIORX runs (ADR 0003 role `agentCLI`).
+    public enum AgentCLI: Sendable {
+        case claude, codex
+    }
+
+    /// The product confinement of a provider CLI: the app's adapters and the owner's acceptance
+    /// kit both build it here, so the kit measures exactly what the product runs. Home hidden
+    /// except the CLI's install folder (ADR 0008, point 6); the state folder writable; the
+    /// worktree writable only for an author. `nil` without a worktree: the adapter then refuses
+    /// to start (fail closed).
+    public static func agentCLIConfinement(
+        _ cli: AgentCLI, writesWorktree: Bool, worktree: String?, runTemporaryDirectory: String, stateDirectory: String,
+        layout: WorkspaceLayout, home: String, executable: String, extraHidden: [String] = []
+    ) -> Confinement? {
+        guard let worktree else { return nil }
+        let profile = RoleProfile.agentCLI(
+            stateDirectory: stateDirectory, writesWorktree: writesWorktree,
+            protectedStateFiles: cli == .claude ? claudeStateFiles : codexStateFiles, needsKeychain: cli == .claude
+        )
+        return profile.confinement(
+            worktree: worktree, runTemporaryDirectory: runTemporaryDirectory, layout: layout, home: home, extraHidden: extraHidden,
+            executable: executable
+        )
+    }
 }
