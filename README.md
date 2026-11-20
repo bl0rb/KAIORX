@@ -3,31 +3,34 @@ KAIORX is a native macOS AI development environment that orchestrates multiple c
 
 ## Status
 
-Early implementation. Planned in Swift 6 for macOS 15+ on Apple silicon.
+Beta in preparation. Swift 6, macOS 15+ on Apple silicon. Packages A to H of the plan are implemented in `Packages/KAIORXKit` and the app; what remains are the owner's manual beta checks (see below).
 
-Package B (local core) is in progress in `Packages/KAIORXKit`:
+**Live-verified providers** (automatic runs allowed only for exactly these builds):
 
-- **Domain:** typed IDs, state machines for jobs, tasks and attempts, commands, events
-- **Storage:** single-writer SQLite store with migrations, an event journal and restart recovery
-- **Providers:** the adapter contract and a deterministic fake adapter
-- **Orchestration:** run coordinator, plus a workspace service that journals every Git side effect
+| Provider | Version | Mode | Evidence |
+|---|---|---|---|
+| Claude Code | 2.1.329 | subscription login | `docs/live-acceptance/20261120-1429-a265/` |
+| Codex | 0.170.0 | CLI-managed ChatGPT login | `docs/live-acceptance/20261120-1429-a265/` |
 
-Package C (workspace and safe runner) is also in progress:
+Any other version or build stays manual until it passes its own live acceptance.
 
-- **ProcessHost:** child processes in their own process group, with an explicit environment, bounded output, stop/drain, and macOS sandbox confinement
-- **Workspace:** host Git with sanitized settings, a locked worktree per attempt outside the user's checkout, results committed to private refs, and test runs
+What the packages deliver:
 
-Package D (provider adapters) is in progress offline. Adapters exist for Claude Code (headless `stream-json`) and the Codex App Server (stdio JSON-RPC). They are tested against fixture programs, and the Codex messages are checked against the protocol schema of the installed version. Automatic runs stay blocked until the live, user-authorized subscription runs of package A pass. See `docs/adr/0003-anbieteradapter-offline.md`.
+- **B, local core:** typed domain, single-writer SQLite store with migrations, an event journal and restart recovery, a deterministic fake adapter, the run coordinator.
+- **C, workspace and safe runner:** child processes in their own process group with an explicit environment, bounded output and stop/drain; macOS sandbox confinement (ADR 0002); host Git with sanitized settings and a locked worktree per attempt outside your checkout.
+- **D, provider adapters:** Claude Code (headless `stream-json`) and the Codex App Server (stdio JSON-RPC), contract-tested against fixtures and the installed protocol schema. Provider CLIs run in the `agentCLI` role with your home folder hidden except their install folder, their own state folder and the worktree (ADR 0003, ADR 0008).
+- **E, check and integrate:** a sealed author result becomes a candidate that another provider reviews; you approve it and it is published with a journaled compare-and-swap, delivered as a branch or reverted the same way (ADR 0004).
+- **F, plan and scheduling:** plans as validated DAGs with write areas, kept as immutable revisions; a scheduler that respects slots, write areas, consent, quota and budgets (ADR 0005).
+- **G, memory and sources:** task, project and global notes with provenance, searchable with SQLite FTS5; agents get only the excerpts granted for their project, task and provider; forgetting removes every local copy (ADR 0006).
+- **H, workspace and beta:** the native app (`KAIORX.xcodeproj`, SwiftUI/AppKit) with projects, jobs, a filtered monitor, candidate review with per-file diffs, decision sheets, an editor that writes only on Save, a PTY terminal, onboarding and backup restore (ADR 0007).
+- **A, live acceptance:** the owner-only kit `kaiorx-acceptance` checks one provider version live and proposes the matrix change that the owner commits (`docs/live-acceptance/README.md`, ADR 0008).
 
-Package E (check and integrate) is in progress. A sealed author result is merged into the job's integration target as a candidate. The candidate is tested and reviewed by another provider, then approved by the user and published with a journaled compare-and-swap. It can be delivered as a new branch or reverted through the same chain. A task moves together with its candidate. See `docs/adr/0004-integration-und-freigabe.md`.
+Still open before the beta:
 
-Package F (plan and scheduling) is in progress. A job's tasks form a validated plan (a DAG with write areas, criteria and difficulty), kept as immutable revisions. A scheduler starts ready tasks in critical-path order within slot, write-area, consent, quota and budget limits, and picks a model tier with repair and escalation rules. Without a live-verified provider, only an explicit user start runs. See `docs/adr/0005-plan-scheduler-routing.md`.
-
-Package G (memory and sources) is in progress. Confirmed task, project and global notes with provenance (user, Git blob, test, review, derived) are searchable with SQLite FTS5. An agent gets only excerpts granted for its project, task and provider (and the planned reviewer), selected deterministically and sent in one handover transaction with the attempt start. Forgetting removes every local copy, including derived notes, the content of attempts that received it and old app backups. See `docs/adr/0006-memory-und-quellen.md`.
-
-Package H (workspace and beta) is in progress. The native app (`KAIORX.xcodeproj`, SwiftUI and AppKit) shows projects, jobs and tasks, a filtered monitor with a bounded timeline, candidate review with per-file diffs against the first parent, and decision sheets that name the action, its scope and what a rejection means. Approvals bind to the commit shown and expire. The app also has an editor that writes only to your own checkout and only on Save, a PTY terminal (SwiftTerm) with a filtered environment, onboarding with local checks, and restore of migration backups protected by a purge ledger. The UI-independent logic lives in the `Workbench` target. A signed, notarized beta needs the owner's Developer ID (`scripts/release.sh`, `docs/beta-checklist.md`). See `docs/adr/0007-arbeitsoberflaeche-und-beta.md`.
-
-Package A (live acceptance) has an owner-only kit, `kaiorx-acceptance`. The account owner runs it by hand in Terminal.app to check one provider version live: binary identity, subscription-only login, billing, read and write tasks on synthetic data, isolation probes, cancellation and revocation. It writes a report with redacted recordings, plus a proposed matrix change that the owner reviews and commits. It never runs from tests, CI or an agent. See `docs/live-acceptance/README.md` and `docs/adr/0008-live-abnahme-durch-den-kontoinhaber.md`.
+- **End-to-end run in the app** with the real Claude Code and Codex (plan, author, review, approval, publication). So far the providers were checked live only through the acceptance kit.
+- **Owner's beta checks** in `docs/beta-checklist.md`: signing and notarization with a Developer ID, a clean Mac, macOS 15, offline first launch, VoiceOver and keyboard, quitting during a run, the untouched checkout, contrast and Dark Mode, restore.
+- **Optional live checks of package A:** second-account detection, Claude quota signals, login expiry and token refresh, Codex SIWC login.
+- **Performance:** the monitor timeline still reads every delta of a run when it is opened (target missed, see "Performance"); FTS at 10,000 chunks meets its target with little headroom; the reference Mac is still to be chosen.
 
 ## Build and test
 
@@ -41,6 +44,27 @@ xcodebuild -project KAIORX.xcodeproj -scheme KAIORX -skipPackagePluginValidation
 
 `scripts/test.sh` works with the Command Line Tools alone. The app and its UI tests need Xcode. UI tests run on a temporary database and Git repository with fake providers only. `-skipPackagePluginValidation` allows SwiftTerm's build-info plugin on the command line; Xcode asks once in the GUI.
 
+## Performance
+
+`kaiorx-bench` measures the beta targets of the plan on synthetic data in a temporary folder, with paced fake providers (never a real CLI, never the app's database):
+
+```sh
+swift run -c release --package-path Packages/KAIORXKit kaiorx-bench --full --out <folder>   # several minutes
+swift run --package-path Packages/KAIORXKit kaiorx-bench                                     # quick harness check
+```
+
+Baseline on an M4 MacBook Air (16 GB, release build): [docs/performance/2026-11-20-mac16-12.md](docs/performance/2026-11-20-mac16-12.md).
+
+| Target (plan) | Measured p95 | Result |
+|---|---|---|
+| FTS query at 10,000 active chunks < 200 ms | 185 ms (provider path with grants), 111 ms (owner view) | met, little headroom |
+| FTS load test at 50,000 chunks | 1,254 ms (provider path) | no target; grows with the corpus |
+| UI event < 250 ms after local receipt, two runs | 107 ms to the app state, 99 ms to the monitor timeline | met |
+| Replay of the last view without reading every delta | workspace view reads no events; the monitor timeline reads all 50,004 events of a run (209 ms) | **missed** |
+| Stop and approval usable with two active runs | Stop shown after 48 ms, approve + publish 122 ms | met (250 ms assumed; the plan names no number) |
+
+Not covered: memory pressure, a cold OS file cache, time to the first model token, SwiftUI rendering. The reference Mac for the beta is still to be chosen.
+
 ## Repository
 
 | Path | Content |
@@ -53,6 +77,7 @@ xcodebuild -project KAIORX.xcodeproj -scheme KAIORX -skipPackagePluginValidation
 | `scripts/release.sh`, `docs/beta-checklist.md` | Owner-run signing, notarization and the manual beta checks |
 | `docs/adr/` | Architecture decisions that change the plan (German) |
 | `scripts/test.sh` | Package test runner |
+| `Packages/KAIORXKit/Sources/Bench/`, `docs/performance/` | Performance harness `kaiorx-bench` and measured baselines |
 | `CLAUDE.md` | Project context and rule index for Claude Code |
 | `.claude/rules/` | Model escalation rules, loaded automatically by Claude Code |
 | `.claude/agents/` | Subagents `scout` (L1, read-only) and `escalation-reviewer` (L3) |
