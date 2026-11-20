@@ -595,6 +595,18 @@ extension Dictionary {
         #expect(RoleProfile.homeExceptions(executable: "/opt/homebrew/bin/codex", home: home) == [])
     }
 
+    /// Review of the hidden home: the install-folder exception must never re-open home itself
+    /// or a credential folder; then only the binary itself stays readable.
+    @Test func theInstallFolderExceptionNeverOpensHomeOrACredentialFolder() {
+        let home = "/Users/someone"
+        #expect(RoleProfile.homeExceptions(executable: home + "/codex", home: home) == [home + "/codex"])
+        #expect(RoleProfile.homeExceptions(executable: home + "/.config/codex", home: home + "/") == [home + "/.config/codex"]) // .config holds .config/gh
+        #expect(RoleProfile.homeExceptions(executable: home + "/.claude/local/claude", home: home) == [home + "/.claude/local/claude"])
+        #expect(RoleProfile.homeExceptions(executable: home + "/bin/codex", home: home) == [home + "/bin"])
+        #expect(RoleProfile.homeExceptions(executable: home + "/.nvm/versions/node/v24.15.0/lib/node_modules/x/bin/codex", home: home)
+            == [home + "/.nvm/versions/node/v24.15.0"])
+    }
+
     /// Codex runs its commands without its own sandbox (ADR 0008): the OS profile alone keeps
     /// them away from Codex's start-up environment and the worktree's agent folders.
     @Test func codexCommandsCannotWriteItsEnvironmentOrAgentFolders() async throws {

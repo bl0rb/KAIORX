@@ -113,20 +113,27 @@ public enum RoleProfile: Sendable, Equatable {
     }
     /// Folders below home a CLI needs to read when home is hidden: its own install folder
     /// (`~/.local/share/claude/versions/<v>` → `~/.local/share/claude`; with nvm the node version
-    /// folder; otherwise the binary's folder). Empty when the binary is not below home. `home`
-    /// may end with `/` (the path of a directory URL).
+    /// folder; otherwise the binary's folder). Empty when the binary is not below home. A folder
+    /// that is home itself, holds a credential folder or lies inside one is never opened; then
+    /// only the binary itself stays readable. `home` may end with `/` (a directory URL's path).
     public static func homeExceptions(executable: String, home: String) -> [String] {
         let resolved = Confinement.resolved(executable)
-        let home = home.count > 1 && home.hasSuffix("/") ? String(home.dropLast()) : home
+        let home = Confinement.resolved(home.count > 1 && home.hasSuffix("/") ? String(home.dropLast()) : home)
         guard resolved.hasPrefix(home + "/") else { return [] }
+        let secrets = WorkspaceLayout.secretHomePaths.map { home + "/" + $0 }
+        func opens(_ folder: String) -> Bool {
+            folder.hasPrefix(home + "/") && !secrets.contains { $0 == folder || $0.hasPrefix(folder + "/") || folder.hasPrefix($0 + "/") }
+        }
+        var candidate = Confinement.resolved(URL(filePath: resolved).deletingLastPathComponent().path(percentEncoded: false))
         var url = URL(filePath: resolved).deletingLastPathComponent()
         while url.path(percentEncoded: false).count > home.count + 1 {
             let name = url.lastPathComponent
             if name == "claude" || name.hasPrefix("v") && url.deletingLastPathComponent().lastPathComponent == "node" {
-                return [Confinement.resolved(url.path(percentEncoded: false))]
+                candidate = Confinement.resolved(url.path(percentEncoded: false))
+                break
             }
             url.deleteLastPathComponent()
         }
-        return [URL(filePath: resolved).deletingLastPathComponent().path(percentEncoded: false)]
+        return [opens(candidate) ? candidate : resolved]
     }
 }

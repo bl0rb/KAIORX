@@ -512,10 +512,17 @@ public actor AcceptanceRunner {
         let prompt = "Lies die Datei FACTS.md in diesem Ordner und antworte nur mit dem Kennwort, das dort steht."
         guard consent(index, step, prompt: prompt, folder: folders.repoA) else { return StepResult(status: .skipped, limitation: "Keine Zustimmung") }
         let before = TreeHash.of(folders.repoA)
-        let handle = try await adapter(index).start(spec(index, role: .reviewer, prompt: prompt))
+        let attempt = spec(index, role: .reviewer, prompt: prompt)
+        let run = state.providers[index]
+        // From the confinement the turn gets (the same call as in `adapter`), not a fixed text.
+        let hidden = AgentConfinement.make(
+            provider: run.provider, spec: attempt, temporary: folders.temporary, configDirectory: run.configDirectory, layout: folders.layout,
+            home: context.home, extraHidden: [folders.repoB, folders.outside], executable: run.nativePath
+        ).map { Self.hidesHome($0, home: context.home) } ?? false
+        let handle = try await adapter(index).start(attempt)
         let (events, ended, error) = await collect(handle, timeout: context.turnTimeout)
         let fixture = storeFixture(index, step: step)
-        var evidence = ["Benutzerordner verborgen: ja", "Ereignisse: \(events.count)", "Endstatus: \(completion(events).map { "\($0)" } ?? "keiner")"]
+        var evidence = ["Benutzerordner verborgen: \(hidden ? "ja" : "nein")", "Ereignisse: \(events.count)", "Endstatus: \(completion(events).map { "\($0)" } ?? "keiner")"]
         if let fixture { evidence.append("Aufzeichnung: \(fixture)") }
         if let error { evidence.append("Stream-Fehler: \(error)") }
         let started = events.contains { if case .started = $0 { true } else { false } }
@@ -528,11 +535,23 @@ public actor AcceptanceRunner {
 
     /// The read already runs with the home folder hidden: this optional step refers to it and
     /// starts no model turn of its own (kept so earlier run states still load).
+    /// A read recorded by an earlier kit (home readable, no such evidence) covers nothing.
     func hiddenHome(_ index: Int) -> StepResult {
-        if state.providers[index].steps[.read]?.status == .passed {
-            return StepResult(status: .passed, evidence: ["Abgedeckt durch den lesenden Auftrag, der mit verborgenem Benutzerordner läuft"])
+        guard let read = state.providers[index].steps[.read], read.status == .passed else {
+            return StepResult(status: .skipped, limitation: "Nicht abgedeckt: der lesende Auftrag hat nicht bestanden")
         }
-        return StepResult(status: .skipped, limitation: "Nicht abgedeckt: der lesende Auftrag hat nicht bestanden")
+        guard read.evidence.contains("Benutzerordner verborgen: ja") else {
+            return StepResult(status: .skipped, limitation: "Nicht abgedeckt: der lesende Auftrag lief nicht mit verborgenem Benutzerordner")
+        }
+        return StepResult(status: .passed, evidence: ["Abgedeckt durch den lesenden Auftrag, der mit verborgenem Benutzerordner läuft"])
+    }
+
+    /// Home is hidden, nothing re-opens it (a visible root at or above it) and no write rule covers it.
+    static func hidesHome(_ confinement: Confinement, home: String) -> Bool {
+        let home = Confinement.resolved(home.count > 1 && home.hasSuffix("/") ? String(home.dropLast()) : home)
+        func covers(_ root: String) -> Bool { let root = Confinement.resolved(root); return root == home || root == "/" || home.hasPrefix(root + "/") }
+        return confinement.hiddenRoots.contains { Confinement.resolved($0) == home }
+            && !confinement.visibleRoots.contains(where: covers) && !confinement.writableRoots.contains(where: covers)
     }
 
     func setStep(_ step: StepID, _ result: StepResult, provider index: Int = 0) {

@@ -340,12 +340,27 @@ $out->({type => 'result', subtype => 'success', is_error => JSON::PP::false, usa
     /// hidden-home step only refers to it and never starts another model turn.
     @Test func theHiddenHomeStepIsCoveredByTheReadWithoutAnotherTurn() async throws {
         let (runner, _, _) = try StandardErrorRecordingTests().runner()
-        await runner.setStep(.read, StepResult(status: .passed))
+        await runner.setStep(.read, StepResult(status: .passed, evidence: ["Benutzerordner verborgen: ja"]))
         let covered = await runner.perform(.hiddenHome, provider: 0)
         #expect(covered == StepResult(status: .passed, evidence: ["Abgedeckt durch den lesenden Auftrag, der mit verborgenem Benutzerordner läuft"]))
+        // A read recorded by an earlier kit (home readable) or with home visible covers nothing.
+        for evidence in [[], ["Benutzerordner verborgen: nein"]] {
+            await runner.setStep(.read, StepResult(status: .passed, evidence: evidence))
+            let earlier = await runner.perform(.hiddenHome, provider: 0)
+            #expect(earlier.status == .skipped && earlier.limitation == "Nicht abgedeckt: der lesende Auftrag lief nicht mit verborgenem Benutzerordner")
+        }
         await runner.setStep(.read, StepResult(status: .failed))
         let open = await runner.perform(.hiddenHome, provider: 0)
         #expect(open.status == .skipped && open.limitation == "Nicht abgedeckt: der lesende Auftrag hat nicht bestanden")
+    }
+
+    /// The evidence comes from the confinement itself, not a fixed text.
+    @Test func whetherHomeIsHiddenIsReadFromTheConfinement() {
+        let home = "/Users/someone"
+        #expect(AcceptanceRunner.hidesHome(Confinement(writableRoots: ["/tmp/w"], hiddenRoots: [home], visibleRoots: [home + "/.local/share/claude"]), home: home + "/"))
+        #expect(!AcceptanceRunner.hidesHome(Confinement(writableRoots: ["/tmp/w"], hiddenRoots: [home], visibleRoots: [home]), home: home))
+        #expect(!AcceptanceRunner.hidesHome(Confinement(writableRoots: ["/tmp/w"], hiddenRoots: [home + "/.ssh"]), home: home))
+        #expect(!AcceptanceRunner.hidesHome(Confinement(writableRoots: ["/"], hiddenRoots: [home]), home: home))
     }
 
     /// A readable home folder is now a leak like any other, not a recorded restriction.
