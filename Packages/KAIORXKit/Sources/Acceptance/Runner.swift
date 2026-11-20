@@ -6,15 +6,34 @@ import Providers
 import Synchronization
 import Workspace
 
-/// Collects the raw protocol lines of the current step (in memory only, redacted before writing).
+/// Collects the raw protocol lines of the current step and the provider's standard error (in
+/// memory only, redacted before writing).
 final class LineRecorder: Sendable {
     private let lines = Mutex<[String]>([])
+    private let errors = Mutex<[String]>([])
+    /// Only the end of a long standard error is kept: that is where an exit reason is.
+    static let errorLineLimit = 200
 
     var sink: ProtocolLineSink {
         { [self] outgoing, line in lines.withLock { $0.append((outgoing ? "> " : "< ") + line) } }
     }
 
-    func take() -> [String] { lines.withLock { defer { $0 = [] }; return $0 } }
+    var errorSink: DiagnosticLineSink {
+        { [self] line in
+            errors.withLock {
+                $0.append(line)
+                if $0.count > Self.errorLineLimit { $0.removeFirst($0.count - Self.errorLineLimit) }
+            }
+        }
+    }
+
+    /// The protocol lines; discards the standard error too (take that first with `takeErrors`).
+    func take() -> [String] {
+        errors.withLock { $0 = [] }
+        return lines.withLock { defer { $0 = [] }; return $0 }
+    }
+
+    func takeErrors() -> [String] { errors.withLock { defer { $0 = [] }; return $0 } }
 }
 
 /// What the runner needs from outside: where the run lives, who to ask, which binaries.
@@ -110,6 +129,10 @@ public actor AcceptanceRunner {
             // The detail helps diagnose a live failure; it is kept only if it passes redaction.
             var evidence = ["Fehler: \(Self.errorClass(error))"]
             if let detail = redactedDetail(String(describing: error)) { evidence.append("Detail: \(detail.prefix(400))") }
+            // What was recorded up to the failure (and the provider's standard error) helps most.
+            if let name = storeFixture(index, step: step) { evidence.append("Aufzeichnung: \(name)") }
+            evidence += notes
+            notes = []
             return StepResult(status: .failed, evidence: evidence)
         }
     }
@@ -194,7 +217,7 @@ public actor AcceptanceRunner {
         case .codex:
             return CodexAppServerAdapter(configuration: CodexConfiguration(
                 executable: run.nativePath, codexHome: config, temporaryRoot: folders.temporary, home: home, policy: policy,
-                confinement: confinement, lineSink: recorder.sink
+                confinement: confinement, lineSink: recorder.sink, diagnosticSink: recorder.errorSink
             ), host: context.host)
         case .fake:
             throw ProviderError.unsupportedMode(.automatic)
@@ -258,12 +281,39 @@ public actor AcceptanceRunner {
     }
 
     /// Redacts the recorded lines and stores them as a fixture; a private value means no file.
+    /// The provider's standard error goes to its own file, redacted on its own, so a private
+    /// value there does not cost the protocol recording.
     func storeFixture(_ index: Int, step: StepID) -> String? {
+        let errors = recorder.takeErrors()
         let lines = recorder.take()
-        guard !lines.isEmpty else { return nil }
         let run = state.providers[index]
+        let redactor = fixtureRedactor(run)
+        let base = "\(run.provider.rawValue)-\(run.identity?.version ?? "?")-\(step.rawValue)"
+        if !errors.isEmpty {
+            if let redacted = try? redactor.redact(lines: errors) {
+                let name = base + "-stderr.log"
+                try? Data((redacted.joined(separator: "\n") + "\n").utf8).write(to: URL(filePath: folders.fixtures + "/" + name), options: .atomic)
+                state.providers[index].fixtures.append(name)
+                notes.append("Fehlerausgabe: \(name)")
+            } else {
+                notes.append("Fehlerausgabe verworfen: privater Wert nach Redaktion")
+            }
+        }
+        guard !lines.isEmpty else { return nil }
+        guard let redacted = try? redactor.redact(lines: lines) else {
+            notes.append("Aufzeichnung verworfen: privater Wert nach Redaktion")
+            return nil
+        }
+        let name = base + ".jsonl"
+        let path = folders.fixtures + "/" + name
+        try? Data((redacted.joined(separator: "\n") + "\n").utf8).write(to: URL(filePath: path), options: .atomic)
+        state.providers[index].fixtures.append(name)
+        return name
+    }
+
+    func fixtureRedactor(_ run: ProviderRun) -> FixtureRedactor {
         let canaries = state.canaries
-        let redactor = FixtureRedactor(
+        return FixtureRedactor(
             denylist: [NSUserName(), ProcessInfo.processInfo.hostName, context.home, canaries["neighbour"]!, canaries["home"]!, canaries["outside"]!, canaries["env"]!],
             paths: [
                 (folders.repoA, "<repo-a>"), (folders.repoB, "<repo-b>"), (folders.outside, "<outside>"), (folders.temporary, "<tmp>"),
@@ -271,15 +321,6 @@ public actor AcceptanceRunner {
                 (context.home, "<home>"),
             ]
         )
-        guard let redacted = try? redactor.redact(lines: lines) else {
-            notes.append("Aufzeichnung verworfen: privater Wert nach Redaktion")
-            return nil
-        }
-        let name = "\(run.provider.rawValue)-\(run.identity?.version ?? "?")-\(step.rawValue).jsonl"
-        let path = folders.fixtures + "/" + name
-        try? Data((redacted.joined(separator: "\n") + "\n").utf8).write(to: URL(filePath: path), options: .atomic)
-        state.providers[index].fixtures.append(name)
-        return name
     }
 
     // MARK: Steps
@@ -591,7 +632,7 @@ public actor AcceptanceRunner {
         if state.providers[index].steps[.revoke]?.status != .waitingForOwner {
             prompter.show("""
                 Melde \(run.provider == .claude ? "Claude" : "Codex") jetzt für KAIORX ab oder widerrufe die Anmeldung beim Anbieter \
-                (Konfigurationsordner: \(run.configDirectory)). Starte danach `kaiorx-acceptance resume \(state.runID)`.
+                (Konfigurationsordner: \(run.configDirectory)). Starte danach den resume-Befehl, den das Kit am Ende anzeigt.
                 """)
             return StepResult(status: .waitingForOwner)
         }

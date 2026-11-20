@@ -1,4 +1,5 @@
 import Domain
+import Foundation
 
 /// Contract every provider adapter implements (Plan/laufzeitvertrag.md, "Swift-Schnittstellen").
 /// Provider wire objects never cross this boundary.
@@ -29,3 +30,51 @@ public protocol RunHandle: Sendable {
 /// Receives every protocol line of a run (`outgoing`: written to the provider), for the owner's
 /// acceptance recording. Lines are raw: the receiver must redact before keeping anything.
 public typealias ProtocolLineSink = @Sendable (_ outgoing: Bool, _ line: String) -> Void
+/// Receives a provider process's standard error line by line (owner's acceptance only).
+public typealias DiagnosticLineSink = @Sendable (_ line: String) -> Void
+
+/// Splits standard error into lines for a `DiagnosticLineSink`. A line longer than 4 KiB keeps
+/// only its start, cut back to a word or path boundary and marked with `…`: a private value is
+/// never split across two recorded pieces (the recording is redacted line by line).
+struct DiagnosticLines {
+    static let limit = 4096
+    let sink: DiagnosticLineSink?
+    private var pending = Data()
+    /// The rest of an overlong line is being dropped until its line break.
+    private var skipping = false
+
+    init(sink: DiagnosticLineSink?) {
+        self.sink = sink
+    }
+
+    mutating func append(_ data: Data) {
+        guard let sink else { return }
+        pending.append(data)
+        while let end = pending.firstIndex(of: 0x0A) {
+            if !skipping { sink(Self.line(pending[pending.startIndex..<end])) }
+            skipping = false
+            pending = Data(pending[pending.index(after: end)...])
+        }
+        if pending.count > Self.limit {
+            if !skipping { sink(Self.line(pending)) }
+            skipping = true
+            pending = Data()
+        }
+    }
+
+    /// Hands over an unterminated last line; later calls do nothing.
+    mutating func finish() {
+        guard let sink, !pending.isEmpty else { return }
+        if !skipping { sink(Self.line(pending)) }
+        pending = Data()
+    }
+
+    static func line(_ bytes: Data) -> String {
+        guard bytes.count > limit else { return String(decoding: bytes, as: UTF8.self) }
+        let head = bytes.prefix(limit)
+        // Back to the last space, tab, quote or slash, so the cut never lands inside a name.
+        let boundaries: Set<UInt8> = [0x20, 0x09, 0x22, 0x27, 0x2F]
+        let cut = head.lastIndex { boundaries.contains($0) }.map { head[head.startIndex...$0] } ?? Data()
+        return String(decoding: cut, as: UTF8.self) + "…"
+    }
+}

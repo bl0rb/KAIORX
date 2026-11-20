@@ -96,6 +96,7 @@ public enum FixturePrograms {
         $| = 1;
         if (@ARGV && $ARGV[0] eq '--version') { print "codex-cli 0.170.0\\n"; exit 0; }
         my $scenario = '\(scenario.rawValue)';
+        $SIG{INT} = sub { print STDERR "closing"; exit 0; };
         my $tmp = $ENV{TMPDIR} // '/tmp';
         my $json = JSON::PP->new->canonical->allow_nonref;
         { open(my $a, '>', "$tmp/received.json") or die; print $a $json->encode({argv => \\@ARGV, env => \\%ENV, exe => $0}); close $a; }
@@ -124,7 +125,7 @@ public enum FixturePrograms {
                         preview => '', projectId => undef, sessionId => 'sess-1', source => 'appServer', status => {type => 'idle'}, turns => [], updatedAt => 0}}});
             } elsif ($method eq 'turn/start') {
                 next if $scenario eq 'turnStartHangs';
-                if ($scenario eq 'crashAfterTurnStart') { open(my $f, '>', "$cwd/side-effect.txt"); close $f; exit(1); }
+                if ($scenario eq 'crashAfterTurnStart') { open(my $f, '>', "$cwd/side-effect.txt"); close $f; print STDERR "fixture crash: turn aborted\n"; print STDERR "no newline at end"; exit(1); }
                 send_msg({id => $id, result => {turn => turn_obj('inProgress')}});
                 note('turn/started', {threadId => $thread, turn => turn_obj('inProgress')});
                 if ($scenario eq 'interruptible') { next; }
@@ -160,6 +161,11 @@ public enum FixturePrograms {
                 my $usage = {cachedInputTokens => 2, inputTokens => 12, outputTokens => 7, reasoningOutputTokens => 0, totalTokens => 19};
                 note('thread/tokenUsage/updated', {threadId => $thread, turnId => $turn, tokenUsage => {total => $usage, last => $usage}});
                 finish_turn($scenario eq 'unknownTurnStatus' ? 'inProgress' : 'completed');
+            } elsif ($method eq 'account/read') {
+                print STDERR "account read\n";
+                send_msg({id => $id, result => {account => {type => 'chatgpt', email => 'owner@example.org', planType => 'plus'}, requiresOpenaiAuth => $true}});
+            } elsif ($method eq 'account/rateLimits/read') {
+                send_msg({id => $id, error => {code => -32601, message => 'not in fixture'}});
             } elsif ($method eq 'turn/interrupt') {
                 send_msg({id => $id, result => {}});
                 finish_turn('interrupted');

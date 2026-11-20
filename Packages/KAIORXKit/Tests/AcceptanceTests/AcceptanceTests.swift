@@ -331,6 +331,55 @@ $out->({type => 'result', subtype => 'success', is_error => JSON::PP::false, usa
     }
 }
 
+@Suite struct StandardErrorRecordingTests {
+    func runner() throws -> (AcceptanceRunner, RunFolders, String) {
+        let root = try temporaryRoot("stderr")
+        let home = try temporaryRoot("home")
+        let folders = RunFolders(root: root + "/run")
+        try folders.create()
+        let state = RunState(runID: "stderr-run", createdAt: 1_700_000_000_000, kaiorxCommit: nil, providers: [
+            ProviderRun(provider: .claude, configuredPath: root + "/missing", nativePath: root + "/missing", model: "m", configDirectory: root + "/config"),
+        ])
+        var context = KitContext(folders: folders, home: home, host: ProcessHost(), prompter: ScriptedPrompter(answers: []), turnTimeout: .seconds(5), compatibilitySource: nil)
+        context.allowsScriptBinaries = true
+        return (AcceptanceRunner(state: state, context: context), folders, home)
+    }
+
+    /// A step that ends with an error keeps what was recorded, and the standard error separately.
+    @Test func aFailedStepKeepsItsRecordingAndItsStandardError() async throws {
+        let (runner, folders, home) = try runner()
+        let recorder = await runner.recorder
+        recorder.sink(true, #"{"method":"initialize"}"#)
+        recorder.errorSink("ERROR open \(home)/x: denied")
+        let result = await runner.perform(.identify, provider: 0)
+        #expect(result.status == .failed)
+        #expect(result.evidence.contains("Aufzeichnung: claude-?-identify.jsonl"), "\(result.evidence)")
+        #expect(result.evidence.contains("Fehlerausgabe: claude-?-identify-stderr.log"))
+        let log = try String(contentsOfFile: folders.fixtures + "/claude-?-identify-stderr.log", encoding: .utf8)
+        #expect(log == "ERROR open <home>/x: denied\n")
+        #expect(await runner.state.providers[0].fixtures == ["claude-?-identify-stderr.log", "claude-?-identify.jsonl"])
+        #expect(await runner.notes.isEmpty)
+    }
+
+    /// A private value in the standard error costs only that file, not the protocol recording;
+    /// standard error alone is written too.
+    @Test func standardErrorIsRedactedOnItsOwn() async throws {
+        let (runner, folders, _) = try runner()
+        let recorder = await runner.recorder
+        let canary = await runner.state.canaries["home"]!
+        recorder.sink(true, "{}")
+        recorder.errorSink("read \(canary)")
+        #expect(await runner.storeFixture(0, step: .author) == "claude-?-author.jsonl")
+        #expect(!FileManager.default.fileExists(atPath: folders.fixtures + "/claude-?-author-stderr.log"))
+        #expect(await runner.notes.contains("Fehlerausgabe verworfen: privater Wert nach Redaktion"))
+
+        recorder.errorSink("only standard error")
+        #expect(await runner.storeFixture(0, step: .cancel) == nil)
+        #expect(FileManager.default.fileExists(atPath: folders.fixtures + "/claude-?-cancel-stderr.log"))
+        #expect(await runner.state.providers[0].fixtures == ["claude-?-author.jsonl", "claude-?-cancel-stderr.log"])
+    }
+}
+
 @Suite struct CheckRoundTests {
     @Test func displayNamesAndNestedOrganisationsAreRedactedButShortUserNamesDoNotDiscardLines() throws {
         let redactor = FixtureRedactor(denylist: ["kai"], paths: [])
@@ -404,5 +453,27 @@ $out->({type => 'result', subtype => 'success', is_error => JSON::PP::false, usa
         let out = try redactor.redact(line, placeholders: &placeholders)
         #expect(out.contains("Das Kennwort lautet X.") && out.contains("\"phase\":\"final\""))
         #expect(!out.contains("i-9") && !out.contains("thr-77") && !out.contains("a@b.c") && out.contains("\"planType\":\"plus\""))
+    }
+
+    @Test func standardErrorKeepsItsEndAndIsDiscardedWithTheProtocolLines() {
+        let recorder = LineRecorder()
+        recorder.sink(true, "{}")
+        for index in 0..<(LineRecorder.errorLineLimit + 5) { recorder.errorSink("zeile \(index)") }
+        let errors = recorder.takeErrors()
+        #expect(errors.count == LineRecorder.errorLineLimit)
+        #expect(errors.first == "zeile 5" && errors.last == "zeile \(LineRecorder.errorLineLimit + 4)")
+        #expect(recorder.take() == ["> {}"])
+
+        // A discarded recording must not leave its standard error for the next step.
+        recorder.errorSink("alt")
+        _ = recorder.take()
+        #expect(recorder.takeErrors().isEmpty)
+    }
+
+    @Test func plainStandardErrorLinesAreRedactedAndFailClosed() throws {
+        let redactor = FixtureRedactor(denylist: ["matzetest"], paths: [("/Users/someone", "<home>")])
+        var placeholders: [String: String] = [:]
+        #expect(try redactor.redact("ERROR open /Users/someone/x: denied", placeholders: &placeholders) == "ERROR open <home>/x: denied")
+        #expect(throws: FixtureRedactor.Failure.self) { try redactor.redact("user matzetest", placeholders: &placeholders) }
     }
 }

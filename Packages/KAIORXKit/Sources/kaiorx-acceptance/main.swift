@@ -11,6 +11,13 @@ import Workbench
 // never from Claude Code, Codex, a script or CI. Everything it writes stays in
 // ~/Library/Application Support/KAIORX/acceptance/<run>; `export` copies the reviewed report.
 
+/// How the owner started the kit (it is usually not on the PATH): the hint can be copied as is.
+let selfCommand: String = {
+    let path = CommandLine.arguments.first ?? "kaiorx-acceptance"
+    let safe = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._+-")
+    return !path.isEmpty && path.allSatisfy(safe.contains) ? path : "'" + path.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
+}()
+
 let usage = """
     kaiorx-acceptance – Live-Abnahme durch den Kontoinhaber (ADR 0008)
 
@@ -176,7 +183,7 @@ func run(_ arguments: [String]) async throws {
         let runner = AcceptanceRunner(state: state, context: context(folders))
         let finished = try await runner.run()
         try await writeReport(folders, state: await runner.state, context: context(folders))
-        if !finished { print("Wartet auf dich. Danach: kaiorx-acceptance resume \(id)") }
+        if !finished { print("Wartet auf dich. Danach: \(selfCommand) resume \(id)") }
 
     case "resume":
         guard let id = rest.first else { throw KitError(description: usage) }
@@ -193,7 +200,7 @@ func run(_ arguments: [String]) async throws {
         let finished = try await runner.run()
         state = await runner.state
         try await writeReport(folders, state: state, context: context(folders))
-        if !finished { print("Wartet auf dich. Danach: kaiorx-acceptance resume \(id)") }
+        if !finished { print("Wartet auf dich. Danach: \(selfCommand) resume \(id)") }
 
     case "status":
         guard let id = rest.first else { throw KitError(description: usage) }

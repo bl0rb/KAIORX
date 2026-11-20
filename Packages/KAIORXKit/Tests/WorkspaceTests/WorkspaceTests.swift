@@ -537,5 +537,36 @@ extension Dictionary {
         #expect(codex.protectedPaths.contains("/tmp/state/config.toml"))
         #expect(codex.protectedPaths.contains("/tmp/state/rules/"))
         #expect(claude.allowsNetwork && codex.allowsNetwork)
+        #expect(codex.protectedPaths.contains("/tmp/state/.env"))
+        #expect(codex.protectedPaths.contains("/tmp/w/.codex/") && codex.protectedPaths.contains("/tmp/w/.agents"))
+    }
+
+    /// Codex runs its commands without its own sandbox (ADR 0008): the OS profile alone keeps
+    /// them away from Codex's start-up environment and the worktree's agent folders.
+    @Test func codexCommandsCannotWriteItsEnvironmentOrAgentFolders() async throws {
+        let fixture = try await RepoFixture()
+        let repo = try await fixture.repository()
+        let path = try await fixture.worktree("agent", base: repo.headOID!)
+        let temp = try fixture.layout.runTemporaryDirectory("agent")
+        let state = temp + "/codex-home"
+        try FileManager.default.createDirectory(atPath: state, withIntermediateDirectories: true)
+        let profile = RoleProfile.agentCLI(stateDirectory: state, writesWorktree: true, protectedStateFiles: RoleProfile.codexStateFiles)
+        let script = """
+            echo x >> "$1/.env" && echo ENV
+            mkdir -p .codex && echo x > .codex/config.toml && echo CODEX
+            mkdir -p .agents/skills && echo AGENTS
+            ln -s /tmp .agents 2>/dev/null && echo LINK
+            echo x > "$1/sessions.txt" && echo STATE
+            echo x > allowed.txt && echo WORKTREE
+            exit 0
+            """
+        let run = try await fixture.host.run(LaunchSpec(
+            executable: "/bin/sh", arguments: ["-c", script, "sh", state], workingDirectory: path,
+            environment: Environment.minimal(temporaryDirectory: temp), timeout: .seconds(10),
+            confinement: profile.confinement(worktree: path, runTemporaryDirectory: temp, layout: fixture.layout)
+        ))
+        let out = run.stdout.text
+        #expect(!out.contains("ENV") && !out.contains("CODEX") && !out.contains("AGENTS") && !out.contains("LINK"))
+        #expect(out.contains("STATE") && out.contains("WORKTREE"))
     }
 }

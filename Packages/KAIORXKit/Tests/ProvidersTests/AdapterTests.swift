@@ -2,6 +2,7 @@ import Domain
 import Foundation
 import ProcessHost
 import ProviderFixtures
+import Synchronization
 import Testing
 @testable import Providers
 
@@ -41,6 +42,46 @@ func received(_ root: String, _ spec: AttemptSpec) throws -> JSONValue {
 }
 
 // MARK: Shared pieces
+
+@Suite struct DiagnosticLinesTests {
+    @Test func splitsLinesAndKeepsOnlyTheStartOfLongOnes() {
+        let lines = Mutex<[String]>([])
+        var splitter = DiagnosticLines(sink: { line in lines.withLock { $0.append(line) } })
+        splitter.append(Data("eins\nzw".utf8))
+        splitter.append(Data("ei\n\n".utf8))
+        // Long line without a break, arriving in pieces: one entry, cut at a boundary, rest dropped.
+        let long = String(repeating: "a", count: 4000) + " /Users/someone/secret-" + String(repeating: "b", count: 3000)
+        splitter.append(Data(long.prefix(4500).utf8))
+        splitter.append(Data(long.dropFirst(4500).utf8))
+        splitter.append(Data("\nnach\n".utf8))
+        // Long line with its break in the same chunk.
+        splitter.append(Data((String(repeating: "c", count: 5000) + "\n").utf8))
+        splitter.append(Data("rest".utf8))
+        splitter.finish()
+        splitter.finish()
+        let seen = lines.withLock { $0 }
+        #expect(seen.count == 7)
+        #expect(Array(seen.prefix(3)) == ["eins", "zwei", ""])
+        #expect(seen[3] == String(repeating: "a", count: 4000) + " /Users/someone/…")
+        #expect(seen[4] == "nach")
+        #expect(seen[5] == "…" && seen[6] == "rest")
+        #expect(!seen.contains { $0.contains("secret") || $0.contains("bbb") })
+    }
+
+    @Test func aLongLineWithoutBoundariesIsDroppedNotSplit() {
+        let lines = Mutex<[String]>([])
+        var splitter = DiagnosticLines(sink: { line in lines.withLock { $0.append(line) } })
+        splitter.append(Data((String(repeating: "c", count: 5000) + "\nrest").utf8))
+        splitter.finish()
+        #expect(lines.withLock { $0 } == ["…", "rest"])
+    }
+
+    @Test func withoutASinkNothingIsBuffered() {
+        var splitter = DiagnosticLines(sink: nil)
+        splitter.append(Data(String(repeating: "x", count: 10_000).utf8))
+        splitter.finish()
+    }
+}
 
 @Suite struct LineFramerTests {
     @Test func linesSplitAcrossReadsAndUTF8() throws {
@@ -301,6 +342,10 @@ func received(_ root: String, _ spec: AttemptSpec) throws -> JSONValue {
             ("turn/start", CodexMessages.turnStart(spec, threadID: "thr-1", workingDirectory: "/w/work")),
             ("turn/start", CodexMessages.turnStart(review, threadID: "thr-1", workingDirectory: "/w/work")),
             ("turn/start", CodexMessages.turnStart(effortful, threadID: "thr-1", workingDirectory: "/w/work")),
+            ("thread/start", CodexMessages.threadStart(spec, workingDirectory: "/w/work", externalSandbox: true)),
+            ("thread/start", CodexMessages.threadStart(review, workingDirectory: "/w/work", externalSandbox: true)),
+            ("turn/start", CodexMessages.turnStart(spec, threadID: "thr-1", workingDirectory: "/w/work", externalSandbox: true)),
+            ("turn/start", CodexMessages.turnStart(review, threadID: "thr-1", workingDirectory: "/w/work", externalSandbox: true)),
             ("turn/interrupt", CodexMessages.turnInterrupt(threadID: "thr-1", turnID: "turn-1")),
         ]
         for (method, params) in messages {
@@ -523,6 +568,73 @@ func received(_ root: String, _ spec: AttemptSpec) throws -> JSONValue {
         #expect(try await events == [.started(sessionID: "thr-1")])
     }
 
+    @Test func standardErrorReachesTheDiagnosticSinkLineByLine() async throws {
+        let root = try workspace()
+        let executable = try FixturePrograms.makeExecutable(FixturePrograms.codex(.crashAfterTurnStart), in: root, name: "codex")
+        let lines = Mutex<[String]>([])
+        let adapter = CodexAppServerAdapter(
+            configuration: CodexConfiguration(
+                executable: executable, codexHome: root + "/codex-home", temporaryRoot: root + "/runs", home: root,
+                policy: .fixtureTesting, stopGrace: .milliseconds(500), diagnosticSink: { line in lines.withLock { $0.append(line) } }
+            ),
+            host: ProcessHost()
+        )
+        _ = try await drain(try await adapter.start(attempt(provider: .codex, in: root)))
+        #expect(lines.withLock { $0 } == ["fixture crash: turn aborted", "no newline at end"])
+    }
+
+    @Test func inspectHandsOverAllStandardErrorBeforeReturning() async throws {
+        let root = try workspace()
+        let executable = try FixturePrograms.makeExecutable(FixturePrograms.codex(.success), in: root, name: "codex")
+        let lines = Mutex<[String]>([])
+        let adapter = CodexAppServerAdapter(
+            configuration: CodexConfiguration(
+                executable: executable, codexHome: root + "/codex-home", temporaryRoot: root + "/runs", home: root,
+                policy: .fixtureTesting, stopGrace: .milliseconds(500), diagnosticSink: { line in lines.withLock { $0.append(line) } }
+            ),
+            host: ProcessHost()
+        )
+        _ = try await adapter.inspect(scratch: root + "/scratch")
+        #expect(lines.withLock { $0 } == ["account read", "closing"])
+    }
+
+    /// Under KAIORX's own confinement Codex is told the sandbox is external and asks for every
+    /// command it does not know to be safe; without it, Codex's own sandbox stays in charge.
+    @Test func confinedRunsUseTheExternalSandboxAndUntrustedApprovals() async throws {
+        let root = try workspace()
+        let executable = try FixturePrograms.makeExecutable(FixturePrograms.codex(.success), in: root, name: "codex")
+        let confined = CodexAppServerAdapter(
+            configuration: CodexConfiguration(
+                executable: executable, codexHome: root + "/codex-home", temporaryRoot: root + "/runs", home: root,
+                policy: .fixtureTesting, confinement: { _, _ in Confinement(writableRoots: [root]) }, stopGrace: .milliseconds(500)
+            ),
+            host: ProcessHost()
+        )
+        func sent(_ spec: AttemptSpec) throws -> [String: JSONValue] {
+            let log = try String(contentsOfFile: root + "/runs/\(spec.attemptID.uuidString)/client.jsonl", encoding: .utf8)
+            var byMethod: [String: JSONValue] = [:]
+            for line in log.split(separator: "\n") {
+                let message = try JSONValue.parse(String(line))
+                if let method = message["method"]?.string { byMethod[method] = message["params"] }
+            }
+            return byMethod
+        }
+        let inside = attempt(provider: .codex, in: root)
+        _ = try await drain(try await confined.start(inside))
+        let confinedMessages = try sent(inside)
+        #expect(confinedMessages["thread/start"]?["approvalPolicy"]?.string == "untrusted")
+        #expect(confinedMessages["thread/start"]?["sandbox"] == nil)
+        #expect(confinedMessages["turn/start"]?["approvalPolicy"]?.string == "untrusted")
+        #expect(confinedMessages["turn/start"]?["sandboxPolicy"] == ["type": "externalSandbox", "networkAccess": "restricted"])
+
+        let outside = attempt(provider: .codex, in: root)
+        _ = try await drain(try await adapter(.success, root: root).start(outside))
+        let plain = try sent(outside)
+        #expect(plain["thread/start"]?["approvalPolicy"]?.string == "on-request")
+        #expect(plain["thread/start"]?["sandbox"]?.string == "workspace-write")
+        #expect(plain["turn/start"]?["sandboxPolicy"]?["type"]?.string == "workspaceWrite")
+    }
+
     @Test func crashAfterTurnStartIsNotACancellation() async throws {
         let root = try workspace()
         let handle = try await adapter(.crashAfterTurnStart, root: root).start(attempt(provider: .codex, in: root))
@@ -645,5 +757,54 @@ func received(_ root: String, _ spec: AttemptSpec) throws -> JSONValue {
         #expect(try decide("/bin/zsh -lc 'cat FACTS.md'", actions: [read], cwd: "/tmp", root: root) == "decline")
         #expect(try decide("/bin/zsh -lc 'cat FACTS.md'", actions: [read], extra: ["networkApprovalContext": ["host": "example.org"]], root: root) == "decline")
         #expect(try decide("/bin/zsh -lc 'cat FACTS.md'", actions: [read], extra: ["turnId": "other"], root: root) == "decline")
+        #expect(try decide("/bin/zsh -lc 'cat FACTS.md'", actions: [read], extra: ["kind": "command"], root: root) == "accept")
+        #expect(try decide("/bin/zsh -lc 'cat FACTS.md'", actions: [read], extra: ["kind": "writeStdin"], root: root) == "decline")
+        #expect(try decide("/bin/zsh -lc 'cat FACTS.md'", actions: [read], extra: ["kind": "humanCommand"], root: root) == "decline")
+    }
+
+    /// `commandActions` is only Codex's display summary: the command itself decides.
+    @Test func theCommandItselfMustBeAnAllowlistedRead() throws {
+        let root = try workspace() + "/work"
+        try FileManager.default.createDirectory(atPath: root + "/docs", withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: URL(filePath: root + "/FACTS.md"))
+        let search: JSONValue = ["type": "search", "command": "x", "query": "foo"]
+        let list: JSONValue = ["type": "listFiles", "command": "x", "path": "."]
+        let accepted = [
+            "/bin/zsh -lc 'cat FACTS.md'", "cat FACTS.md", "/bin/zsh -lc 'rg -n Kennwort .'", "/bin/zsh -lc \"rg -g '*.md' Kennwort\"",
+            "/bin/zsh -lc 'rg --files'", "/bin/zsh -lc 'rg -e foo docs'", "/bin/zsh -lc 'grep -rn Kennwort docs'", "/bin/zsh -lc 'sed -n 1,20p FACTS.md'",
+            "/bin/zsh -lc 'ls -la'", "/bin/zsh -lc 'ls docs'", "/bin/zsh -lc \"find . -name '*.md' -type f\"", "/bin/zsh -lc 'head -n 5 FACTS.md'",
+            "/bin/zsh -lc 'tail -20 FACTS.md'", "/bin/zsh -lc 'wc -l FACTS.md'", "/bin/zsh -lc 'rg --max-count=3 -C2 foo'", "/bin/cat FACTS.md",
+            "/bin/zsh -lc 'rg foo docs -n'", "/bin/zsh -lc 'cat Übersicht.md'", "/bin/zsh -lc \"cat '=x'\"",
+        ]
+        for command in accepted {
+            #expect(try decide(command, actions: [search], root: root) == "accept", "\(command)")
+        }
+        let declined = [
+            "/bin/zsh -lc 'rg --pre=./x.sh foo'", "/bin/zsh -lc 'rg --pre ./x.sh foo'", "/bin/zsh -lc 'rg -z foo'", "/bin/zsh -lc 'find . -delete'",
+            "/bin/zsh -lc 'find . -exec rm {} +'", "/bin/zsh -lc 'find . -fprintf out x'", "/bin/zsh -lc 'find . -newer x -delete'",
+            "/bin/zsh -lc 'cat *'", "/bin/zsh -lc 'cat .*'", "/bin/zsh -lc 'cat ~/x'", "/bin/zsh -lc 'cat =ls'", "/bin/zsh -lc 'sed -i s/a/b/ FACTS.md'",
+            "/bin/zsh -lc 'sed -n 1p -e x FACTS.md'", "/bin/zsh -lc 'sed -n w/tmp/x FACTS.md'", "/bin/zsh -lc 'python3 x.py'", "/tmp/cat FACTS.md",
+            "./cat FACTS.md", "/bin/zsh -lc 'cat FACTS.md' extra", "/bin/zsh -x 'cat FACTS.md'", "/bin/zsh -lc 'cat FACTS.md", "/bin/zsh -lc 'zsh -c ls'",
+            "/bin/zsh -lc 'cat ../x'", "/bin/zsh -lc 'rg foo /etc'", "/bin/zsh -lc 'ls /'", "/bin/zsh -lc 'grep -f x foo'", "/bin/zsh -lc 'cat .git/config'",
+            "/bin/zsh -lc 'cat -'", "/bin/zsh -lc 'xargs cat'", "/bin/zsh -lc 'env cat FACTS.md'", "/bin/zsh -lc 'rg -L foo'", "/bin/zsh -lc 'grep foo'",
+            "/bin/zsh -lc 'git log'", "a=b cat FACTS.md", "/bin/zsh -lc 'head -n 5 FACTS.md -n /etc/hosts'",
+            "/bin/zsh -lc 'tail -n 5 FACTS.md -c /etc/hosts'", "/bin/zsh -lc 'head FACTS.md -n .git/config'",
+            "/bin/zsh -lc \"cat ''=ls\"", "/bin/zsh -lc 'cat \"\"=/bin/ls'", "/bin/zsh -lc 'cat a\r\nsh x.sh'",
+            "/bin/zsh -lc 'cat a\u{0600};sh x.sh'", "/bin/zsh -lc 'rg pat\u{0600} --pre=sh x.sh'", "/bin/zsh -lc 'cat a;\u{301}x'",
+            "/bin/zsh -lc 'cat FACTS.md\u{00A0}/etc/hosts'", "/bin/zsh -lc 'cat FACTS.md\u{200B}'", "/bin/zsh -lc 'cat a\u{85}b'", "/bin/zsh -lc 'ls -la --hyperlink'", "/bin/zsh -lc 'head -n'",
+        ]
+        for command in declined {
+            #expect(try decide(command, actions: [search, list], root: root) == "decline", "\(command)")
+        }
+    }
+
+    @Test func wordsHandleQuotesAndRefuseExpansion() {
+        #expect(ReadCommand.words("rg -g '*.md' \"a b\" c") == ["rg", "-g", "*.md", "a b", "c"])
+        #expect(ReadCommand.words("cat ''") == ["cat", ""])
+        #expect(ReadCommand.words("cat 'x") == nil)
+        #expect(ReadCommand.words("cat x*") == nil)
+        #expect(ReadCommand.words("cat '$x'") == nil)
+        #expect(ReadCommand.words("a=b cat x") == ["a=b", "cat", "x"]) // no program "a=b": declined by accepts
+        #expect(ReadCommand.words("rg --max-count=3 x") == ["rg", "--max-count=3", "x"])
     }
 }

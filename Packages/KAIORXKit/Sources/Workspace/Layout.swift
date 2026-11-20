@@ -49,12 +49,17 @@ public enum RoleProfile: Sendable, Equatable {
     /// state folder (login, sessions) and needs network to its provider. `needsKeychain` keeps
     /// the login keychain readable (Claude keeps its subscription login there).
     /// `protectedStateFiles` (relative to the state folder, `codexStateFiles` /
-    /// `claudeStateFiles`) stay read-only, so the agent cannot change its own configuration. Claude's profile has no command-running tools; Codex sandboxes the
-    /// commands it runs itself.
+    /// `claudeStateFiles`) stay read-only, so the agent cannot change its own configuration, and
+    /// so do the worktree's agent folders (`.codex`, `.agents`). Claude's profile has no
+    /// command-running tools. Codex runs its commands without its own sandbox under this
+    /// confinement (`externalSandbox`, ADR 0008): only this profile limits their writes.
     case agentCLI(stateDirectory: String, writesWorktree: Bool, protectedStateFiles: [String] = [], needsKeychain: Bool = false)
 
     /// Files in `CODEX_HOME` that configure Codex itself (instructions, rules, skills).
-    public static let codexStateFiles = ["config.toml", "AGENTS.md", "rules/", "skills/", "prompts/"]
+    /// `.env` is loaded at start (proxy, base URL); Codex never writes it.
+    public static let codexStateFiles = ["config.toml", "AGENTS.md", "rules/", "skills/", "prompts/", ".env"]
+    /// Worktree folders that configure an agent; never written by a provider CLI.
+    public static let agentFolders = [".codex", ".agents"]
     /// Files in `CLAUDE_CONFIG_DIR` that configure Claude Code itself.
     public static let claudeStateFiles = ["settings.json", "settings.local.json", "CLAUDE.md", "agents/", "skills/", "commands/", "hooks/", "plugins/"]
 
@@ -83,6 +88,8 @@ public enum RoleProfile: Sendable, Equatable {
             visible.append(state)
             network = true
             protected += files.map { state + "/" + $0 }
+            // The folder itself (no replacing it with a link) and everything below it.
+            protected += Self.agentFolders.flatMap { [worktree + "/" + $0, worktree + "/" + $0 + "/"] }
             // Only for a CLI that keeps its login there (Claude Code).
             if keychain { secretPaths.removeAll { $0 == "Library/Keychains" } }
         }

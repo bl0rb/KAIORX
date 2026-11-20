@@ -28,6 +28,8 @@ public struct CodexConfiguration: Sendable {
     public var recordsTranscript: Bool
     /// Raw protocol lines for the owner's acceptance recording (nil in the product).
     public var lineSink: ProtocolLineSink?
+    /// The app server's standard error, line by line, for the same recording (nil in the product).
+    public var diagnosticSink: DiagnosticLineSink?
 
     public init(
         executable: String, codexHome: String, temporaryRoot: String,
@@ -35,9 +37,10 @@ public struct CodexConfiguration: Sendable {
         authentication: Authentication = .cliManaged, policy: AdapterPolicy = AdapterPolicy(),
         confinement: @escaping @Sendable (AttemptSpec, String) -> Confinement? = { _, _ in nil },
         stopGrace: Duration = .seconds(5), requestTimeout: Duration = .seconds(60), clientVersion: String = "0.1.0",
-        recordsTranscript: Bool = false, lineSink: ProtocolLineSink? = nil
+        recordsTranscript: Bool = false, lineSink: ProtocolLineSink? = nil, diagnosticSink: DiagnosticLineSink? = nil
     ) {
         self.lineSink = lineSink
+        self.diagnosticSink = diagnosticSink
         self.executable = executable
         self.codexHome = codexHome
         self.temporaryRoot = temporaryRoot
@@ -107,7 +110,8 @@ public final class CodexAppServerAdapter: AgentAdapter {
         ))
         let handle = CodexRunHandle(
             spec: spec, workingDirectory: workingDirectory, process: process, grace: configuration.stopGrace,
-            timeout: configuration.requestTimeout, recordsTranscript: configuration.recordsTranscript, lineSink: configuration.lineSink
+            timeout: configuration.requestTimeout, recordsTranscript: configuration.recordsTranscript, lineSink: configuration.lineSink,
+            diagnosticSink: configuration.diagnosticSink, externalSandbox: confinement != nil
         )
         do {
             try await handle.open(clientVersion: configuration.clientVersion)
@@ -144,10 +148,14 @@ public final class CodexAppServerAdapter: AgentAdapter {
         await connection.setHandlers(notifications: { _, _ in }, requests: { method, _ in throw JSONRPCConnection.Refusal.unsupported(method) })
         let reader = Task {
             var framer = LineFramer()
+            var errors = DiagnosticLines(sink: configuration.diagnosticSink)
             for await chunk in process.output ?? AsyncStream(unfolding: { nil }) {
-                guard case .stdout(let data) = chunk else { continue }
-                for line in (try? framer.append(data)) ?? [] { try? await connection.receive(line) }
+                switch chunk {
+                case .stdout(let data): for line in (try? framer.append(data)) ?? [] { try? await connection.receive(line) }
+                case .stderr(let data): errors.append(data)
+                }
             }
+            errors.finish()
             await connection.close(with: ProviderError.protocolViolation("app server exited"))
         }
         defer { reader.cancel() }
@@ -158,9 +166,12 @@ public final class CodexAppServerAdapter: AgentAdapter {
             let limits = try? await connection.request("account/rateLimits/read", .null, timeout: configuration.requestTimeout)
             process.closeInput()
             await process.stop(grace: configuration.stopGrace)
+            // The reader ends at the pipes' end: all standard error is handed over before returning.
+            await reader.value
             return CodexAccountReport(account: account, rateLimits: limits)
         } catch {
             await process.stop(grace: configuration.stopGrace)
+            await reader.value
             throw error
         }
     }
@@ -192,23 +203,39 @@ enum CodexMessages {
     }
 
     /// Approval requests always come to KAIORX, never to an AI reviewer from config.
-    static func threadStart(_ spec: AttemptSpec, workingDirectory: String) -> JSONValue {
-        [
+    ///
+    /// `externalSandbox`: KAIORX already confines the app server with `sandbox-exec` (ADR 0002).
+    /// Codex cannot start its own Seatbelt sandbox inside it (owner's live run, ADR 0008), so it
+    /// is told the sandbox is external and asks for every command it does not know to be safe
+    /// and for every file change (`untrusted`); the OS confinement enforces the paths.
+    static func threadStart(_ spec: AttemptSpec, workingDirectory: String, externalSandbox: Bool = false) -> JSONValue {
+        var params: [String: JSONValue] = [
             "cwd": .string(workingDirectory), "model": .string(spec.effectiveModel), "ephemeral": true,
-            "approvalPolicy": "on-request", "approvalsReviewer": "user",
-            "sandbox": spec.role == .author ? "workspace-write" : "read-only",
+            "approvalPolicy": approvalPolicy(externalSandbox: externalSandbox), "approvalsReviewer": "user",
         ]
+        // The thread-level mode has no external variant; the turn sets the sandbox policy.
+        if !externalSandbox { params["sandbox"] = spec.role == .author ? "workspace-write" : "read-only" }
+        return .object(params)
     }
 
-    static func turnStart(_ spec: AttemptSpec, threadID: String, workingDirectory: String) -> JSONValue {
+    static func approvalPolicy(externalSandbox: Bool) -> JSONValue {
+        externalSandbox ? "untrusted" : "on-request"
+    }
+
+    static func sandboxPolicy(_ spec: AttemptSpec, workingDirectory: String, externalSandbox: Bool) -> JSONValue {
+        if externalSandbox { return ["type": "externalSandbox", "networkAccess": "restricted"] }
+        // Only the worktree: not /tmp either (TMPDIR is the run's own folder).
+        return spec.role == .author
+            ? ["type": "workspaceWrite", "writableRoots": [.string(workingDirectory)], "networkAccess": false, "excludeSlashTmp": true]
+            : ["type": "readOnly", "networkAccess": false]
+    }
+
+    static func turnStart(_ spec: AttemptSpec, threadID: String, workingDirectory: String, externalSandbox: Bool = false) -> JSONValue {
         var params: [String: JSONValue] = [
             "threadId": .string(threadID), "cwd": .string(workingDirectory), "model": .string(spec.effectiveModel),
-            "input": [["type": "text", "text": .string(spec.prompt)]], "approvalPolicy": "on-request",
+            "input": [["type": "text", "text": .string(spec.prompt)]], "approvalPolicy": approvalPolicy(externalSandbox: externalSandbox),
             "approvalsReviewer": "user",
-            // Only the worktree: not /tmp either (TMPDIR is the run's own folder).
-            "sandboxPolicy": spec.role == .author
-                ? ["type": "workspaceWrite", "writableRoots": [.string(workingDirectory)], "networkAccess": false, "excludeSlashTmp": true]
-                : ["type": "readOnly", "networkAccess": false],
+            "sandboxPolicy": sandboxPolicy(spec, workingDirectory: workingDirectory, externalSandbox: externalSandbox),
         ]
         if let effort = spec.effort { params["effort"] = .string(effort) }
         return .object(params)
@@ -235,10 +262,11 @@ struct ApprovalContext: Sendable {
 ///   inside the worktree (and the writable paths), outside Git and agent metadata, and never
 ///   with an extra write root.
 /// - Commands: only reads (ADR 0008, from the owner's live run: Codex reads files only through
-///   commands). Accepted when Codex classifies every action as read, list or search, every
-///   named path stays readable inside the worktree, the working directory is the worktree, no
-///   network is asked for, and the command has no shell operators. Everything else is declined
-///   (Git and tests run on the host; writes only as checked file changes).
+///   commands). Accepted when the command itself passes `ReadCommand` (an allowlisted reading
+///   program with allowlisted options, every path operand readable inside the worktree), Codex
+///   also classifies every action as read, list or search, the working directory is the worktree,
+///   no network is asked for, and the request is for a new command (`kind`). Everything else is
+///   declined (Git and tests run on the host; writes only as checked file changes).
 /// - Extra permissions: none granted.
 /// - Requests with missing required fields, for another thread/turn, or of any other kind:
 ///   refused.
@@ -257,8 +285,10 @@ enum CodexApprovals {
         case "item/commandExecution/requestApproval":
             let decline: (JSONValue, String) = (["decision": "decline"], "command declined")
             guard refusal(params, required: ["itemId", "threadId", "turnId", "startedAtMs"], context: context) == nil,
+                  // Input for a running terminal or a user shell command is never approved.
+                  (params["kind"]?.string ?? "command") == "command",
                   (params["networkApprovalContext"] ?? .null).isNull,
-                  let command = params["command"]?.string, plain(command),
+                  let command = params["command"]?.string, plain(command), ReadCommand.accepts(command, context: context),
                   let actions = params["commandActions"]?.array, !actions.isEmpty,
                   actions.allSatisfy({ readOnly($0, context: context) }) else { return decline }
             if let cwd = params["cwd"]?.string, Confinement.resolved(cwd) != Confinement.resolved(context.workingDirectory) { return decline }
@@ -281,7 +311,7 @@ enum CodexApprovals {
     /// A command without shell operators, substitutions or line breaks (the quoted
     /// `/bin/zsh -lc '…'` wrapper is fine).
     static func plain(_ command: String) -> Bool {
-        !command.contains { ";|&><$`\\\n\r".contains($0) } && command.count <= 4096
+        !command.unicodeScalars.contains { ";|&><$`\\\n\r".unicodeScalars.contains($0) } && command.utf8.count <= 4096
     }
 
     /// A read, list or search action whose own command is plain and whose path (if any) is
@@ -334,6 +364,9 @@ final class CodexRunHandle: RunHandle {
     private let spec: AttemptSpec
     private let grace: Duration
     private let timeout: Duration
+    private let diagnosticSink: DiagnosticLineSink?
+    /// KAIORX confines the process; Codex must not start its own sandbox (see `CodexMessages`).
+    private let externalSandbox: Bool
     private let state: Mutex<State>
 
     private struct State {
@@ -344,9 +377,11 @@ final class CodexRunHandle: RunHandle {
 
     init(
         spec: AttemptSpec, workingDirectory: String, process: ManagedProcess, grace: Duration, timeout: Duration, recordsTranscript: Bool,
-        lineSink: ProtocolLineSink? = nil
+        lineSink: ProtocolLineSink? = nil, diagnosticSink: DiagnosticLineSink? = nil, externalSandbox: Bool = false
     ) {
         self.attemptID = spec.attemptID
+        self.diagnosticSink = diagnosticSink
+        self.externalSandbox = externalSandbox
         self.spec = spec
         self.process = process
         self.grace = grace
@@ -372,14 +407,14 @@ final class CodexRunHandle: RunHandle {
         let workingDirectory = state.withLock { $0.approval.workingDirectory }
         _ = try await request("initialize", CodexMessages.initialize(clientVersion: clientVersion))
         await connection.notify("initialized")
-        let thread = try await request("thread/start", CodexMessages.threadStart(spec, workingDirectory: workingDirectory))
+        let thread = try await request("thread/start", CodexMessages.threadStart(spec, workingDirectory: workingDirectory, externalSandbox: externalSandbox))
         guard let threadID = thread["thread"]?["id"]?.string else { throw ProviderError.protocolViolation("thread/start without thread id") }
         state.withLock { $0.approval.threadID = threadID }
         continuation.yield(.started(sessionID: threadID))
 
         // From here a turn may run: only a refusal by the server is a safe end; anything else
         // leaves the outcome unknown.
-        let turnParams = CodexMessages.turnStart(spec, threadID: threadID, workingDirectory: workingDirectory)
+        let turnParams = CodexMessages.turnStart(spec, threadID: threadID, workingDirectory: workingDirectory, externalSandbox: externalSandbox)
         Task { [self] in
             do {
                 let turn = try await connection.request("turn/start", turnParams, timeout: timeout)
@@ -449,13 +484,19 @@ final class CodexRunHandle: RunHandle {
     private func startReader() {
         let connection = connection
         let process = process
+        let diagnosticSink = diagnosticSink
         Task { [self] in
             var framer = LineFramer()
+            var errors = DiagnosticLines(sink: diagnosticSink)
+            defer { errors.finish() }
             do {
                 for await chunk in process.output ?? AsyncStream(unfolding: { nil }) {
-                    guard case .stdout(let data) = chunk else { continue }
-                    for line in try framer.append(data) { try await connection.receive(line) }
+                    switch chunk {
+                    case .stdout(let data): for line in try framer.append(data) { try await connection.receive(line) }
+                    case .stderr(let data): errors.append(data)
+                    }
                 }
+                errors.finish()
                 _ = await process.wait()
                 await connection.close(with: ProviderError.protocolViolation("app server exited"))
                 if !framer.remainder.isEmpty { throw ProviderError.protocolViolation("stream ended inside a line") }

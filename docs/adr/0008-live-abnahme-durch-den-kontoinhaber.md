@@ -60,9 +60,28 @@ Entscheidung des Kontoinhabers daraus: **Codex darf lesende Befehle ausführen.*
 
 Weitere Korrekturen: Der Bericht führt bestandene Schritte nicht mehr als Einschränkung. Die Redaktion leert nur noch Personen-, Konto- und Organisationsobjekte vollständig, in Protokollobjekten (`item`, `thread`) nur die Kennungen. Die Ordner der Anmeldung haben keinen doppelten Schrägstrich mehr, und der Preflight legt sie an.
 
+## Zweiter Live-Lauf (20. November 2026)
+
+Lauf `20261120-1036-99ce`; kein Anbieter hat bestanden.
+
+- **Claude:** weiter `loggedIn: false` im KAIORX-Konfigurationsordner (die Neuanmeldung mit dem korrigierten Pfad stand noch aus); alle weiteren Schritte übersprungen.
+- **Codex:** Identität, Anmeldung (Plus), Abrechnung, Abbruch und Kontingent bestanden; Isolation wieder nur am lesbaren Benutzerordner gescheitert. Lesen und Schreiben scheiterten an der **verschachtelten Sandbox**: Codex begründet seine Freigabefragen selbst mit „nachdem die Sandbox nicht gestartet werden konnte“, der angenommene Befehl `cat FACTS.md` endete mit Exit 127 („command not found“), der Schreibbefehl wurde (zu Recht) abgelehnt. KAIORXs eigenes Profil und Codex' Shell-Snapshot ließen `cat` in einer Nachstellung ohne Codex finden; die Ursache liegt im Start von Codex' Seatbelt-Sandbox innerhalb von `sandbox-exec`.
+
+Entscheidung des Kontoinhabers: **Unter KAIORXs OS-Isolation startet Codex keine eigene Sandbox.** Ist `Confinement` aktiv (im Produkt immer), schickt der Adapter in `turn/start` die Sandbox-Richtlinie `externalSandbox` mit `networkAccess: restricted` (Teil des Schemas von 0.170.0) und lässt in `thread/start` den Sandbox-Modus weg. Ohne `Confinement` (nur Fixture-Tests) bleibt Codex' eigene Sandbox wie bisher.
+
+Damit bleibt KAIORXs Freigabe die eigentliche Schranke für Befehle, und die Prüfrunde dazu hat sie verschärft:
+
+- **Freigaberegel `untrusted`:** Codex fragt bei jedem Befehl, den es nicht selbst als sicher kennt, und bei jeder Dateiänderung.
+- **Der Befehl selbst entscheidet (`ReadCommand`), nicht Codex' Anzeige-Zusammenfassung `commandActions`.** Angenommen wird nur ein einzelner Aufruf von `cat`, `head`, `tail`, `wc`, `ls`, `pwd`, `rg`, `grep`, `sed -n <Bereich>p` oder `find` mit reinen Suchprädikaten, höchstens in `zsh|bash|sh -c|-lc '…'` verpackt, nur mit Optionen aus einer Positivliste (also kein `rg --pre`, kein `find -delete`/`-exec`/`-fprint`, kein `sed -i`) und mit jedem Pfadoperanden lesbar im Arbeitsordner. Abgelehnt wird alles, was expandieren, verketten, umleiten oder ein anderes Programm starten könnte (Globs, `~`, `=cmd` und Variablen außerhalb von Anführungszeichen ebenso, Steuer- und Formatzeichen überall; geprüft wird Zeichen für Zeichen auf Unicode-Skalaren, weil zsh Bytes liest und etwa CR LF oder vorangestellte Zeichen sonst einen Trenner verbergen). Für die BSD-Werkzeuge (`cat`, `head`, `tail`, `wc`, `ls`) ist jedes Wort nach dem ersten Operanden ein Pfad, wie bei deren `getopt`, und jede Anfrage, die nicht `kind: command` ist (zum Beispiel Eingaben an ein laufendes Terminal). `commandActions` muss zusätzlich lesend sein.
+- **OS-Schutz statt Codex-Sandbox:** Befehle aller Rollen können unter dieser Isolation in den Zustandsordner von Codex schreiben; Codex braucht ihn (Anmeldung mit Token-Erneuerung in `auth.json`, Sitzungen). Schreibgeschützt sind dort `config.toml`, `AGENTS.md`, `rules/`, `skills/`, `prompts/` und jetzt auch `.env` (Codex lädt sie beim Start: Proxy, Basis-URL). Im Arbeitsordner sind neben `.git` jetzt auch `.codex` und `.agents` auf OS-Ebene schreibgeschützt.
+
+Verbleibende Folge: Befehle, die Codex ohne Rückfrage als sicher ausführt, laufen mit der Netzwerkfreigabe des App-Servers, die er für den Anbieter ohnehin braucht; vorher hatte Codex' eigene Sandbox Befehlen das Netzwerk entzogen. Ob Codex sich unter `untrusted` wie beschrieben verhält, zeigt erst der nächste Live-Lauf; der Schreibschritt prüft die Begrenzung auf `allowed/`.
+
+Außerdem schreibt das Kit die Standardfehlerausgabe des App-Servers getrennt redigiert mit (`…-<schritt>-stderr.log`, die letzten 200 Zeilen; überlange Zeilen nur bis zu einer Wort- oder Pfadgrenze, damit kein privater Wert über zwei Stücke verteilt der Redaktion entgeht), und ein Schritt, der mit einem Fehler endet, behält seine bisherige Aufzeichnung. So wird die Ursache des Abbruchs mit verborgenem Benutzerordner („app server exited“) beim nächsten Lauf sichtbar.
+
 ## Nicht in A
 
-SIWC-Anmeldung und Token-Erneuerung, natürlicher Ablauf einer Anmeldung (der Widerruf ist der Stellvertreter), absichtlich erschöpftes Kontingent, verschachtelte Codex-Sandbox, Installation verwalteter Hooks, gespeicherte erwartete Kontoidentität im Produkt (braucht eine Migration).
+SIWC-Anmeldung und Token-Erneuerung, natürlicher Ablauf einer Anmeldung (der Widerruf ist der Stellvertreter), absichtlich erschöpftes Kontingent, Installation verwalteter Hooks, gespeicherte erwartete Kontoidentität im Produkt (braucht eine Migration).
 
 ## Folgen
 
