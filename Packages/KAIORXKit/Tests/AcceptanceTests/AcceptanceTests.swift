@@ -210,7 +210,8 @@ $out->({type => 'result', subtype => 'success', is_error => JSON::PP::false, usa
         let repository = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().path(percentEncoded: false)
         for entry in CompatibilityMatrix.entries {
-            #expect(EvidenceCheck.problems(entry, repositoryRoot: repository).isEmpty, "\(entry.provider) \(entry.version)")
+            let problems = EvidenceCheck.problems(entry, repositoryRoot: repository)
+            #expect(problems.isEmpty, "\(entry.provider) \(entry.version): \(problems)")
         }
     }
 }
@@ -246,7 +247,9 @@ $out->({type => 'result', subtype => 'success', is_error => JSON::PP::false, usa
         )
         #expect(proposed.contains(#"provider: .claude, version: "2.1.328", status: .liveVerified,"#))
         #expect(proposed.contains(#"builds: ["bin-sha"],"#) && proposed.contains("reportSHA256: \"\(reportSHA)\""))
-        #expect(proposed.contains(#"provider: .codex, version: "0.170.0", status: .offlineVerified,"#))
+        // Other entries stay exactly as they are in the source.
+        let codexLine = source.split(separator: "\n").first { $0.contains(#"provider: .codex, version: "0.170.0","#) }.map(String.init)
+        #expect(codexLine.map(proposed.contains) == true)
         let entry = CompatibilityEntry(provider: .claude, version: "2.1.328", status: .liveVerified, notes: "", schemaDigest: nil, builds: ["bin-sha"],
                                        evidence: LiveEvidence(reportPath: "docs/live-acceptance/r1/report.json", reportSHA256: reportSHA, mode: "claudeSubscription"))
         #expect(EvidenceCheck.problems(entry, repositoryRoot: root).isEmpty)

@@ -115,8 +115,18 @@ func received(_ root: String, _ spec: AttemptSpec) throws -> JSONValue {
         unknown.version = "9.9.9"
         #expect(throws: ProviderError.versionNotInMatrix(provider: .claude, version: "9.9.9")) { try AdapterPolicy().check(.claude, identity: unknown) }
         try AdapterPolicy.fixtureTesting.check(.claude, identity: unknown)
-        #expect(CompatibilityMatrix.entries.allSatisfy { $0.status == .offlineVerified })
-        #expect(CompatibilityMatrix.entry(for: .claude, version: "2.1.329") != nil)
+        // A live-verified entry binds the builds that passed; another build of the version waits.
+        // (Whether its report backs it up: `everyMatrixEntryHasConsistentEvidence`.)
+        for entry in CompatibilityMatrix.entries where entry.status == .liveVerified {
+            #expect(entry.evidence != nil && !entry.builds.isEmpty, "\(entry.provider) \(entry.version)")
+            let passed = BinaryIdentity(path: "/x", resolvedPath: "/x", sha256: entry.builds[0], version: entry.version)
+            try AdapterPolicy().check(entry.provider, identity: passed)
+            var other = passed
+            other.sha256 = "another-build"
+            #expect(throws: ProviderError.notLiveVerified(provider: entry.provider, version: entry.version)) {
+                try AdapterPolicy().check(entry.provider, identity: other)
+            }
+        }
     }
 }
 
