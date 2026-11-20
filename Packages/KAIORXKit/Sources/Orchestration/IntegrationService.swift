@@ -28,6 +28,11 @@ public enum IntegrationError: Error, Equatable, Sendable {
     case candidateWithoutTask(CandidateID)
     /// The candidate's task is held by the user (`blocked`), ended, or back with an author.
     case taskNotInVerification(TaskID, TaskState)
+    /// The sealed result dropped changes outside the task's write area: building needs the
+    /// user's explicit confirmation (ADR 0005 §6).
+    case undeclaredChanges([String])
+    /// Only an empty result, or one already contained in the integration state, can be accepted.
+    case resultNotEmpty(TaskID)
 }
 
 public struct IntegrationRecoveryReport: Sendable, Equatable {
@@ -66,10 +71,13 @@ public actor IntegrationService {
     // MARK: Building
 
     /// Merges a sealed author result into the current integration target.
-    public func buildCandidate(from resultWorktree: WorktreeID) async throws -> BuildOutcome {
+    public func buildCandidate(from resultWorktree: WorktreeID, acceptingRejectedPaths: Bool = false) async throws -> BuildOutcome {
         let source = try await workspace.worktree(resultWorktree)
         guard source.sealStatus == .committed, let result = source.resultOID, let attemptID = source.attemptID,
               let attempt = try await store.attempt(attemptID) else { throw IntegrationError.resultNotSealed(resultWorktree) }
+        if !source.rejectedPaths.isEmpty, !acceptingRejectedPaths, try await store.plannedTask(attempt.taskID) != nil {
+            throw IntegrationError.undeclaredChanges(source.rejectedPaths.keys.sorted())
+        }
         guard let task = try await store.task(attempt.taskID),
               let job = try await store.jobs().first(where: { $0.id == task.jobID }) else {
             throw StoreError.notFound(entity: "task", id: attempt.taskID.uuidString)
@@ -333,11 +341,35 @@ public actor IntegrationService {
         if !independent.contains(where: { $0.status == .approved }) { missing.append("no approving independent review for \(commit)") }
         // Findings count from every review of this commit, readable verdict or not: an unreadable
         // or foreign report only ever stores comments.
+        if let taskID = candidate.taskID, let planned = try await store.plannedTask(taskID), planned.risk == .sensitive {
+            // ADR 0005 §9: a sensitive task needs a named test profile and an approving human review.
+            if planned.testProfile == nil { missing.append("no test profile for a sensitive task") }
+            if !reviews.contains(where: { $0.origin == .userImported && $0.status == .approved }) {
+                missing.append("no approving human review for a sensitive task")
+            }
+        }
         let reviewIDs = Set(try await store.reviews(candidate: id).filter { $0.candidateOID == commit }.map(\.id))
         let findings = try await store.findings(candidate: id).filter { reviewIDs.contains($0.reviewID) }
         if findings.contains(where: { $0.severity == .blocking }) { missing.append("blocking findings") }
         if findings.contains(where: { $0.severity.needsDecision && $0.disposition == .open }) { missing.append("undecided findings") }
         return missing
+    }
+
+    /// Accepts an empty result, or one already contained in the integration state, as done: the
+    /// task becomes `integrated` at the current integration state without a candidate.
+    public func acceptEmptyResult(_ taskID: TaskID) async throws {
+        guard let task = try await store.task(taskID), let attemptID = task.currentAttemptID,
+              let attempt = try await store.attempt(attemptID), let treeID = attempt.worktreeID,
+              let job = try await store.jobs().first(where: { $0.id == task.jobID }) else { throw IntegrationError.resultNotEmpty(taskID) }
+        guard task.state == .resultReady else { throw IntegrationError.taskNotInVerification(taskID, task.state) }
+        guard let tip = try await store.integrationTip(job: job.id) else { throw IntegrationError.jobWithoutIntegration(job.id) }
+        let tree = try await workspace.worktree(treeID)
+        var empty = tree.sealStatus == .empty
+        if !empty, tree.sealStatus == .committed, let result = tree.resultOID {
+            empty = try await git.isAncestor(result, of: tip, in: try await workspace.attach(job.projectID))
+        }
+        guard empty else { throw IntegrationError.resultNotEmpty(taskID) }
+        try await store.acceptEmptyResult(taskID, expectedVersion: task.version, integratedOID: tip)
     }
 
     // MARK: Approval and publication

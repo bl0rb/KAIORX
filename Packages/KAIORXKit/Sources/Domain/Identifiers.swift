@@ -53,3 +53,16 @@ public enum WorktreeTag {}
 public enum GitOperationTag {}
 public typealias WorktreeID = TypedID<WorktreeTag>
 public typealias GitOperationID = TypedID<GitOperationTag>
+
+public enum PlanRevisionTag {}
+public enum AccountTag {}
+public enum ConsentTag {}
+public enum BudgetBucketTag {}
+public enum QuotaBlockTag {}
+public enum DecisionTag {}
+public typealias PlanRevisionID = TypedID<PlanRevisionTag>
+public typealias AccountID = TypedID<AccountTag>
+public typealias ConsentID = TypedID<ConsentTag>
+public typealias BudgetBucketID = TypedID<BudgetBucketTag>
+public typealias QuotaBlockID = TypedID<QuotaBlockTag>
+public typealias DecisionID = TypedID<DecisionTag>

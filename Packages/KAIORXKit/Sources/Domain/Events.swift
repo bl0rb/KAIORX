@@ -26,6 +26,14 @@ public struct EventKind: RawRepresentable, Hashable, Sendable, Codable, Expressi
     public static let usageObserved: EventKind = "usage.observed"
     public static let providerDiagnostic: EventKind = "provider.diagnostic"
     public static let recoveryRequired: EventKind = "recovery.required"
+    public static let planProposed: EventKind = "plan.proposed"
+    public static let planAccepted: EventKind = "plan.accepted"
+    public static let taskReady: EventKind = "task.ready"
+    public static let taskBlocked: EventKind = "task.blocked"
+    public static let policyDecided: EventKind = "policy.decided"
+    public static let quotaBlocked: EventKind = "quota.blocked"
+    public static let quotaReleased: EventKind = "quota.released"
+    public static let quotaObserved: EventKind = "quota.observed"
 }
 
 public enum Canonical {

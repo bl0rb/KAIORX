@@ -458,7 +458,15 @@ final class CodexRunHandle: RunHandle {
             default: abandon("turn/completed with status \(turn["status"]?.string ?? "nil")")
             }
         case "error":
-            continuation.yield(.diagnostic(message: "codex error (retry: \(params["willRetry"]?.bool ?? false)): \(params["error"]?["message"]?.string ?? "")"))
+            let willRetry = params["willRetry"]?.bool ?? false
+            continuation.yield(.diagnostic(message: "codex error (retry: \(willRetry)): \(params["error"]?["message"]?.string ?? "")"))
+            // A limit Codex does not retry itself blocks the account (ADR 0005 §10). Codex names
+            // no Retry-After; the block falls back to the last known reset.
+            if !willRetry, let kind = Self.limitKind(params["error"]?["codexErrorInfo"]) {
+                continuation.yield(.rateLimited(signal: RateLimitSignal(kind: kind)))
+            }
+        case "account/rateLimits/updated":
+            for signal in Self.quotaSignals(params["rateLimits"]) { continuation.yield(.quotaObserved(signal: signal)) }
         default:
             if !Self.passiveNotifications.contains(method) {
                 continuation.yield(.diagnostic(message: "codex notification \(method)"))
@@ -479,6 +487,31 @@ final class CodexRunHandle: RunHandle {
         "thread/started", "thread/status/changed", "thread/settings/updated", "turn/started", "turn/diff/updated",
         "turn/plan/updated", "item/reasoning/summaryTextDelta", "item/reasoning/summaryPartAdded", "item/reasoning/textDelta",
         "item/commandExecution/outputDelta", "item/fileChange/outputDelta",
-        "serverRequest/resolved", "account/rateLimits/updated", "mcpServer/startupStatus/updated", "skills/changed",
+        "serverRequest/resolved", "mcpServer/startupStatus/updated", "skills/changed",
     ]
+
+    /// `usageLimitExceeded` and `rateLimitExceeded`, or an HTTP 429, as a limit; anything else nil.
+    static func limitKind(_ info: JSONValue?) -> RateLimitKind? {
+        switch info?.string {
+        case "usageLimitExceeded": return .usageLimit
+        case "rateLimitExceeded": return .rateLimit
+        default: break
+        }
+        if info?["httpConnectionFailed"]?["httpStatusCode"]?.int == 429 { return .rateLimit }
+        return nil
+    }
+
+    /// The primary and secondary windows of a (sparse) `RateLimitSnapshot`, in percent. Missing
+    /// windows are skipped, not cleared. `resetsAt` is read as Unix seconds (milliseconds if
+    /// already that large).
+    static func quotaSignals(_ snapshot: JSONValue?) -> [QuotaSignal] {
+        guard let snapshot else { return [] }
+        let limit = snapshot["limitId"]?.string ?? "codex"
+        return ["primary", "secondary"].compactMap { name in
+            guard let window = snapshot[name], let used = window["usedPercent"]?.int else { return nil }
+            let reset = window["resetsAt"]?.int.map { Int64($0) }.map { $0 < 100_000_000_000 ? $0 * 1000 : $0 }
+            let minutes = window["windowDurationMins"]?.int.map(String.init) ?? "?"
+            return QuotaSignal(windowKey: "\(limit):\(name):\(minutes)m", unit: .percent, used: used, limit: 100, resetAt: reset)
+        }
+    }
 }

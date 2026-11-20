@@ -98,7 +98,8 @@ public enum TaskState: String, LifecycleState {
         case .ready: next = [.running]
         // An author attempt that ends without a result returns the task to `ready`.
         case .running: next = [.resultReady, .ready]
-        case .resultReady: next = [.verifying, .needsChanges]
+        // `integrated` only for an empty or already contained result the user accepts (ADR 0005).
+        case .resultReady: next = [.verifying, .needsChanges, .integrated]
         case .verifying: next = [.awaitingMerge, .needsChanges, .conflict]
         // A superseded candidate is rebuilt, or new findings reopen the review: back to verifying.
         case .awaitingMerge: next = [.integrated, .verifying, .needsChanges, .conflict]

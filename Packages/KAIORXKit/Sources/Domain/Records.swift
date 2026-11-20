@@ -34,14 +34,17 @@ public struct JobRecord: Sendable, Equatable, Codable, Identifiable {
     /// Commit the job starts from, and the private ref its integrations advance.
     public var baseOID: String?
     public var integrationRef: String?
+    /// The accepted plan revision (package F); nil for jobs without a plan.
+    public var currentPlanID: PlanRevisionID?
     public var version: Int
     public var createdAt: Int64
 
     public init(
         id: JobID, projectID: ProjectID, goalArtifactID: ArtifactID, state: JobState,
         stateReason: String?, resumeState: JobState? = nil, baseOID: String? = nil, integrationRef: String? = nil,
-        version: Int, createdAt: Int64
+        currentPlanID: PlanRevisionID? = nil, version: Int, createdAt: Int64
     ) {
+        self.currentPlanID = currentPlanID
         self.baseOID = baseOID
         self.integrationRef = integrationRef
         self.id = id
@@ -63,13 +66,24 @@ public struct TaskRecord: Sendable, Equatable, Codable, Identifiable {
     public var currentAttemptID: AttemptID?
     /// Stage a side state returns to.
     public var resumeState: TaskState?
+    /// Stable key within the job's plan (package F); nil for tasks outside a plan.
+    public var planKey: String?
+    /// Why a ready task is not started (scheduler wait); never a task state.
+    public var waitReason: String?
+    public var readyAt: Int64?
+    public var integratedOID: String?
     public var version: Int
     public var createdAt: Int64
 
     public init(
         id: TaskID, jobID: JobID, title: String, state: TaskState, currentAttemptID: AttemptID?,
-        resumeState: TaskState? = nil, version: Int, createdAt: Int64
+        resumeState: TaskState? = nil, planKey: String? = nil, waitReason: String? = nil, readyAt: Int64? = nil,
+        integratedOID: String? = nil, version: Int, createdAt: Int64
     ) {
+        self.planKey = planKey
+        self.waitReason = waitReason
+        self.readyAt = readyAt
+        self.integratedOID = integratedOID
         self.id = id
         self.jobID = jobID
         self.title = title
@@ -98,14 +112,29 @@ public struct AttemptRecord: Sendable, Equatable, Codable, Identifiable {
     public var endedAt: Int64?
     public var errorClass: String?
     public var worktreeID: WorktreeID?
+    /// Integration state the attempt started from (package F).
+    public var baseOID: String?
+    public var accountID: AccountID?
+    public var modelProfileID: ModelProfileID?
+    public var planID: PlanRevisionID?
+    public var tier: CapabilityTier?
+    public var consentID: ConsentID?
     public var version: Int
 
     public init(
         id: AttemptID, taskID: TaskID, role: AttemptRole, ordinal: Int, provider: ProviderKind,
         mode: RunMode, model: String, effort: String?, state: AttemptState, specDigest: String,
         sessionHandle: String?, reservedAt: Int64, startedAt: Int64?, endedAt: Int64?,
-        errorClass: String?, worktreeID: WorktreeID? = nil, version: Int
+        errorClass: String?, worktreeID: WorktreeID? = nil, baseOID: String? = nil, accountID: AccountID? = nil,
+        modelProfileID: ModelProfileID? = nil, planID: PlanRevisionID? = nil, tier: CapabilityTier? = nil,
+        consentID: ConsentID? = nil, version: Int
     ) {
+        self.baseOID = baseOID
+        self.accountID = accountID
+        self.modelProfileID = modelProfileID
+        self.planID = planID
+        self.tier = tier
+        self.consentID = consentID
         self.worktreeID = worktreeID
         self.id = id
         self.taskID = taskID

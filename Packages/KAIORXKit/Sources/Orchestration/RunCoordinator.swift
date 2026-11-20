@@ -89,11 +89,16 @@ public actor RunCoordinator {
         let outcome = try await store.execute(Command(id: request.commandID, .reserveAttempt(reservation)))
         let id = request.attemptID
         if outcome.isReplay { return .alreadyRequested(id) }
+        return try await launch(id, spec: spec)
+    }
 
-        guard let adapter = adapters[request.provider] else {
+    /// Starts an attempt that is already `reserved` (for example by the scheduler's atomic
+    /// reservation) on its adapter. A cancel that won the race ends it without a start.
+    public func launch(_ id: AttemptID, spec: AttemptSpec) async throws -> StartResult {
+        guard let adapter = adapters[spec.provider] else {
             let state = try await transition(id, errorClass: "adapterUnavailable") { $0 == .reserved ? .failed : nil }
             if state == .cancelled { return .cancelledBeforeStart(id) }
-            return .failedToStart(id, reason: "No adapter for \(request.provider.rawValue)")
+            return .failedToStart(id, reason: "No adapter for \(spec.provider.rawValue)")
         }
         let state = try await transition(id) { $0 == .reserved ? .starting : nil }
         guard state == .starting else { return .cancelledBeforeStart(id) }

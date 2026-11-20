@@ -2,7 +2,7 @@
 /// consent, accounts, plans, worktrees, budgets, candidates and Git operations follow as new
 /// migrations with their packages; applied migrations are never edited.
 public enum CoreSchema {
-    public static let migrations: [Migration] = [v1, v2, v3]
+    public static let migrations: [Migration] = [v1, v2, v3, v4]
 
     static let v1 = Migration(version: 1, name: "core", sql: """
         CREATE TABLE project (
@@ -262,5 +262,180 @@ public enum CoreSchema {
         ALTER TABLE task ADD COLUMN integrated_oid TEXT;
         ALTER TABLE git_operation ADD COLUMN candidate_id TEXT REFERENCES candidate(id);
         ALTER TABLE git_operation ADD COLUMN approval_id TEXT REFERENCES approval(id);
+        """)
+
+    /// Package F (ADR 0005): plan revisions, consent, model profiles, budgets, quota and decisions.
+    static let v4 = Migration(version: 4, name: "planning", sql: """
+        CREATE TABLE plan_revision (
+            id TEXT PRIMARY KEY NOT NULL,
+            job_id TEXT NOT NULL REFERENCES job(id),
+            rev INTEGER NOT NULL CHECK (rev >= 1),
+            created_by TEXT NOT NULL CHECK (created_by IN ('user', 'planner')),
+            digest TEXT NOT NULL,
+            draft_json TEXT NOT NULL,
+            estimate_json TEXT NOT NULL DEFAULT '{}',
+            created_at INTEGER NOT NULL,
+            validated_at INTEGER NOT NULL,
+            accepted_at INTEGER,
+            superseded_at INTEGER,
+            UNIQUE (job_id, rev),
+            CHECK (superseded_at IS NULL OR accepted_at IS NOT NULL)
+        ) STRICT;
+
+        CREATE TABLE plan_task (
+            plan_id TEXT NOT NULL REFERENCES plan_revision(id),
+            key TEXT NOT NULL CHECK (length(key) > 0),
+            -- Set when the revision is accepted (new keys get their task then).
+            task_id TEXT REFERENCES task(id),
+            title TEXT NOT NULL,
+            goal TEXT NOT NULL,
+            criteria_json TEXT NOT NULL,
+            read_paths_json TEXT NOT NULL,
+            -- NULL: unknown, the whole project.
+            write_paths_json TEXT,
+            risk TEXT NOT NULL CHECK (risk IN ('normal', 'sensitive')),
+            difficulty_json TEXT NOT NULL,
+            tier TEXT NOT NULL CHECK (tier IN ('fast', 'standard', 'intensive')),
+            uncertain INTEGER NOT NULL CHECK (uncertain IN (0, 1)),
+            test_profile TEXT,
+            PRIMARY KEY (plan_id, key)
+        ) STRICT;
+        CREATE UNIQUE INDEX plan_task_task ON plan_task (plan_id, task_id) WHERE task_id IS NOT NULL;
+
+        CREATE TABLE dependency (
+            plan_id TEXT NOT NULL,
+            predecessor_key TEXT NOT NULL,
+            successor_key TEXT NOT NULL,
+            PRIMARY KEY (plan_id, predecessor_key, successor_key),
+            FOREIGN KEY (plan_id, predecessor_key) REFERENCES plan_task(plan_id, key),
+            FOREIGN KEY (plan_id, successor_key) REFERENCES plan_task(plan_id, key),
+            CHECK (predecessor_key <> successor_key)
+        ) STRICT;
+        CREATE INDEX dependency_successor ON dependency (plan_id, successor_key);
+
+        ALTER TABLE job ADD COLUMN current_plan_id TEXT REFERENCES plan_revision(id);
+        ALTER TABLE task ADD COLUMN plan_key TEXT;
+        ALTER TABLE task ADD COLUMN wait_reason TEXT;
+        ALTER TABLE task ADD COLUMN ready_at INTEGER;
+        CREATE UNIQUE INDEX task_plan_key ON task (job_id, plan_key) WHERE plan_key IS NOT NULL;
+
+        CREATE TABLE provider_account (
+            id TEXT PRIMARY KEY NOT NULL,
+            provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex', 'fake')),
+            opaque_identity TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            UNIQUE (provider, opaque_identity)
+        ) STRICT;
+
+        CREATE TABLE consent (
+            id TEXT PRIMARY KEY NOT NULL,
+            project_id TEXT NOT NULL REFERENCES project(id),
+            job_id TEXT REFERENCES job(id),
+            provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex', 'fake')),
+            account_id TEXT NOT NULL REFERENCES provider_account(id),
+            mode TEXT NOT NULL CHECK (mode IN ('automatic', 'manual')),
+            roles_json TEXT NOT NULL,
+            write_roots_json TEXT NOT NULL,
+            sensitive_roots_json TEXT NOT NULL,
+            unconfirmed_attempt_limit INTEGER CHECK (unconfirmed_attempt_limit >= 0),
+            scope_digest TEXT NOT NULL,
+            granted_at INTEGER NOT NULL,
+            expires_at INTEGER,
+            revoked_at INTEGER
+        ) STRICT;
+        CREATE INDEX consent_project ON consent (project_id, provider);
+
+        CREATE TABLE model_profile (
+            id TEXT PRIMARY KEY NOT NULL,
+            provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex', 'fake')),
+            role TEXT NOT NULL CHECK (role IN ('author', 'reviewer')),
+            tier TEXT NOT NULL CHECK (tier IN ('fast', 'standard', 'intensive')),
+            model TEXT NOT NULL,
+            effort TEXT,
+            context_limit INTEGER,
+            typical_tokens INTEGER CHECK (typical_tokens >= 0),
+            observed_duration_ms INTEGER,
+            verified_at INTEGER,
+            disabled_reason TEXT,
+            created_at INTEGER NOT NULL
+        ) STRICT;
+
+        ALTER TABLE attempt ADD COLUMN base_oid TEXT;
+        ALTER TABLE attempt ADD COLUMN account_id TEXT REFERENCES provider_account(id);
+        ALTER TABLE attempt ADD COLUMN model_profile_id TEXT REFERENCES model_profile(id);
+        ALTER TABLE attempt ADD COLUMN plan_id TEXT REFERENCES plan_revision(id);
+        ALTER TABLE attempt ADD COLUMN tier TEXT CHECK (tier IN ('fast', 'standard', 'intensive'));
+        ALTER TABLE attempt ADD COLUMN consent_id TEXT REFERENCES consent(id);
+        CREATE INDEX attempt_account_state ON attempt (account_id, state);
+
+        CREATE TABLE budget_bucket (
+            id TEXT PRIMARY KEY NOT NULL,
+            account_id TEXT NOT NULL REFERENCES provider_account(id),
+            job_id TEXT NOT NULL REFERENCES job(id),
+            token_limit INTEGER NOT NULL CHECK (token_limit >= 0),
+            created_at INTEGER NOT NULL,
+            UNIQUE (account_id, job_id)
+        ) STRICT;
+
+        CREATE TABLE reservation (
+            id TEXT PRIMARY KEY NOT NULL,
+            attempt_id TEXT NOT NULL UNIQUE REFERENCES attempt(id),
+            bucket_id TEXT NOT NULL REFERENCES budget_bucket(id),
+            reserved_tokens INTEGER NOT NULL CHECK (reserved_tokens >= 0),
+            -- The size came from a fixed start value, not from the profile.
+            size_uncertain INTEGER NOT NULL CHECK (size_uncertain IN (0, 1)),
+            settled_tokens INTEGER,
+            state TEXT NOT NULL CHECK (state IN ('held', 'settled', 'unresolved', 'released')),
+            created_at INTEGER NOT NULL,
+            settled_at INTEGER,
+            CHECK ((state = 'settled') = (settled_tokens IS NOT NULL))
+        ) STRICT;
+        CREATE INDEX reservation_bucket_state ON reservation (bucket_id, state);
+
+        CREATE TABLE quota_observation (
+            id TEXT PRIMARY KEY NOT NULL,
+            account_id TEXT NOT NULL REFERENCES provider_account(id),
+            window_key TEXT NOT NULL,
+            unit TEXT NOT NULL CHECK (unit IN ('percent', 'requests', 'tokens')),
+            observed_limit INTEGER,
+            observed_used INTEGER,
+            reset_at INTEGER,
+            observed_at INTEGER NOT NULL,
+            source TEXT NOT NULL
+        ) STRICT;
+        CREATE INDEX quota_observation_window ON quota_observation (account_id, window_key, unit, observed_at);
+
+        CREATE TABLE quota_block (
+            id TEXT PRIMARY KEY NOT NULL,
+            account_id TEXT NOT NULL REFERENCES provider_account(id),
+            reason TEXT NOT NULL CHECK (reason IN ('rateLimited', 'usageLimit', 'revoked', 'planStop', 'manual')),
+            -- NULL: until released by the user (once, if no reset is known).
+            until INTEGER,
+            -- Consecutive blocks of the account, for the doubling fallback.
+            sequence INTEGER NOT NULL CHECK (sequence >= 1),
+            created_at INTEGER NOT NULL,
+            released_at INTEGER,
+            released_by TEXT CHECK (released_by IN ('expiry', 'user')),
+            CHECK ((released_at IS NULL) = (released_by IS NULL))
+        ) STRICT;
+        CREATE INDEX quota_block_account ON quota_block (account_id, released_at);
+
+        CREATE TABLE decision (
+            id TEXT PRIMARY KEY NOT NULL,
+            project_id TEXT NOT NULL REFERENCES project(id),
+            job_id TEXT REFERENCES job(id),
+            task_id TEXT REFERENCES task(id),
+            attempt_id TEXT REFERENCES attempt(id),
+            account_id TEXT REFERENCES provider_account(id),
+            rule_version INTEGER NOT NULL,
+            rule TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            actor TEXT NOT NULL CHECK (length(actor) > 0),
+            remaining_attempts INTEGER,
+            alternative TEXT,
+            at INTEGER NOT NULL
+        ) STRICT;
+        CREATE INDEX decision_task ON decision (task_id, at);
         """)
 }

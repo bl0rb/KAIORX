@@ -21,6 +21,8 @@ Package D (provider adapters) is in progress offline. Adapters exist for Claude 
 
 Package E (check and integrate) is in progress. A sealed author result is merged into the job's integration target as a candidate. The candidate is tested and reviewed by another provider, then approved by the user and published with a journaled compare-and-swap. It can be delivered as a new branch or reverted through the same chain. A task moves together with its candidate. See `docs/adr/0004-integration-und-freigabe.md`.
 
+Package F (plan and scheduling) is in progress. A job's tasks form a validated plan (a DAG with write areas, criteria and difficulty), kept as immutable revisions. A scheduler starts ready tasks in critical-path order within slot, write-area, consent, quota and budget limits, and picks a model tier with repair and escalation rules. Without a live-verified provider, only an explicit user start runs. See `docs/adr/0005-plan-scheduler-routing.md`.
+
 ## Build and test
 
 ```sh

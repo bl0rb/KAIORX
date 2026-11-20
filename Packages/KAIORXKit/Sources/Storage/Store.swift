@@ -8,6 +8,7 @@ public enum StoreError: Error, Equatable, Sendable {
     case notFound(entity: String, id: String)
     case versionConflict(entity: String, id: String, expected: Int, actual: Int)
     case activeAuthorExists(taskID: TaskID, attemptID: AttemptID)
+    case activeReviewerExists(taskID: TaskID, attemptID: AttemptID)
     case taskNotOpen(taskID: TaskID, state: TaskState)
     /// Author attempts start only on `ready` tasks.
     case taskNotReady(taskID: TaskID, state: TaskState)
@@ -223,6 +224,7 @@ public actor Store {
             guard let projectID else {
                 throw StoreError.notFound(entity: "job", id: jobID.uuidString)
             }
+            if try loadJob(db, jobID).currentPlanID != nil { throw PlanningError.jobHasPlan(jobID) }
             try db.run(
                 "INSERT INTO task (id, job_id, title, state, version, created_at) VALUES (?, ?, ?, 'pending', 1, ?)",
                 [.text(id.uuidString), .text(jobID.uuidString), .text(title), .integer(now)]
@@ -239,6 +241,18 @@ public actor Store {
             try job.state.validateTransition(to: target, resumeState: job.resumeState)
             if target.requiresReason, (reason ?? "").isEmpty {
                 throw DomainError.reasonRequired(entity: JobState.entityName, state: target.rawValue)
+            }
+            if target == .done, let planID = job.currentPlanID {
+                // Every task of the current plan integrated, and no task of the job still open.
+                let open = try db.query(
+                    """
+                    SELECT COUNT(*) FROM task t WHERE t.job_id = ? AND (
+                        t.state NOT IN ('integrated', 'noResult', 'failed', 'cancelled')
+                        OR (t.state <> 'integrated' AND EXISTS (SELECT 1 FROM plan_task p WHERE p.plan_id = ? AND p.task_id = t.id)))
+                    """,
+                    [.text(id.uuidString), .text(planID.uuidString)]
+                ) { Int($0.int(0)) }.first ?? 0
+                if open > 0 { throw PlanningError.jobNotComplete(id, openTasks: open) }
             }
             let resume = job.state.resumeState(after: target, current: job.resumeState)
             try db.run(
@@ -283,6 +297,14 @@ public actor Store {
             }
             if reservation.role == .author, task.record.state != .ready {
                 throw StoreError.taskNotReady(taskID: reservation.taskID, state: task.record.state)
+            }
+            if reservation.role == .reviewer {
+                // At most one open reviewer per task (two windows start one review).
+                let openReviewer = try db.query(
+                    "SELECT id FROM attempt WHERE task_id = ? AND role = 'reviewer' AND state NOT IN ('succeeded', 'failed', 'cancelled')",
+                    [.text(reservation.taskID.uuidString)]
+                ) { try $0.requiredText(0) }.first
+                if let openReviewer { throw StoreError.activeReviewerExists(taskID: reservation.taskID, attemptID: try parseID(openReviewer)) }
             }
             let ordinal = try db.query(
                 "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM attempt WHERE task_id = ? AND role = ?",
@@ -397,8 +419,22 @@ public actor Store {
                 return .recorded(seq: seq)
             }
 
+            if case let .rateLimited(signal) = event, let account = attempt.record.accountID {
+                // The account is blocked in the same transaction as the event.
+                _ = try blockAccount(
+                    db, account, reason: signal.kind == .rateLimit ? "rateLimited" : "usageLimit", until: signal.resetAt,
+                    retryAfterMs: signal.retryAfterMs, now: now
+                )
+            }
+            if case let .quotaObserved(signal) = event, let account = attempt.record.accountID {
+                try recordQuotaObservation(db, account, signal, source: attempt.record.provider.rawValue, now: now)
+            }
             if case let .completed(status) = event {
-                let errorClass: String? = if case .failed = status { "providerFailed" } else { nil }
+                // A turn refused for a limit is an infrastructure failure, not a failure on the substance.
+                let limited = try !db.query(
+                    "SELECT 1 FROM event WHERE attempt_id = ? AND kind = ? LIMIT 1", [.text(attemptID.uuidString), .text(EventKind.quotaBlocked.rawValue)]
+                ) { $0.int(0) }.isEmpty
+                let errorClass: String? = if case .failed = status { limited ? "rateLimited" : "providerFailed" } else { nil }
                 let seq = try changeAttemptState(
                     db, attempt, to: status.attemptState, errorClass: errorClass, kind: .attemptCompleted,
                     payload: payload, dedupKey: dedupKey, now: now
@@ -557,6 +593,9 @@ public actor Store {
                 || (target == .running && !(from.isSideState && task.record.resumeState == .running))
         )
         if refused { throw StoreError.taskManagedByAttempt(taskID: task.record.id, from: from, to: target) }
+        if task.record.planKey != nil, target == .ready, from == .pending || (from == .blocked && task.record.resumeState == .pending) {
+            throw PlanningError.taskManagedByScheduler(task.record.id)
+        }
         if target == .running {
             let author = try task.record.currentAttemptID.flatMap { try loadAttempt(db, $0).record }
             guard let author, !author.state.isTerminal else {
@@ -643,6 +682,7 @@ public actor Store {
             db, kind: eventKind, projectID: attempt.projectID, taskID: attempt.record.taskID.uuidString,
             attemptID: attempt.record.id.uuidString, payload: eventPayload, dedupKey: dedupKey, now: now
         )
+        if target.isTerminal { try settleReservation(db, attempt: attempt.record, terminal: target, now: now) }
         // The task follows its current author attempt: a result makes it `resultReady`, anything
         // else returns it to `ready` for a new attempt. A task moved to a side state meanwhile
         // keeps that state for an explicit decision.
@@ -737,7 +777,7 @@ public actor Store {
     func loadTask(_ db: SQLiteConnection, _ id: TaskID) throws -> LoadedTask {
         guard let task = try db.query(
             "SELECT \(Self.taskColumnList("t")), j.project_id FROM task t JOIN job j ON j.id = t.job_id WHERE t.id = ?",
-            [.text(id.uuidString)], { LoadedTask(record: try Self.task(from: $0), projectID: try $0.requiredText(8)) }
+            [.text(id.uuidString)], { LoadedTask(record: try Self.task(from: $0), projectID: try $0.requiredText(12)) }
         ).first else { throw StoreError.notFound(entity: "task", id: id.uuidString) }
         return task
     }
@@ -749,19 +789,20 @@ public actor Store {
             FROM attempt a JOIN task t ON t.id = a.task_id JOIN job j ON j.id = t.job_id
             WHERE a.id = ?
             """,
-            [.text(id.uuidString)], { LoadedAttempt(record: try Self.attempt(from: $0), projectID: try $0.requiredText(17)) }
+            [.text(id.uuidString)], { LoadedAttempt(record: try Self.attempt(from: $0), projectID: try $0.requiredText(23)) }
         ).first else { throw StoreError.notFound(entity: "attempt", id: id.uuidString) }
         return attempt
     }
 
-    private static let jobColumns = "id, project_id, goal_artifact_id, state, state_reason, resume_state, version, created_at, base_oid, integration_ref"
+    private static let jobColumns = "id, project_id, goal_artifact_id, state, state_reason, resume_state, version, created_at, base_oid, integration_ref, current_plan_id"
 
     private static func job(from row: SQLRow) throws -> JobRecord {
         JobRecord(
             id: try parseID(row.requiredText(0)), projectID: try parseID(row.requiredText(1)),
             goalArtifactID: try parseID(row.requiredText(2)), state: try parseEnum(row.requiredText(3)),
             stateReason: row.text(4), resumeState: try row.text(5).map(parseEnum),
-            baseOID: row.text(8), integrationRef: row.text(9), version: Int(row.int(6)), createdAt: row.int(7)
+            baseOID: row.text(8), integrationRef: row.text(9), currentPlanID: try row.text(10).map(parseID),
+            version: Int(row.int(6)), createdAt: row.int(7)
         )
     }
 
@@ -769,7 +810,10 @@ public actor Store {
 
     private static func taskColumnList(_ alias: String?) -> String {
         let p = alias.map { "\($0)." } ?? ""
-        return ["id", "job_id", "title", "state", "current_attempt_id", "resume_state", "version", "created_at"]
+        return [
+            "id", "job_id", "title", "state", "current_attempt_id", "resume_state", "version", "created_at",
+            "plan_key", "wait_reason", "ready_at", "integrated_oid",
+        ]
             .map { p + $0 }.joined(separator: ", ")
     }
 
@@ -778,6 +822,7 @@ public actor Store {
             id: try parseID(row.requiredText(0)), jobID: try parseID(row.requiredText(1)),
             title: try row.requiredText(2), state: try parseEnum(row.requiredText(3)),
             currentAttemptID: try row.text(4).map(parseID), resumeState: try row.text(5).map(parseEnum),
+            planKey: row.text(8), waitReason: row.text(9), readyAt: row.optionalInt(10), integratedOID: row.text(11),
             version: Int(row.int(6)), createdAt: row.int(7)
         )
     }
@@ -789,6 +834,7 @@ public actor Store {
         return [
             "id", "task_id", "role", "ordinal", "provider", "mode", "model", "effort", "state", "spec_digest",
             "session_handle", "reserved_at", "started_at", "ended_at", "error_class", "version", "worktree_id",
+            "base_oid", "account_id", "model_profile_id", "plan_id", "tier", "consent_id",
         ].map { p + $0 }.joined(separator: ", ")
     }
 
@@ -800,7 +846,9 @@ public actor Store {
             model: try row.requiredText(6), effort: row.text(7), state: try parseEnum(row.requiredText(8)),
             specDigest: try row.requiredText(9), sessionHandle: row.text(10), reservedAt: row.int(11),
             startedAt: row.optionalInt(12), endedAt: row.optionalInt(13), errorClass: row.text(14),
-            worktreeID: try row.text(16).map(parseID), version: Int(row.int(15))
+            worktreeID: try row.text(16).map(parseID), baseOID: row.text(17), accountID: try row.text(18).map(parseID),
+            modelProfileID: try row.text(19).map(parseID), planID: try row.text(20).map(parseID),
+            tier: try row.text(21).map(parseEnum), consentID: try row.text(22).map(parseID), version: Int(row.int(15))
         )
     }
 }

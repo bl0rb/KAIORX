@@ -43,16 +43,19 @@ public struct FakeAdapterError: Error, Equatable, Sendable {
 
 /// Deterministic adapter for local tests and the development shell. Never starts a process.
 public final class FakeAdapter: AgentAdapter {
-    public let provider: ProviderKind = .fake
+    public let provider: ProviderKind
     private let script: @Sendable (AttemptSpec) -> FakeScript
 
-    public init(script: @escaping @Sendable (AttemptSpec) -> FakeScript = { _ in .success() }) {
+    /// `provider` lets tests stand in a deterministic double for another provider (scheduler
+    /// tests need an author and an independent reviewer).
+    public init(provider: ProviderKind = .fake, script: @escaping @Sendable (AttemptSpec) -> FakeScript = { _ in .success() }) {
+        self.provider = provider
         self.script = script
     }
 
     public func probe(_ request: ProbeRequest) async throws -> CapabilitySnapshot {
         CapabilitySnapshot(
-            provider: .fake, binaryVersion: "fake-1", authState: .signedIn, planMode: "fake",
+            provider: provider, binaryVersion: "fake-1", authState: .signedIn, planMode: "fake",
             runModes: [.automatic], roles: AttemptRole.allCases, supportsStreaming: true,
             supportsUsage: true, supportsApprovals: false, supportsResume: false
         )

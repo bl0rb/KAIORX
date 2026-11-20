@@ -251,6 +251,12 @@ extension GitRunner {
     }
 
     /// Paths that differ between two commits.
+    /// Whether `commit` is contained in `tip` (read-only).
+    public func isAncestor(_ commit: String, of tip: String, in repository: RepositoryInfo) async throws -> Bool {
+        let result = try await run(["merge-base", "--is-ancestor", commit, tip], in: repository.topLevel, allowedExitCodes: [0, 1])
+        return result.termination == .exited(0)
+    }
+
     public func changedPaths(from base: String, to commit: String, in repository: RepositoryInfo) async throws -> [ChangedPath] {
         let fields = nulFields(try await run(
             ["diff", "--name-status", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", base, commit], in: repository.topLevel

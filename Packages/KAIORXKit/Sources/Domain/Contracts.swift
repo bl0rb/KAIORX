@@ -57,6 +57,10 @@ public enum AgentEvent: Sendable, Codable, Equatable {
     case usage(UsageSample)
     /// A passive provider notification the adapter does not understand (type and version only).
     case diagnostic(message: String)
+    /// The provider refused for a rate or usage limit (package F): the account is blocked.
+    case rateLimited(signal: RateLimitSignal)
+    /// A provider quota window as reported (package F).
+    case quotaObserved(signal: QuotaSignal)
     case completed(TerminalStatus)
 
     // Stable JSON keys for the persisted journal instead of the synthesized `_0`.
@@ -72,6 +76,8 @@ public enum AgentEvent: Sendable, Codable, Equatable {
         case .toolEnded: .toolEnded
         case .usage: .usageObserved
         case .diagnostic: .providerDiagnostic
+        case .rateLimited: .quotaBlocked
+        case .quotaObserved: .quotaObserved
         case .completed: .attemptCompleted
         }
     }
