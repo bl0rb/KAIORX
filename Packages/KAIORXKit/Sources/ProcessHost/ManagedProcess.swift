@@ -86,11 +86,16 @@ public final class ManagedProcess: Sendable {
         }
         posix_spawn_file_actions_adddup2(&actions, stdoutPipe.write, 1)
         posix_spawn_file_actions_adddup2(&actions, stderrPipe.write, 2)
+        // `addchdir` exists from the macOS 26 SDK (Swift 6.2) on; older SDKs only know `_np`.
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             posix_spawn_file_actions_addchdir(&actions, spec.workingDirectory)
         } else {
             posix_spawn_file_actions_addchdir_np(&actions, spec.workingDirectory)
         }
+        #else
+        posix_spawn_file_actions_addchdir_np(&actions, spec.workingDirectory)
+        #endif
 
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)

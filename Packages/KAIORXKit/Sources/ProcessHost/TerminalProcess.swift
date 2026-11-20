@@ -83,11 +83,16 @@ public final class TerminalProcess: Sendable {
         posix_spawn_file_actions_addopen(&actions, 0, slavePath, O_RDWR, 0)
         posix_spawn_file_actions_adddup2(&actions, 0, 1)
         posix_spawn_file_actions_adddup2(&actions, 0, 2)
+        // `addchdir` exists from the macOS 26 SDK (Swift 6.2) on; older SDKs only know `_np`.
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             posix_spawn_file_actions_addchdir(&actions, spec.workingDirectory)
         } else {
             posix_spawn_file_actions_addchdir_np(&actions, spec.workingDirectory)
         }
+        #else
+        posix_spawn_file_actions_addchdir_np(&actions, spec.workingDirectory)
+        #endif
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)
         defer { posix_spawnattr_destroy(&attributes) }
