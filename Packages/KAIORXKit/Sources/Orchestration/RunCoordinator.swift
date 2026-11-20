@@ -15,12 +15,17 @@ public struct StartRequest: Sendable, Equatable {
     public var effort: String?
     public var workingDirectory: String?
     public var prompt: String
+    public var accountID: AccountID?
+    public var consentID: ConsentID?
 
     public init(
         commandID: CommandID = CommandID(), attemptID: AttemptID = AttemptID(), taskID: TaskID,
         projectID: ProjectID, role: AttemptRole = .author, provider: ProviderKind, modelProfile: String,
-        model: String, effort: String? = nil, workingDirectory: String? = nil, prompt: String
+        model: String, effort: String? = nil, workingDirectory: String? = nil, prompt: String,
+        accountID: AccountID? = nil, consentID: ConsentID? = nil
     ) {
+        self.accountID = accountID
+        self.consentID = consentID
         self.commandID = commandID
         self.attemptID = attemptID
         self.taskID = taskID
@@ -84,7 +89,7 @@ public actor RunCoordinator {
         let reservation = AttemptReservation(
             attemptID: request.attemptID, taskID: request.taskID, projectID: request.projectID,
             role: request.role, provider: request.provider, mode: .automatic, model: request.model,
-            effort: request.effort, specDigest: try spec.digest()
+            effort: request.effort, specDigest: try spec.digest(), accountID: request.accountID, consentID: request.consentID
         )
         let outcome = try await store.execute(Command(id: request.commandID, .reserveAttempt(reservation)))
         let id = request.attemptID

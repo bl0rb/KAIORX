@@ -21,11 +21,16 @@ public struct AttemptReservation: Sendable, Codable, Equatable {
     public var model: String
     public var effort: String?
     public var specDigest: String
+    /// The provider account and consent the attempt runs under (package F); counted for its slot.
+    public var accountID: AccountID?
+    public var consentID: ConsentID?
 
     public init(
         attemptID: AttemptID, taskID: TaskID, projectID: ProjectID, role: AttemptRole, provider: ProviderKind,
-        mode: RunMode, model: String, effort: String? = nil, specDigest: String
+        mode: RunMode, model: String, effort: String? = nil, specDigest: String, accountID: AccountID? = nil, consentID: ConsentID? = nil
     ) {
+        self.accountID = accountID
+        self.consentID = consentID
         self.attemptID = attemptID
         self.taskID = taskID
         self.projectID = projectID

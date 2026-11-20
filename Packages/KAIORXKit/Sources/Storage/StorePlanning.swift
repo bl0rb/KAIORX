@@ -19,6 +19,12 @@ public enum PlanningError: Error, Equatable, Sendable {
     case jobNotComplete(JobID, openTasks: Int)
     case emptyResultNotAcceptable(TaskID, TaskState)
     case blockNotReleasable(QuotaBlockID)
+    /// Plans of a done or cancelled job do not change.
+    case jobClosed(JobID, JobState)
+    /// The user's quota block or revocation stops this account.
+    case accountBlocked(AccountID)
+    /// A plan task's review needs a valid reviewer consent for its provider.
+    case noReviewerConsent(ProviderKind)
 }
 
 extension Store {
@@ -37,32 +43,27 @@ extension Store {
         let now = currentTime()
         return try db.transaction {
             let job = try loadJob(db, jobID)
+            guard !job.state.isTerminal else { throw PlanningError.jobClosed(jobID, job.state) }
             guard job.currentPlanID == expectedCurrent else {
                 throw PlanningError.planRevisionMoved(expected: expectedCurrent, actual: job.currentPlanID)
             }
             let tasks = try planTasksByKey(db, job: jobID)
-            let ended = Set(tasks.filter { $0.value.state.isTerminal && $0.value.state != .integrated }.map(\.key))
-            let validated: ValidatedPlan
-            switch PlanValidator.validate(draft, ended: ended) {
-            case .success(let plan): validated = plan
-            case .failure(let issues): throw PlanningError.invalidPlan(issues)
-            }
-            // An ended task cannot run again under its key.
-            let reused = validated.tasks.map(\.key).filter { ended.contains($0) }
-            if !reused.isEmpty { throw PlanningError.invalidPlan(PlanIssues(reused.map { .unreachable(task: $0, predecessor: $0) })) }
+            let validated = try validateAgainstTasks(db, draft, tasks: tasks)
 
             let rev = (try db.query("SELECT COALESCE(MAX(rev), 0) + 1 FROM plan_revision WHERE job_id = ?", [.text(jobID.uuidString)]) { $0.int(0) }.first) ?? 1
             let id = PlanRevisionID()
             let estimate = try estimate(db, validated)
             try db.run(
                 """
-                INSERT INTO plan_revision (id, job_id, rev, created_by, digest, draft_json, estimate_json, created_at, validated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO plan_revision (id, job_id, rev, created_by, digest, draft_json, estimate_json, created_at, validated_at,
+                    based_on_plan_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     .text(id.uuidString), .text(jobID.uuidString), .integer(rev), .text(createdBy.rawValue), .text(validated.digest),
                     .text(String(decoding: try Canonical.encode(draft), as: UTF8.self)),
                     .text(String(decoding: try Canonical.encode(estimate), as: UTF8.self)), .integer(now), .integer(now),
+                    .optional(expectedCurrent?.uuidString),
                 ]
             )
             for task in validated.tasks {
@@ -110,10 +111,15 @@ extension Store {
             let plan = try loadPlan(db, id)
             guard plan.acceptedAt == nil else { throw PlanningError.revisionAlreadyAccepted(id) }
             let job = try loadJob(db, plan.jobID)
-            guard job.currentPlanID == expectedCurrent else {
+            guard !job.state.isTerminal else { throw PlanningError.jobClosed(job.id, job.state) }
+            // The revision must replace the one it was proposed (and its diff computed) against.
+            let basedOn = try db.query("SELECT based_on_plan_id FROM plan_revision WHERE id = ?", [.text(id.uuidString)]) { $0.text(0) }.first ?? nil
+            guard job.currentPlanID == expectedCurrent, basedOn == job.currentPlanID?.uuidString else {
                 throw PlanningError.planRevisionMoved(expected: expectedCurrent, actual: job.currentPlanID)
             }
             let tasks = try planTasksByKey(db, job: plan.jobID)
+            // Task states may have changed since the proposal.
+            _ = try validateAgainstTasks(db, plan.draft, tasks: tasks)
             let newRows = try planTaskRows(db, plan: id)
             let oldRows = try job.currentPlanID.map { try planTaskRows(db, plan: $0) } ?? [:]
             func started(_ task: TaskRecord) -> Bool {
@@ -138,7 +144,10 @@ extension Store {
                     db, kind: .taskCreated, projectID: job.projectID.uuidString, taskID: taskID.uuidString, attemptID: nil,
                     payload: Canonical.encode(["jobID": plan.jobID.uuidString, "title": title, "planKey": key]), dedupKey: nil, now: now
                 )
-                try db.run("UPDATE plan_task SET task_id = ? WHERE plan_id = ? AND key = ?", [.text(taskID.uuidString), .text(id.uuidString), .text(key)])
+            }
+            // Every row of the accepted revision names its task.
+            for (key, task) in try planTasksByKey(db, job: plan.jobID) where newRows[key] != nil {
+                try db.run("UPDATE plan_task SET task_id = ? WHERE plan_id = ? AND key = ?", [.text(task.id.uuidString), .text(id.uuidString), .text(key)])
             }
             if let previous = job.currentPlanID {
                 try db.run("UPDATE plan_revision SET superseded_at = ? WHERE id = ?", [.integer(now), .text(previous.uuidString)])
@@ -159,6 +168,24 @@ extension Store {
                 dedupKey: nil, now: now
             )
         }
+    }
+
+    /// Validates a draft against the job's tasks: an ended or reverted task can neither be
+    /// depended on nor run again under its key (ADR 0005 §2).
+    func validateAgainstTasks(_ db: SQLiteConnection, _ draft: PlanDraft, tasks: [String: TaskRecord]) throws -> ValidatedPlan {
+        var unreachable = Set<String>()
+        for (key, task) in tasks {
+            let state = try satisfaction(db, task)
+            if state == .ended || state == .reverted { unreachable.insert(key) }
+        }
+        let validated: ValidatedPlan
+        switch PlanValidator.validate(draft, ended: unreachable) {
+        case .success(let plan): validated = plan
+        case .failure(let issues): throw PlanningError.invalidPlan(issues)
+        }
+        let reused = validated.tasks.map(\.key).filter { key in tasks[key].map { $0.state.isTerminal && $0.state != .integrated } ?? false }
+        if !reused.isEmpty { throw PlanningError.invalidPlan(PlanIssues(reused.map { .unreachable(task: $0, predecessor: $0) })) }
+        return validated
     }
 
     public func plan(_ id: PlanRevisionID) throws -> PlanRevisionRecord { try loadPlan(try connection(), id) }
@@ -193,7 +220,9 @@ extension Store {
             for (p, s) in edges { predecessors[s, default: []].append(p) }
             var promoted: [TaskID] = []
             for key in try planTaskRows(db, plan: planID).keys.sorted() {
-                guard let task = tasks[key], task.state == .pending || task.state == .ready else { continue }
+                guard let task = tasks[key] else { continue }
+                let heldBeforeStart = task.state == .blocked && (task.resumeState == .ready || task.resumeState == .pending)
+                guard task.state == .pending || task.state == .ready || heldBeforeStart else { continue }
                 var reason: WaitReason?
                 for p in (predecessors[key] ?? []).sorted() {
                     guard let pred = tasks[p] else { continue }
@@ -205,8 +234,21 @@ extension Store {
                     }
                     if reason?.kind == .predecessorEnded || reason?.kind == .predecessorReverted { break }
                 }
+                let stale = task.waitReason.flatMap(WaitReason.init(stored:)).map { $0.kind == .predecessorEnded || $0.kind == .predecessorReverted } ?? false
                 if let reason, reason.detail == "predecessorsOpen" {
-                    // Still waiting for open predecessors: nothing to record.
+                    // A revision gave the task an open predecessor: it is not ready (any more).
+                    if stale { try setWaitReason(db, task, nil, now: now) }
+                    if task.state == .ready {
+                        try changeTaskState(db, try loadTask(db, task.id), to: .pending, reason: "predecessorAdded", now: now)
+                        try db.run("UPDATE task SET ready_at = NULL WHERE id = ?", [.text(task.id.uuidString)])
+                    } else if heldBeforeStart, task.resumeState == .ready {
+                        // The user's hold stays; it resumes before the predecessors now.
+                        try db.run("UPDATE task SET resume_state = 'pending', ready_at = NULL, version = version + 1 WHERE id = ?", [.text(task.id.uuidString)])
+                    }
+                    continue
+                }
+                if heldBeforeStart {
+                    if let reason { try setWaitReason(db, task, reason, now: now) }
                     continue
                 }
                 if let reason {
@@ -448,6 +490,25 @@ extension Store {
         return (bucket.0, bucket.1 - used)
     }
 
+    /// The user settles an `unresolved` reservation (usage never reported): with the tokens they
+    /// name, or released when nil.
+    public func resolveReservation(attempt: AttemptID, settledTokens: Int?) throws {
+        let db = try connection()
+        let now = currentTime()
+        try db.transaction {
+            let state = try db.query("SELECT state FROM reservation WHERE attempt_id = ?", [.text(attempt.uuidString)]) { try $0.requiredText(0) }.first
+            guard state == "unresolved" else { return }
+            if let tokens = settledTokens {
+                try db.run(
+                    "UPDATE reservation SET state = 'settled', settled_tokens = ?, settled_at = ? WHERE attempt_id = ?",
+                    [.integer(Int64(tokens)), .integer(now), .text(attempt.uuidString)]
+                )
+            } else {
+                try db.run("UPDATE reservation SET state = 'released', settled_at = ? WHERE attempt_id = ?", [.integer(now), .text(attempt.uuidString)])
+            }
+        }
+    }
+
     public func reservation(attempt: AttemptID) throws -> (reserved: Int, settled: Int?, state: String)? {
         try connection().query(
             "SELECT reserved_tokens, settled_tokens, state FROM reservation WHERE attempt_id = ?", [.text(attempt.uuidString)]
@@ -469,7 +530,9 @@ extension Store {
     static let blockFallbackMs: Int64 = 60_000
     static let blockMaxMs: Int64 = 15 * 60_000
 
-    func blockAccount(_ db: SQLiteConnection, _ account: AccountID, reason: String, until: Int64?, retryAfterMs: Int64?, now: Int64) throws -> QuotaBlockRecord {
+    func blockAccount(
+        _ db: SQLiteConnection, _ account: AccountID, reason: String, until: Int64?, retryAfterMs: Int64?, now: Int64, journal: Bool = true
+    ) throws -> QuotaBlockRecord {
         let previous = try db.query(
             "SELECT sequence, released_at, until FROM quota_block WHERE account_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
             [.text(account.uuidString)]
@@ -478,12 +541,13 @@ extension Store {
         let consecutive = previous.map { $0.1 == nil || now - ($0.1 ?? now) <= Self.blockMaxMs } ?? false
         let sequence = consecutive ? (previous!.0 + 1) : 1
         var end: Int64?
-        if reason == "revoked" || reason == "planStop" || reason == "manual" {
-            end = until
-        } else if let until {
-            end = until
+        var source: String
+        if let until {
+            (end, source) = (until, "given")
+        } else if reason == "revoked" || reason == "planStop" || reason == "manual" {
+            (end, source) = (nil, "open")
         } else if let retryAfterMs {
-            end = now + retryAfterMs
+            (end, source) = (now + retryAfterMs, "retryAfter")
         } else if let reset = try db.query(
             """
             SELECT MAX(reset_at) FROM quota_observation o
@@ -493,60 +557,94 @@ extension Store {
             """,
             [.text(account.uuidString), .integer(now)]
         ) { $0.optionalInt(0) }.first ?? nil {
-            end = reset
+            (end, source) = (reset, "reset")
         } else {
-            end = now + min(Self.blockMaxMs, Self.blockFallbackMs << Int64(min(sequence - 1, 10)))
+            (end, source) = (now + min(Self.blockMaxMs, Self.blockFallbackMs << Int64(min(sequence - 1, 10))), "fallback")
         }
-        // An active block is replaced by the new one (the later end wins).
-        try db.run(
-            "UPDATE quota_block SET released_at = ?, released_by = 'expiry' WHERE account_id = ? AND released_at IS NULL",
-            [.integer(now), .text(account.uuidString)]
-        )
+        // An open block that lasts at least as long stays (no end counts as the latest end).
+        if let open = try openBlockID(db, account) {
+            let current = try loadBlock(db, open)
+            if current.until == nil || (end != nil && current.until! >= end!) { return current }
+            try db.run("UPDATE quota_block SET released_at = ?, released_by = 'expiry' WHERE id = ?", [.integer(now), .text(open.uuidString)])
+            try journalQuota(db, account, kind: .quotaReleased, ["blockID": open.uuidString, "releasedBy": "replaced"], now: now)
+        }
         let id = QuotaBlockID()
         try db.run(
-            "INSERT INTO quota_block (id, account_id, reason, until, sequence, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [.text(id.uuidString), .text(account.uuidString), .text(reason), .optional(end), .integer(Int64(sequence)), .integer(now)]
+            "INSERT INTO quota_block (id, account_id, reason, until, sequence, created_at, end_source) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [.text(id.uuidString), .text(account.uuidString), .text(reason), .optional(end), .integer(Int64(sequence)), .integer(now), .text(source)]
         )
+        if journal {
+            try journalQuota(
+                db, account, kind: .quotaBlocked,
+                ["blockID": id.uuidString, "reason": reason, "until": end.map(String.init) ?? "", "sequence": String(sequence), "endSource": source],
+                now: now
+            )
+        }
         try recordDecision(
             db, projectID: nil, jobID: nil, taskID: nil, attemptID: nil, account: account, rule: "quotaBlock",
-            evidence: ["reason": reason, "until": end.map(String.init) ?? "release", "sequence": String(sequence)],
+            evidence: ["reason": reason, "until": end.map(String.init) ?? "release", "sequence": String(sequence), "endSource": source],
             outcome: "blocked", actor: "scheduler", remaining: nil, alternative: nil, now: now
         )
         return try loadBlock(db, id)
     }
 
-    /// The account's active block at `now`, releasing an expired one (`quota.released`).
-    public func activeBlock(_ account: AccountID) throws -> QuotaBlockRecord? {
-        let db = try connection()
-        let now = currentTime()
-        return try db.transaction { try activeBlock(db, account, now: now) }
+    func openBlockID(_ db: SQLiteConnection, _ account: AccountID) throws -> QuotaBlockID? {
+        try db.query(
+            "SELECT id FROM quota_block WHERE account_id = ? AND released_at IS NULL ORDER BY created_at DESC, rowid DESC LIMIT 1", [.text(account.uuidString)]
+        ) { try parseID($0.requiredText(0)) as QuotaBlockID }.first
     }
 
-    func activeBlock(_ db: SQLiteConnection, _ account: AccountID, now: Int64) throws -> QuotaBlockRecord? {
-        guard let id = try db.query(
-            "SELECT id FROM quota_block WHERE account_id = ? AND released_at IS NULL ORDER BY created_at DESC LIMIT 1", [.text(account.uuidString)]
-        ) { try parseID($0.requiredText(0)) as QuotaBlockID }.first else { return nil }
-        let block = try loadBlock(db, id)
-        if let until = block.until, until <= now {
+    /// Whether the account has a block not released yet, expired or not: an expired block is
+    /// lifted only after the scheduler's access check (ADR 0005 §10).
+    func hasOpenBlock(_ db: SQLiteConnection, _ account: AccountID) throws -> Bool { try openBlockID(db, account) != nil }
+
+    /// `quota.blocked` / `quota.released` in the project of the account's latest consent.
+    func journalQuota(_ db: SQLiteConnection, _ account: AccountID, kind: EventKind, _ payload: [String: String], now: Int64) throws {
+        guard let project = try db.query(
+            "SELECT project_id FROM consent WHERE account_id = ? ORDER BY granted_at DESC LIMIT 1", [.text(account.uuidString)]
+        ) { $0.text(0) }.first ?? nil else { return }
+        var body = payload
+        body["accountID"] = account.uuidString
+        try appendEvent(db, kind: kind, projectID: project, taskID: nil, attemptID: nil, payload: Canonical.encode(body), dedupKey: nil, now: now)
+    }
+
+    /// The account's open block. With `releasingExpired`, an expired one is released first (only
+    /// after the scheduler's access check).
+    public func activeBlock(_ account: AccountID, releasingExpired: Bool = false) throws -> QuotaBlockRecord? {
+        let db = try connection()
+        let now = currentTime()
+        return try db.transaction {
+            guard let id = try openBlockID(db, account) else { return nil }
+            let block = try loadBlock(db, id)
+            guard releasingExpired, let until = block.until, until <= now else { return block }
             try db.run("UPDATE quota_block SET released_at = ?, released_by = 'expiry' WHERE id = ?", [.integer(now), .text(id.uuidString)])
+            try journalQuota(db, account, kind: .quotaReleased, ["blockID": id.uuidString, "releasedBy": "expiry"], now: now)
             try recordDecision(
                 db, projectID: nil, jobID: nil, taskID: nil, attemptID: nil, account: account, rule: "quotaBlock",
                 evidence: ["blockID": id.uuidString], outcome: "released", actor: "scheduler", remaining: nil, alternative: nil, now: now
             )
             return nil
         }
-        return block
     }
 
-    /// The user lifts a block once: a block with a known end expires by itself.
+    /// The user lifts a block once when no reset is known (fallback or open end), or a manual
+    /// block at any time. A block with a known reset or Retry-After expires by itself.
     public func releaseBlock(_ id: QuotaBlockID) throws {
         let db = try connection()
         let now = currentTime()
         try db.transaction {
             let block = try loadBlock(db, id)
             guard block.releasedAt == nil else { return }
-            guard block.until == nil || block.reason == "manual" else { throw PlanningError.blockNotReleasable(id) }
+            let source = try db.query("SELECT end_source FROM quota_block WHERE id = ?", [.text(id.uuidString)]) { $0.text(0) }.first ?? nil
+            // Once per run of consecutive blocks: an earlier user release within the run forbids another.
+            let earlierUserRelease = try !db.query(
+                "SELECT 1 FROM quota_block WHERE account_id = ? AND released_by = 'user' AND released_at >= ? LIMIT 1",
+                [.text(block.accountID.uuidString), .integer(block.createdAt - Self.blockMaxMs * Int64(block.sequence))]
+            ) { $0.int(0) }.isEmpty
+            let releasable = block.reason == "manual" || ((source == "fallback" || source == "open") && !earlierUserRelease)
+            guard releasable else { throw PlanningError.blockNotReleasable(id) }
             try db.run("UPDATE quota_block SET released_at = ?, released_by = 'user' WHERE id = ?", [.integer(now), .text(id.uuidString)])
+            try journalQuota(db, block.accountID, kind: .quotaReleased, ["blockID": id.uuidString, "releasedBy": "user"], now: now)
             try recordDecision(
                 db, projectID: nil, jobID: nil, taskID: nil, attemptID: nil, account: block.accountID, rule: "quotaBlock",
                 evidence: ["blockID": id.uuidString], outcome: "released", actor: "user", remaining: nil, alternative: nil, now: now
@@ -561,12 +659,29 @@ extension Store {
         return try ids.map { try loadBlock(db, $0) }
     }
 
-    /// Open attempts started under a consent that was revoked since.
+    /// Future resets of windows at or above `percent`: the scheduler wakes at them.
+    public func quotaResets(atLeast percent: Int) throws -> [Int64] {
+        let db = try connection()
+        let now = currentTime()
+        return try db.query(
+            """
+            SELECT reset_at FROM quota_observation o WHERE reset_at > ? AND observed_at = (
+                SELECT MAX(observed_at) FROM quota_observation WHERE account_id = o.account_id AND window_key = o.window_key AND unit = o.unit)
+            AND ((unit = 'percent' AND observed_used >= ?) OR (observed_limit > 0 AND observed_used * 100 >= observed_limit * ?))
+            """,
+            [.integer(now), .integer(Int64(percent)), .integer(Int64(percent))]
+        ) { $0.int(0) }
+    }
+
+    /// Open attempts under a revoked consent, or of an account one of whose consents was revoked
+    /// after they were reserved (ADR 0005 §7: running attempts of the account stop).
     public func attemptsUnderRevokedConsent() throws -> [AttemptID] {
         try connection().query(
             """
-            SELECT a.id FROM attempt a JOIN consent c ON c.id = a.consent_id
-            WHERE c.revoked_at IS NOT NULL AND a.state IN ('reserved', 'starting', 'running', 'awaitingApproval')
+            SELECT a.id FROM attempt a
+            WHERE a.state IN ('reserved', 'starting', 'running', 'awaitingApproval')
+            AND (EXISTS (SELECT 1 FROM consent c WHERE c.id = a.consent_id AND c.revoked_at IS NOT NULL)
+                OR EXISTS (SELECT 1 FROM consent c WHERE c.account_id = a.account_id AND c.revoked_at >= a.reserved_at))
             ORDER BY a.reserved_at, a.id
             """
         ) { try parseID($0.requiredText(0)) }
@@ -596,14 +711,15 @@ extension Store {
     }
 
     /// Highest used percentage over the latest observation of each window; nil if none known.
-    func quotaUsedPercent(_ db: SQLiteConnection, _ account: AccountID) throws -> Int? {
+    func quotaUsedPercent(_ db: SQLiteConnection, _ account: AccountID, now: Int64) throws -> Int? {
+        // A window whose reset has passed no longer limits (its next value is unknown until reported).
         let rows = try db.query(
             """
             SELECT unit, observed_used, observed_limit FROM quota_observation o
-            WHERE account_id = ? AND observed_at = (
+            WHERE account_id = ? AND (reset_at IS NULL OR reset_at > ?) AND observed_at = (
                 SELECT MAX(observed_at) FROM quota_observation WHERE account_id = o.account_id AND window_key = o.window_key AND unit = o.unit)
             """,
-            [.text(account.uuidString)]
+            [.text(account.uuidString), .integer(now)]
         ) { (try $0.requiredText(0), $0.optionalInt(1).map(Int.init), $0.optionalInt(2).map(Int.init)) }
         let shares = rows.compactMap { row -> Int? in
             QuotaSignal(windowKey: "", unit: QuotaUnit(rawValue: row.0) ?? .percent, used: row.1, limit: row.2, resetAt: nil).usedPercent
@@ -661,14 +777,18 @@ extension Store {
             let account = d.accountID
 
             // Quota.
-            if try activeBlock(db, account, now: now) != nil { return try wait(WaitReason(.quota, "blocked")) }
+            if try hasOpenBlock(db, account) { return try wait(WaitReason(.quota, "blocked")) }
             let accountActive = try activeAttemptCount(db, account: account)
-            if let used = try quotaUsedPercent(db, account) {
+            if let used = try quotaUsedPercent(db, account, now: now) {
                 if used >= 100 { return try wait(WaitReason(.quota, "exhausted")) }
                 if used >= limits.warnPercent, accountActive > 0 { return try wait(WaitReason(.quota, "nearLimit")) }
             } else {
                 let limit = d.unconfirmedAttemptLimit ?? 0
-                let spent = try db.query("SELECT COUNT(*) FROM attempt WHERE consent_id = ?", [.text(consent.id.uuidString)]) { Int($0.int(0)) }.first ?? 0
+                // Attempts that reached the provider, or may still do so; not those that failed before a turn.
+                let spent = try db.query(
+                    "SELECT COUNT(*) FROM attempt WHERE consent_id = ? AND (started_at IS NOT NULL OR state NOT IN ('succeeded', 'failed', 'cancelled', 'uncertain'))",
+                    [.text(consent.id.uuidString)]
+                ) { Int($0.int(0)) }.first ?? 0
                 if spent >= limit { return try wait(WaitReason(.quota, "unknownQuotaLimit")) }
             }
 
@@ -756,19 +876,20 @@ extension Store {
             """
             SELECT COUNT(*) FROM attempt
             WHERE (state IN ('reserved', 'starting', 'running', 'awaitingApproval', 'cancelling')
-                OR (state = 'uncertain' AND COALESCE(error_class, '') <> 'processLostOnRestart')) \(filter)
+                OR (state = 'uncertain' AND process_lost = 0 AND COALESCE(error_class, '') <> 'processLostOnRestart')) \(filter)
             """,
             account.map { [.text($0.uuidString)] } ?? []
         ) { Int($0.int(0)) }.first ?? 0
     }
 
-    /// A candidate of the project waits for its review: reviewing, no approving review of its
-    /// commit and no open reviewer attempt.
+    /// A candidate of the project waits for its review: reviewing, its task in verification (not
+    /// held by the user), no readable review of its commit yet and no open reviewer attempt.
     func reviewWaiting(_ db: SQLiteConnection, project: String) throws -> Bool {
         !(try db.query(
             """
-            SELECT 1 FROM candidate c WHERE c.project_id = ? AND c.state = 'reviewing'
-            AND NOT EXISTS (SELECT 1 FROM review r WHERE r.candidate_id = c.id AND r.candidate_oid = c.candidate_oid AND r.status = 'approved')
+            SELECT 1 FROM candidate c JOIN task t ON t.id = c.task_id WHERE c.project_id = ? AND c.state = 'reviewing'
+            AND t.state = 'verifying'
+            AND NOT EXISTS (SELECT 1 FROM review r WHERE r.candidate_id = c.id AND r.candidate_oid = c.candidate_oid AND r.status <> 'invalid')
             AND NOT EXISTS (SELECT 1 FROM attempt a WHERE a.task_id = c.task_id AND a.role = 'reviewer'
                 AND a.state NOT IN ('succeeded', 'failed', 'cancelled'))
             LIMIT 1

@@ -446,7 +446,8 @@ func planTask(_ key: String, after: [String] = [], writes: [String]? = nil, diff
         let oid = try #require(candidate.candidateOID)
         #expect(try await h.integration.gate(candidate.id).contains("no approving human review for a sensitive task"))
         _ = try await h.integration.importReview(candidate.id, text: #"{"candidateOID": "\#(oid)", "verdict": "approve", "findings": []}"#)
-        #expect(try await h.integration.gate(candidate.id) == ["no test profile for a sensitive task"])
+        // The imported review is the human one; it cannot also be the independent provider review.
+        #expect(try await h.integration.gate(candidate.id) == ["no approving independent review for \(oid)", "no test profile for a sensitive task"])
         #expect(try await h.store.candidate(candidate.id)?.state == .reviewing)
     }
 

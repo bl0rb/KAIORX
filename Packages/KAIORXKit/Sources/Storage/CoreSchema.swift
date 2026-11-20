@@ -2,7 +2,7 @@
 /// consent, accounts, plans, worktrees, budgets, candidates and Git operations follow as new
 /// migrations with their packages; applied migrations are never edited.
 public enum CoreSchema {
-    public static let migrations: [Migration] = [v1, v2, v3, v4]
+    public static let migrations: [Migration] = [v1, v2, v3, v4, v5]
 
     static let v1 = Migration(version: 1, name: "core", sql: """
         CREATE TABLE project (
@@ -437,5 +437,13 @@ public enum CoreSchema {
             at INTEGER NOT NULL
         ) STRICT;
         CREATE INDEX decision_task ON decision (task_id, at);
+        """)
+
+    /// Package F check round: the revision a proposal was based on, attempts whose process is
+    /// gone after a restart, and where a quota block's end came from.
+    static let v5 = Migration(version: 5, name: "planningChecks", sql: """
+        ALTER TABLE plan_revision ADD COLUMN based_on_plan_id TEXT REFERENCES plan_revision(id);
+        ALTER TABLE attempt ADD COLUMN process_lost INTEGER NOT NULL DEFAULT 0 CHECK (process_lost IN (0, 1));
+        ALTER TABLE quota_block ADD COLUMN end_source TEXT CHECK (end_source IN ('given', 'retryAfter', 'reset', 'fallback', 'open'));
         """)
 }

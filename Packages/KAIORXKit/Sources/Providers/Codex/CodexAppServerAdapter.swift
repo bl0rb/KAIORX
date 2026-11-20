@@ -497,7 +497,9 @@ final class CodexRunHandle: RunHandle {
         case "rateLimitExceeded": return .rateLimit
         default: break
         }
-        if info?["httpConnectionFailed"]?["httpStatusCode"]?.int == 429 { return .rateLimit }
+        // Any HTTP variant (connection failed, stream failed or dropped, retries exhausted) with 429.
+        for variant in ["httpConnectionFailed", "responseStreamConnectionFailed", "responseStreamDisconnected", "responseTooManyFailedAttempts"]
+        where info?[variant]?["httpStatusCode"]?.int == 429 { return .rateLimit }
         return nil
     }
 

@@ -24,17 +24,37 @@ public enum PlanProposal {
                 guard let list = value as? [String] else { throw .invalidTask(index, name) }
                 return list
             }
-            func flag(_ name: String) -> Bool? { (entry["difficulty"] as? [String: Any])?[name] as? Bool }
-            let risk = (entry["risk"] as? String).flatMap(PlanTaskRisk.init(rawValue:)) ?? .normal
+            // A present field must have the right type; only a missing or null one is defaulted.
+            func text(_ name: String) throws(ParseError) -> String? {
+                guard let value = entry[name], !(value is NSNull) else { return nil }
+                guard let string = value as? String else { throw .invalidTask(index, name) }
+                return string
+            }
+            let difficulty: [String: Any]
+            switch entry["difficulty"] {
+            case nil, is NSNull: difficulty = [:]
+            case let object as [String: Any]: difficulty = object
+            default: throw .invalidTask(index, "difficulty")
+            }
+            func flag(_ name: String) throws(ParseError) -> Bool? {
+                guard let value = difficulty[name], !(value is NSNull) else { return nil }
+                guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { throw .invalidTask(index, name) }
+                return number.boolValue
+            }
+            var risk = PlanTaskRisk.normal
+            if let stated = try text("risk") {
+                guard let known = PlanTaskRisk(rawValue: stated) else { throw .invalidTask(index, "risk") }
+                risk = known
+            }
             tasks.append(PlanTaskDraft(
-                key: key, title: title, goal: entry["goal"] as? String ?? "", criteria: try strings("criteria") ?? [],
+                key: key, title: title, goal: try text("goal") ?? "", criteria: try strings("criteria") ?? [],
                 readPaths: try strings("readPaths") ?? [], writePaths: try strings("writePaths"),
-                predecessors: try strings("predecessors") ?? [], parent: entry["parent"] as? String, risk: risk,
+                predecessors: try strings("predecessors") ?? [], parent: try text("parent"), risk: risk,
                 difficulty: DifficultyEvidence(
-                    multipleModules: flag("multipleModules"), moreThanThreeFiles: flag("moreThanThreeFiles"),
-                    unclearApproach: flag("unclearApproach"), noReproducibleTest: flag("noReproducibleTest")
+                    multipleModules: try flag("multipleModules"), moreThanThreeFiles: try flag("moreThanThreeFiles"),
+                    unclearApproach: try flag("unclearApproach"), noReproducibleTest: try flag("noReproducibleTest")
                 ),
-                testProfile: entry["testProfile"] as? String
+                testProfile: try text("testProfile")
             ))
         }
         return PlanDraft(tasks: tasks)

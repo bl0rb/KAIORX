@@ -98,6 +98,7 @@ public actor Scheduler {
             try await schedule(candidate, actor: "scheduler", report: &report)
         }
         for block in try await store.openBlocks() { if let until = block.until { report.wake(at: until) } }
+        for reset in try await store.quotaResets(atLeast: limits.warnPercent) { report.wake(at: reset) }
         return report
     }
 
@@ -114,8 +115,24 @@ public actor Scheduler {
             throw SchedulerError.notAPlanTask(taskID)
         }
         var report = TickReport()
+        try await checkExpiredBlocks(&report)
         try await schedule(Candidate(task: refreshed, job: job, planID: planID, planned: planned, pathLength: 1), actor: actor, report: &report)
         return report
+    }
+
+    /// The user's decision on a task that waits for one (attempt limit, top tier, start
+    /// retries): the count starts afresh after the attempts so far, optionally at a higher tier.
+    public func grant(_ taskID: TaskID, tier: CapabilityTier? = nil, actor: String) async throws {
+        let ordinal = try await store.attempts(taskID: taskID).filter { $0.role == .author }.map(\.ordinal).max() ?? 0
+        var evidence = ["afterOrdinal": String(ordinal)]
+        if let tier { evidence["tier"] = tier.rawValue }
+        try await store.recordDecision(task: taskID, rule: "userGrant", evidence: evidence, outcome: "granted", actor: actor, remaining: Router.maxAuthorAttempts)
+        try await store.setWaitReason(taskID, nil)
+    }
+
+    private func latestGrant(_ taskID: TaskID) async throws -> (afterOrdinal: Int, tier: CapabilityTier?)? {
+        guard let decision = try await store.decisions(task: taskID).last(where: { $0.rule == "userGrant" }) else { return nil }
+        return (Int(decision.evidence["afterOrdinal"] ?? "0") ?? 0, decision.evidence["tier"].flatMap(CapabilityTier.init(rawValue:)))
     }
 
     // MARK: One task
@@ -130,10 +147,15 @@ public actor Scheduler {
 
     private func schedule(_ c: Candidate, actor: String, report: inout TickReport) async throws {
         var task = c.task
-        let attempts = try await store.attempts(taskID: task.id).filter { $0.role == .author }
-        if attempts.contains(where: { !$0.state.isTerminal }) { return }
-        let history = try await countedHistory(task, attempts, planned: c.planned)
-        let decision = Router.nextTier(planned: c.planned.tier, history: history)
+        let allAttempts = try await store.attempts(taskID: task.id).filter { $0.role == .author }
+        if allAttempts.contains(where: { !$0.state.isTerminal }) { return }
+        // A user grant starts the count afresh (and may raise the tier).
+        let grant = try await latestGrant(task.id)
+        let attempts = allAttempts.filter { $0.ordinal > (grant?.afterOrdinal ?? 0) }
+        let counted = try await countedHistory(task, attempts, planned: c.planned)
+        let history = counted.map(\.0)
+        let plannedTier = max(c.planned.tier, grant?.tier ?? .fast)
+        let decision = Router.nextTier(planned: plannedTier, history: history)
 
         if case .userDecision(let reason) = decision.outcome {
             try await wait(task, WaitReason(.userDecision, reason), decision: decision, report: &report)
@@ -154,9 +176,15 @@ public actor Scheduler {
             }
         }
         if task.state == .needsChanges {
-            // A repair or escalation: the scheduler brings the task back to its author.
-            guard !history.isEmpty else { return }
-            try await store.execute(Command(.transitionTask(id: task.id, to: .ready, expectedVersion: task.version)))
+            // A repair, an escalation or a user grant: the scheduler brings the task back to its author.
+            guard !history.isEmpty || (grant != nil && attempts.isEmpty) else { return }
+            guard let current = try await store.task(task.id), current.state == .needsChanges else { return }
+            do {
+                try await store.execute(Command(.transitionTask(id: task.id, to: .ready, expectedVersion: current.version)))
+            } catch is StoreError, is DomainError, is PlanningError {
+                // Lost a race (another scheduler, a user hold): nothing to do this tick.
+                return
+            }
             guard let ready = try await store.task(task.id) else { return }
             task = ready
         }
@@ -167,15 +195,21 @@ public actor Scheduler {
         let consents = try await store.consents(project: c.job.projectID)
             .filter { $0.isValid(at: now) && ($0.draft.jobID == nil || $0.draft.jobID == c.job.id) }
         let profiles = try await store.modelProfiles()
-        let fixedProvider = attempts.first?.provider
+        // No provider or account rotation for a task that already ran (ADR 0005 §8).
+        let fixedProvider = allAttempts.first?.provider
+        let fixedAccount = allAttempts.first(where: { $0.accountID != nil })?.accountID
+        func eligible(_ consent: ConsentRecord) -> Bool {
+            consent.draft.roles.contains(.author) && (fixedProvider == nil || consent.draft.provider == fixedProvider)
+                && (fixedAccount == nil || consent.draft.accountID == fixedAccount)
+        }
         var options: [(ConsentRecord, ModelProfile)] = []
-        for consent in consents where consent.draft.roles.contains(.author) && (fixedProvider == nil || consent.draft.provider == fixedProvider) {
+        for consent in consents where eligible(consent) {
             if let profile = ModelProfile.smallest(profiles, provider: consent.draft.provider, role: .author, atLeast: tier) {
                 options.append((consent, profile))
             }
         }
         guard !options.isEmpty else {
-            let anyConsent = consents.contains { $0.draft.roles.contains(.author) && (fixedProvider == nil || $0.draft.provider == fixedProvider) }
+            let anyConsent = consents.contains(where: eligible)
             try await wait(task, WaitReason(anyConsent ? .profileMissing : .consent, anyConsent ? tier.rawValue : "none"), decision: decision, report: &report)
             return
         }
@@ -191,7 +225,7 @@ public actor Scheduler {
                 continue
             }
             let reviewProfile = ModelProfile.smallest(profiles, provider: reviewer.draft.provider, role: .reviewer, atLeast: .fast)
-            let spec = makeSpec(c, task: task, profile: profile, decision: decision, failure: history.isEmpty ? nil : try await lastFailureReport(task))
+            let spec = makeSpec(c, task: task, profile: profile, decision: decision, failure: counted.last?.1)
             let reservation = ScheduledReservation(
                 attemptID: spec.attemptID, taskID: task.id, planID: c.planID, consentID: consent.id, profile: profile, tier: profile.tier,
                 specDigest: try spec.digest(), reservedTokens: profile.typicalTokens ?? Self.defaultReservationTokens,
@@ -267,26 +301,29 @@ public actor Scheduler {
     }
 
     /// Author attempts that reached a turn and failed on the substance (ADR 0005 §8), oldest first.
-    func countedHistory(_ task: TaskRecord, _ attempts: [AttemptRecord], planned: PlannedTask) async throws -> [CountedAttempt] {
+    /// With each counted attempt, the report a repair prompt shows.
+    func countedHistory(_ task: TaskRecord, _ attempts: [AttemptRecord], planned: PlannedTask) async throws -> [(CountedAttempt, String)] {
         guard let job = try await store.jobs().first(where: { $0.id == task.jobID }) else { return [] }
         let candidates = try await store.candidates(jobID: job.id)
-        var result: [CountedAttempt] = []
+        var result: [(CountedAttempt, String)] = []
         for attempt in attempts.sorted(by: { $0.ordinal < $1.ordinal }) where attempt.startedAt != nil && attempt.state.isTerminal {
             let tier = attempt.tier ?? planned.tier
             if attempt.state == .failed, attempt.errorClass == "providerFailed" {
                 let reason = try await failureReason(attempt.id)
-                result.append(CountedAttempt(tier: tier, failure: .providerFailed(fingerprint: FailureFingerprint.of(reason))))
+                result.append((CountedAttempt(tier: tier, failure: .providerFailed(fingerprint: FailureFingerprint.of(reason))), reason))
                 continue
             }
             guard attempt.state == .succeeded else { continue }
             for candidate in candidates where candidate.authorAttemptID == attempt.id && candidate.state == .rejected {
                 let tests = try await store.testResults(candidate: candidate.id)
                 if let red = tests.last(where: { [.failed, .crashed, .inputsModified].contains($0.status) }) {
-                    result.append(CountedAttempt(tier: tier, failure: .redTest(fingerprint: FailureFingerprint.of(red.summary))))
+                    result.append((CountedAttempt(tier: tier, failure: .redTest(fingerprint: FailureFingerprint.of(red.summary))), "Test: \(red.summary)"))
                     break
                 }
-                if try await store.findings(candidate: candidate.id).contains(where: { $0.severity == .blocking }) {
-                    result.append(CountedAttempt(tier: tier, failure: .blockingFinding))
+                let blocking = try await store.findings(candidate: candidate.id).filter { $0.severity == .blocking }
+                if !blocking.isEmpty {
+                    let report = blocking.map { "Blocking finding \($0.path ?? "?"):\($0.line.map(String.init) ?? "?"): \($0.impact) – \($0.suggestion)" }
+                    result.append((CountedAttempt(tier: tier, failure: .blockingFinding), report.joined(separator: "\n")))
                     break
                 }
             }
@@ -301,22 +338,6 @@ public actor Scheduler {
             }
         }
         return "providerFailed"
-    }
-
-    /// The report of the last counted failure, for a repair prompt.
-    private func lastFailureReport(_ task: TaskRecord) async throws -> String? {
-        let attempts = try await store.attempts(taskID: task.id).filter { $0.role == .author && $0.startedAt != nil }.sorted { $0.ordinal < $1.ordinal }
-        guard let last = attempts.last else { return nil }
-        if last.state == .failed, last.errorClass == "providerFailed" { return try await failureReason(last.id) }
-        let candidates = try await store.candidates(jobID: task.jobID).filter { $0.authorAttemptID == last.id }
-        for candidate in candidates.reversed() {
-            if let red = try await store.testResults(candidate: candidate.id).last(where: { $0.status != .passed }) { return "Test: \(red.summary)" }
-            let blocking = try await store.findings(candidate: candidate.id).filter { $0.severity == .blocking }
-            if !blocking.isEmpty {
-                return blocking.map { "Blocking finding \($0.path ?? "?"):\($0.line.map(String.init) ?? "?"): \($0.impact) – \($0.suggestion)" }.joined(separator: "\n")
-            }
-        }
-        return nil
     }
 
     private func makeSpec(_ c: Candidate, task: TaskRecord, profile: ModelProfile, decision: TierDecision, failure: String?) -> AttemptSpec {
@@ -343,9 +364,10 @@ public actor Scheduler {
             guard let until = block.until, until <= now else { continue }
             guard let provider = try await store.provider(of: block.accountID) else { continue }
             if await gate.accessRestored(provider, account: block.accountID) {
-                _ = try await store.activeBlock(block.accountID)
+                _ = try await store.activeBlock(block.accountID, releasingExpired: true)
             } else {
-                let renewed = try await store.blockAccount(block.accountID, reason: block.reason)
+                // Always timed: a failed check renews as a rate limit with the doubling fallback.
+                let renewed = try await store.blockAccount(block.accountID, reason: "rateLimited")
                 if let end = renewed.until { report.wake(at: end) }
             }
         }

@@ -251,6 +251,16 @@ public actor IntegrationService {
         guard let commit = candidate.candidateOID, let task = candidate.taskID else { throw IntegrationError.candidateWithoutTask(id) }
         try await requireTaskInVerification(candidate)
         if let author = candidate.authorProvider, author == provider { throw IntegrationError.reviewerNotIndependent(provider) }
+        // A plan task's review runs under a reviewer consent of that provider (ADR 0005 §7).
+        var reviewerConsent: ConsentRecord?
+        if try await store.plannedTask(task) != nil {
+            let now = await store.now()
+            reviewerConsent = try await store.consents(project: candidate.projectID).first {
+                $0.isValid(at: now) && $0.draft.provider == provider && $0.draft.roles.contains(.reviewer)
+                    && ($0.draft.jobID == nil || $0.draft.jobID == candidate.jobID)
+            }
+            guard reviewerConsent != nil else { throw PlanningError.noReviewerConsent(provider) }
+        }
         let repository = try await workspace.attach(candidate.projectID)
         let diff = try await git.diff(from: candidate.previousTargetOID, to: commit, in: repository)
         let tests = try await store.testResults(candidate: id).filter { $0.candidateOID == commit }
@@ -278,7 +288,8 @@ public actor IntegrationService {
                 """
             let result = try await coordinator.start(StartRequest(
                 taskID: task, projectID: candidate.projectID, role: .reviewer, provider: provider, modelProfile: "review",
-                model: model, workingDirectory: path, prompt: prompt
+                model: model, workingDirectory: path, prompt: prompt,
+                accountID: reviewerConsent?.draft.accountID, consentID: reviewerConsent?.id
             ))
             switch result {
             case .started(let attempt), .alreadyRequested(let attempt):
@@ -335,13 +346,18 @@ public actor IntegrationService {
         let tests = try await store.testResults(candidate: id).filter { $0.candidateOID == commit }
         if tests.last?.status != .passed { missing.append("no passing test for \(commit)") }
         let reviews = try await store.reviews(candidate: id).filter { $0.candidateOID == commit && $0.status != .invalid }
+        var planned: (risk: PlanTaskRisk, testProfile: String?, writePaths: [String]?)?
+        if let taskID = candidate.taskID { planned = try await store.plannedTask(taskID) }
+        let sensitive = planned?.risk == .sensitive
+        // For a sensitive task the human review comes on top: it cannot also be the independent one.
         let independent = reviews.filter { review in
-            review.origin == .userImported || (review.reviewerProvider != nil && review.reviewerProvider != candidate.authorProvider)
+            (review.origin == .userImported && !sensitive)
+                || (review.origin == .provider && review.reviewerProvider != nil && review.reviewerProvider != candidate.authorProvider)
         }
         if !independent.contains(where: { $0.status == .approved }) { missing.append("no approving independent review for \(commit)") }
         // Findings count from every review of this commit, readable verdict or not: an unreadable
         // or foreign report only ever stores comments.
-        if let taskID = candidate.taskID, let planned = try await store.plannedTask(taskID), planned.risk == .sensitive {
+        if let planned, sensitive {
             // ADR 0005 §9: a sensitive task needs a named test profile and an approving human review.
             if planned.testProfile == nil { missing.append("no test profile for a sensitive task") }
             if !reviews.contains(where: { $0.origin == .userImported && $0.status == .approved }) {

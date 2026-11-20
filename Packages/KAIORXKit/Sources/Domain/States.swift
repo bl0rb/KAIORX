@@ -95,7 +95,8 @@ public enum TaskState: String, LifecycleState {
         var next: Set<TaskState>
         switch self {
         case .pending: next = [.ready]
-        case .ready: next = [.running]
+        // Back to pending when a new plan revision gives the task an open predecessor (ADR 0005).
+        case .ready: next = [.running, .pending]
         // An author attempt that ends without a result returns the task to `ready`.
         case .running: next = [.resultReady, .ready]
         // `integrated` only for an empty or already contained result the user accepts (ADR 0005).

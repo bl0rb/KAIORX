@@ -248,7 +248,7 @@ public actor Store {
                     """
                     SELECT COUNT(*) FROM task t WHERE t.job_id = ? AND (
                         t.state NOT IN ('integrated', 'noResult', 'failed', 'cancelled')
-                        OR (t.state <> 'integrated' AND EXISTS (SELECT 1 FROM plan_task p WHERE p.plan_id = ? AND p.task_id = t.id)))
+                        OR (t.state <> 'integrated' AND EXISTS (SELECT 1 FROM plan_task p WHERE p.plan_id = ? AND p.key = t.plan_key)))
                     """,
                     [.text(id.uuidString), .text(planID.uuidString)]
                 ) { Int($0.int(0)) }.first ?? 0
@@ -295,8 +295,15 @@ public actor Store {
             if reservation.role == .author, let active = activeAuthor {
                 throw StoreError.activeAuthorExists(taskID: reservation.taskID, attemptID: try parseID(active))
             }
+            if reservation.role == .author, task.record.planKey != nil {
+                // Plan tasks start only through the scheduler's reservation (consent, slots, areas, budget).
+                throw PlanningError.taskManagedByScheduler(task.record.id)
+            }
             if reservation.role == .author, task.record.state != .ready {
                 throw StoreError.taskNotReady(taskID: reservation.taskID, state: task.record.state)
+            }
+            if let account = reservation.accountID, try hasOpenBlock(db, account) {
+                throw PlanningError.accountBlocked(account)
             }
             if reservation.role == .reviewer {
                 // At most one open reviewer per task (two windows start one review).
@@ -313,14 +320,15 @@ public actor Store {
             try db.run(
                 """
                 INSERT INTO attempt (id, task_id, role, ordinal, provider, mode, model, effort, state,
-                                     spec_digest, reserved_at, version)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, 1)
+                                     spec_digest, reserved_at, version, account_id, consent_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, 1, ?, ?)
                 """,
                 [
                     .text(reservation.attemptID.uuidString), .text(reservation.taskID.uuidString),
                     .text(reservation.role.rawValue), .integer(ordinal), .text(reservation.provider.rawValue),
                     .text(reservation.mode.rawValue), .text(reservation.model), .optional(reservation.effort),
-                    .text(reservation.specDigest), .integer(now),
+                    .text(reservation.specDigest), .integer(now), .optional(reservation.accountID?.uuidString),
+                    .optional(reservation.consentID?.uuidString),
                 ]
             )
             try appendEvent(
@@ -423,7 +431,7 @@ public actor Store {
                 // The account is blocked in the same transaction as the event.
                 _ = try blockAccount(
                     db, account, reason: signal.kind == .rateLimit ? "rateLimited" : "usageLimit", until: signal.resetAt,
-                    retryAfterMs: signal.retryAfterMs, now: now
+                    retryAfterMs: signal.retryAfterMs, now: now, journal: false
                 )
             }
             if case let .quotaObserved(signal) = event, let account = attempt.record.accountID {
@@ -476,6 +484,8 @@ public actor Store {
                     report.uncertain.append(attempt.record.id)
                 }
             }
+            // No process of an earlier run is alive: an `uncertain` attempt frees its slot.
+            try db.run("UPDATE attempt SET process_lost = 1 WHERE state = 'uncertain' AND process_lost = 0")
             return report
         }
     }

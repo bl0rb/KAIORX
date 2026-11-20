@@ -106,6 +106,7 @@ public enum WriteArea: Sendable, Codable, Equatable, Hashable {
         "go.mod", "go.sum", "pyproject.toml", "poetry.lock", "requirements.txt", "project.pbxproj",
     ]
     static let manifestToken = "\u{0}manifests"
+    static let foldedManifestNames = Set(manifestNames.map(fold))
 
     /// Normalizes declared prefixes. `nil`, an empty list, `.` or the empty path mean the whole
     /// project. Throws for absolute paths, `..`, `.git` and other unresolvable entries.
@@ -117,7 +118,9 @@ public enum WriteArea: Sendable, Codable, Equatable, Hashable {
             if path.isEmpty { return .wholeProject }
             result.insert(path)
             let components = path.split(separator: "/")
-            if let last = components.last, manifestNames.contains(String(last)) || last.hasSuffix(".xcodeproj") || path.contains(".xcodeproj/") {
+            let folded = fold(path)
+            if let last = folded.split(separator: "/").last,
+               foldedManifestNames.contains(String(last)) || last.hasSuffix(".xcodeproj") || folded.contains(".xcodeproj/") {
                 result.insert(manifestToken)
             }
         }
