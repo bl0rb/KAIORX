@@ -1,0 +1,437 @@
+{
+  "build" : "ca2d5ee+bench",
+  "configuration" : "release",
+  "date" : "2026-11-20T17:59:38Z",
+  "machine" : {
+    "cores" : 10,
+    "cpu" : "Apple M4",
+    "macOS" : "Version 27.2.1 (Build 26B131)",
+    "memoryGB" : 16,
+    "model" : "Mac16,12"
+  },
+  "results" : [
+    {
+      "metric" : "seed",
+      "notes" : [
+        "addMemories in batches of 1,000"
+      ],
+      "scenario" : "fts-10000",
+      "unit" : "ms",
+      "value" : 3780.719291,
+      "verdict" : "info"
+    },
+    {
+      "metric" : "query (owner view, warm)",
+      "notes" : [
+        "10000 active chunks, 30 queries × 3 passes, retriever v2"
+      ],
+      "scenario" : "fts-10000",
+      "stats" : {
+        "count" : 90,
+        "max" : 111.982583,
+        "p50" : 82.07525,
+        "p95" : 111.015417
+      },
+      "target" : "p95 < 200 ms",
+      "unit" : "ms",
+      "verdict" : "met"
+    },
+    {
+      "metric" : "query (provider with grants, warm)",
+      "notes" : [
+        "10000 active chunks, 30 queries × 3 passes, retriever v2",
+        "the path an attempt's memory handover takes"
+      ],
+      "scenario" : "fts-10000",
+      "stats" : {
+        "count" : 90,
+        "max" : 190.422958,
+        "p50" : 158.514667,
+        "p95" : 184.642125
+      },
+      "target" : "p95 < 200 ms",
+      "unit" : "ms",
+      "verdict" : "met"
+    },
+    {
+      "metric" : "query (provider, cold page cache)",
+      "notes" : [
+        "store reopened before each query; OS file cache stays warm"
+      ],
+      "scenario" : "fts-10000",
+      "stats" : {
+        "count" : 20,
+        "max" : 158.731208,
+        "p50" : 152.497125,
+        "p95" : 158.418958
+      },
+      "target" : "p95 < 200 ms",
+      "unit" : "ms",
+      "verdict" : "met"
+    },
+    {
+      "metric" : "retrievals without a hit",
+      "notes" : [
+        "owner, provider and cold; every query matches the corpus, so an empty result means a broken path"
+      ],
+      "scenario" : "fts-10000",
+      "target" : "0",
+      "unit" : "count",
+      "value" : 0,
+      "verdict" : "met"
+    },
+    {
+      "metric" : "FTS hits of a rare-token query",
+      "notes" : [
+        "10 of the 30 queries name one note's rare token; the other 20 match many or all notes"
+      ],
+      "scenario" : "fts-10000",
+      "unit" : "count",
+      "value" : 1,
+      "verdict" : "info"
+    },
+    {
+      "metric" : "seed",
+      "notes" : [
+        "addMemories in batches of 1,000"
+      ],
+      "scenario" : "fts-50000",
+      "unit" : "ms",
+      "value" : 20383.924667,
+      "verdict" : "info"
+    },
+    {
+      "metric" : "query (owner view, warm)",
+      "notes" : [
+        "50000 active chunks, 30 queries × 3 passes, retriever v2"
+      ],
+      "scenario" : "fts-50000",
+      "stats" : {
+        "count" : 90,
+        "max" : 851.086792,
+        "p50" : 598.827542,
+        "p95" : 837.2275
+      },
+      "unit" : "ms",
+      "verdict" : "info"
+    },
+    {
+      "metric" : "query (provider with grants, warm)",
+      "notes" : [
+        "50000 active chunks, 30 queries × 3 passes, retriever v2",
+        "the path an attempt's memory handover takes"
+      ],
+      "scenario" : "fts-50000",
+      "stats" : {
+        "count" : 90,
+        "max" : 1264.331958,
+        "p50" : 1003.977625,
+        "p95" : 1253.797542
+      },
+      "unit" : "ms",
+      "verdict" : "info"
+    },
+    {
+      "metric" : "query (provider, cold page cache)",
+      "notes" : [
+        "store reopened before each query; OS file cache stays warm"
+      ],
+      "scenario" : "fts-50000",
+      "stats" : {
+        "count" : 20,
+        "max" : 1040.489667,
+        "p50" : 993.847708,
+        "p95" : 1032.4675
+      },
+      "unit" : "ms",
+      "verdict" : "info"
+    },
+    {
+      "metric" : "retrievals without a hit",
+      "notes" : [
+        "owner, provider and cold; every query matches the corpus, so an empty result means a broken path"
+      ],
+      "scenario" : "fts-50000",
+      "target" : "0",
+      "unit" : "count",
+      "value" : 0,
+      "verdict" : "met"
+    },
+    {
+      "metric" : "FTS hits of a rare-token query",
+      "notes" : [
+        "10 of the 30 queries name one note's rare token; the other 20 match many or all notes"
+      ],
+      "scenario" : "fts-50000",
+      "unit" : "count",
+      "value" : 1,
+      "verdict" : "info"
+    },
+    {
+      "metric" : "delta → app state published",
+      "notes" : [
+        "2 runs × 750 deltas at 25\/s each; app loop: step, coalescer 100 ms, 50 ms pause"
+      ],
+      "scenario" : "events",
+      "stats" : {
+        "count" : 1500,
+        "max" : 114.791167,
+        "p50" : 54.319458,
+        "p95" : 107.272958
+      },
+      "target" : "p95 < 250 ms",
+      "unit" : "ms",
+      "verdict" : "met"
+    },
+    {
+      "metric" : "delta → monitor timeline (selected run)",
+      "notes" : [
+        "2 runs × 750 deltas at 25\/s each; app loop: step, coalescer 100 ms, 50 ms pause",
+        "includes the timeline's attemptEvents read"
+      ],
+      "scenario" : "events",
+      "stats" : {
+        "count" : 750,
+        "max" : 112.342333,
+        "p50" : 52.05825,
+        "p95" : 99.113917
+      },
+      "target" : "p95 < 250 ms",
+      "unit" : "ms",
+      "verdict" : "met"
+    },
+    {
+      "metric" : "deltas never shown",
+      "notes" : [
+
+      ],
+      "scenario" : "events",
+      "target" : "0",
+      "unit" : "count",
+      "value" : 0,
+      "verdict" : "met"
+    },
+    {
+      "metric" : "deltas never in the timeline",
+      "notes" : [
+        "deltas of the selected run the monitor never listed"
+      ],
+      "scenario" : "events",
+      "target" : "0",
+      "unit" : "count",
+      "value" : 0,
+      "verdict" : "met"
+    },
+    {
+      "metric" : "seed (one transaction per event)",
+      "notes" : [
+        "10000 deltas"
+      ],
+      "scenario" : "replay-10000",
+      "unit" : "ms",
+      "value" : 1378.044375,
+      "verdict" : "info"
+    },
+    {
+      "metric" : "workspace view (Projector.load)",
+      "notes" : [
+        "reads rows only, no events"
+      ],
+      "scenario" : "replay-10000",
+      "stats" : {
+        "count" : 5,
+        "max" : 0.074917,
+        "p50" : 0.057042,
+        "p95" : 0.074917
+      },
+      "unit" : "ms",
+      "verdict" : "info"
+    },
+    {
+      "metric" : "monitor timeline of the run",
+      "notes" : [
+        "pages attemptEvents from ordinal 0 with payloads"
+      ],
+      "scenario" : "replay-10000",
+      "stats" : {
+        "count" : 5,
+        "max" : 39.893042,
+        "p50" : 39.456875,
+        "p95" : 39.893042
+      },
+      "unit" : "ms",
+      "verdict" : "info"
+    },
+    {
+      "metric" : "events the timeline reads",
+      "notes" : [
+        "the timeline has no snapshot or last-N read: it reads every delta of the run"
+      ],
+      "scenario" : "replay-10000",
+      "target" : "not every text delta",
+      "unit" : "count",
+      "value" : 10004,
+      "verdict" : "missed"
+    },
+    {
+      "metric" : "seed (one transaction per event)",
+      "notes" : [
+        "50000 deltas"
+      ],
+      "scenario" : "replay-50000",
+      "unit" : "ms",
+      "value" : 8222.341666,
+      "verdict" : "info"
+    },
+    {
+      "metric" : "workspace view (Projector.load)",
+      "notes" : [
+        "reads rows only, no events"
+      ],
+      "scenario" : "replay-50000",
+      "stats" : {
+        "count" : 5,
+        "max" : 0.101042,
+        "p50" : 0.099208,
+        "p95" : 0.101042
+      },
+      "unit" : "ms",
+      "verdict" : "info"
+    },
+    {
+      "metric" : "monitor timeline of the run",
+      "notes" : [
+        "pages attemptEvents from ordinal 0 with payloads"
+      ],
+      "scenario" : "replay-50000",
+      "stats" : {
+        "count" : 5,
+        "max" : 209.122875,
+        "p50" : 207.955,
+        "p95" : 209.122875
+      },
+      "unit" : "ms",
+      "verdict" : "info"
+    },
+    {
+      "metric" : "events the timeline reads",
+      "notes" : [
+        "the timeline has no snapshot or last-N read: it reads every delta of the run"
+      ],
+      "scenario" : "replay-50000",
+      "target" : "not every text delta",
+      "unit" : "count",
+      "value" : 50004,
+      "verdict" : "missed"
+    },
+    {
+      "metric" : "approve + publish (one click on the decision sheet)",
+      "notes" : [
+        "20 rounds, 2 runs streaming at 25\/s each",
+        "no number in the plan; compared with the 250 ms UI target"
+      ],
+      "scenario" : "control",
+      "stats" : {
+        "count" : 20,
+        "max" : 125.426875,
+        "p50" : 119.084791,
+        "p95" : 122.041125
+      },
+      "target" : "p95 < 250 ms",
+      "unit" : "ms",
+      "verdict" : "met"
+    },
+    {
+      "metric" : "approve",
+      "notes" : [
+        "20 rounds, 2 runs streaming at 25\/s each"
+      ],
+      "scenario" : "control",
+      "stats" : {
+        "count" : 20,
+        "max" : 64.981583,
+        "p50" : 60.249542,
+        "p95" : 62.039583
+      },
+      "unit" : "ms",
+      "verdict" : "info"
+    },
+    {
+      "metric" : "publish after approval",
+      "notes" : [
+        "20 rounds, 2 runs streaming at 25\/s each",
+        "journaled compare-and-swap of the integration ref"
+      ],
+      "scenario" : "control",
+      "stats" : {
+        "count" : 20,
+        "max" : 62.7135,
+        "p50" : 59.004416,
+        "p95" : 60.445292
+      },
+      "unit" : "ms",
+      "verdict" : "info"
+    },
+    {
+      "metric" : "Stop → acknowledged (cancelling)",
+      "notes" : [
+        "20 rounds, 2 runs streaming at 25\/s each",
+        "no number in the plan; compared with the 250 ms UI target"
+      ],
+      "scenario" : "control",
+      "stats" : {
+        "count" : 20,
+        "max" : 3.489709,
+        "p50" : 0.239541,
+        "p95" : 0.301708
+      },
+      "target" : "p95 < 250 ms",
+      "unit" : "ms",
+      "verdict" : "met"
+    },
+    {
+      "metric" : "Stop → shown in the app",
+      "notes" : [
+        "20 rounds, 2 runs streaming at 25\/s each",
+        "no number in the plan; compared with the 250 ms UI target"
+      ],
+      "scenario" : "control",
+      "stats" : {
+        "count" : 20,
+        "max" : 49.594916,
+        "p50" : 18.146666,
+        "p95" : 47.744708
+      },
+      "target" : "p95 < 250 ms",
+      "unit" : "ms",
+      "verdict" : "met"
+    },
+    {
+      "metric" : "Stops never shown within 1 s",
+      "notes" : [
+        "left out of the percentiles above"
+      ],
+      "scenario" : "control",
+      "target" : "0",
+      "unit" : "count",
+      "value" : 0,
+      "verdict" : "met"
+    },
+    {
+      "metric" : "Stop → run ended",
+      "notes" : [
+        "20 rounds, 2 runs streaming at 25\/s each",
+        "the adapter ends before its next delta"
+      ],
+      "scenario" : "control",
+      "stats" : {
+        "count" : 20,
+        "max" : 32.203375,
+        "p50" : 12.955958,
+        "p95" : 28.122959
+      },
+      "unit" : "ms",
+      "verdict" : "info"
+    }
+  ]
+}

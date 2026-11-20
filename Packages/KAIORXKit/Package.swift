@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .library(name: "KAIORXKit", targets: ["Domain", "Storage", "Providers", "Orchestration", "ProcessHost", "Workspace", "Memory", "Workbench"]),
         .executable(name: "kaiorx-dev", targets: ["kaiorx-dev"]),
+        .executable(name: "kaiorx-bench", targets: ["kaiorx-bench"]),
     ],
     targets: [
         // Values, IDs, commands, events and state machines. No SQLite, SwiftUI or vendor wire formats.
@@ -35,6 +36,10 @@ let package = Package(
         // tests, CI or an agent.
         .target(name: "Acceptance", dependencies: ["Domain", "Providers", "ProcessHost", "Workspace", "Memory"]),
         .executableTarget(name: "kaiorx-acceptance", dependencies: ["Acceptance", "Domain", "Providers", "ProcessHost", "Workspace", "Storage", "Workbench"]),
+        // Measures the beta performance targets on synthetic data in a temporary folder (fake
+        // providers only, never the app's database).
+        .target(name: "Bench", dependencies: ["Domain", "Storage", "Memory", "Providers", "ProcessHost", "Workspace", "Orchestration", "Workbench"]),
+        .executableTarget(name: "kaiorx-bench", dependencies: ["Bench"]),
         // Development CLI until the Xcode app exists: open projects, start fake runs, list active runs.
         .executableTarget(name: "kaiorx-dev", dependencies: ["Domain", "Storage", "Providers", "Orchestration"]),
 
@@ -48,6 +53,7 @@ let package = Package(
         .testTarget(name: "ProcessHostTests", dependencies: ["ProcessHost"]),
         .testTarget(name: "WorkspaceTests", dependencies: ["ProcessHost", "Workspace"]),
         .testTarget(name: "AcceptanceTests", dependencies: ["Acceptance", "Domain", "Providers", "ProcessHost", "Workspace", "ProviderFixtures"]),
+        .testTarget(name: "BenchTests", dependencies: ["Bench", "Domain", "Storage", "Workbench"]),
         .testTarget(name: "WorkbenchTests", dependencies: ["Domain", "Storage", "Memory", "Providers", "ProcessHost", "Workspace", "Orchestration", "Workbench", "ProviderFixtures"]),
     ]
 )
