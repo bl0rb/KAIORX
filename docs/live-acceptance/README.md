@@ -60,6 +60,7 @@ Packages/KAIORXKit/.build/debug/kaiorx-acceptance run both --model <claude-model
 
 ## What to expect
 
-With the current isolation, agents can still read your home folder; only the credential folders are hidden. The isolation step therefore reports a failure, and automation stays locked.
-
-The extra read with your home folder hidden shows whether the CLIs work under the stricter protection. That result decides the next step.
+- **Home folder hidden:** every task runs with your home folder hidden. Only the CLI's install folder, KAIORX's configuration folder for it, the working folder and, for Claude, the keychain stay readable. The isolation step fails if the agent can read your home folder.
+- **No separate hidden-home turn:** the hidden-home step refers to the read task, which already runs with home hidden. It needs no quota of its own.
+- **Recordings:** if the kit discards a recording, the report names the kind of private value and where it was found, never the value itself. The report itself is all a passed acceptance needs.
+- **Before committing:** read the exported fixtures. They should contain only placeholders such as `<home>`, `<email-1>` or `<request-id>`, no names, paths, email addresses or request IDs.

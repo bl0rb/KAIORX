@@ -555,6 +555,15 @@ $out->({type => 'result', subtype => 'success', is_error => JSON::PP::false, usa
         }
     }
 
+    /// Final live run: Codex's 401 errors carry OpenAI request ids and Cloudflare ray ids.
+    @Test func requestIdentifiersInErrorTextsAreReplaced() throws {
+        let redactor = FixtureRedactor(denylist: [], paths: [])
+        var placeholders: [String: String] = [:]
+        let line = #"< {"method":"error","params":{"error":{"message":"unexpected status 401 Unauthorized, cf-ray: a5d7dbcbbad808a1-HAM, request id: req_228251d5bd384b3aa63b65a1ad2ba2f4"}}}"#
+        let out = try redactor.redact(line, placeholders: &placeholders)
+        #expect(out.contains("cf-ray: <ray>, request id: <request-id>"), "\(out)")
+    }
+
     /// Claude derives folder names from paths (`/Users/x/a b` → `-Users-x-a-b`); those are
     /// replaced like the paths themselves.
     @Test func pathsAreAlsoReplacedInTheirDashedForm() throws {

@@ -41,6 +41,10 @@ public struct FixtureRedactor: Sendable {
         (#"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"#, "<email>"),
         (#"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"#, "<uuid>"),
         (#"\b[0-9a-fA-F]{32,}\b"#, "<hex>"),
+        // Request identifiers in provider error texts (`request id: req_…`, `cf-ray: a5d7…-HAM`):
+        // no secret, but traceable to the account.
+        (#"\breq_[0-9A-Za-z]{8,}"#, "<request-id>"),
+        (#"(?i)\bcf-ray: [0-9a-f]{8,}(-[A-Z]{3})?"#, "cf-ray: <ray>"),
     ]
 
     /// One redacted line, or a failure if a private value remains.
