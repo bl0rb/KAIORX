@@ -706,3 +706,11 @@ extension Store {
         await reopened.close()
     }
 }
+
+@Suite struct AppPathsTests {
+    @Test func theSupportFolderHasNoTrailingSlash() throws {
+        let folder = try AppPaths.supportFolder()
+        #expect(folder.hasSuffix("/KAIORX") && !folder.contains("//"))
+        #expect(!(folder + "/claude-config").contains("//"))
+    }
+}

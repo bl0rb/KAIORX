@@ -12,4 +12,11 @@ public enum AppPaths {
         try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path(percentEncoded: false))
         return folder.appending(path: "kaiorx.sqlite", directoryHint: .notDirectory)
     }
+
+    /// The app's support folder as a path without a trailing slash (`…/KAIORX`), so joined
+    /// paths have no `//` and match what other programs print.
+    public static func supportFolder() throws -> String {
+        let path = try defaultDatabaseURL().deletingLastPathComponent().path(percentEncoded: false)
+        return path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path
+    }
 }

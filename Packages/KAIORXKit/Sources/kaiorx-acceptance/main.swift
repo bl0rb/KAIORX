@@ -53,7 +53,7 @@ func authenticateOwner() async throws {
 }
 
 func supportFolder() throws -> String {
-    try AppPaths.defaultDatabaseURL().deletingLastPathComponent().path(percentEncoded: false)
+    try AppPaths.supportFolder()
 }
 
 func configDirectory(_ provider: ProviderKind) throws -> String {

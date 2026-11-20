@@ -32,7 +32,7 @@ public struct AppConfiguration: Sendable {
     /// The real app: `~/Library/Application Support/KAIORX`.
     public static func standard(adapters: @escaping @Sendable (ProcessHost) -> [any AgentAdapter]) throws -> AppConfiguration {
         let database = try AppPaths.defaultDatabaseURL()
-        let folder = database.deletingLastPathComponent().path(percentEncoded: false)
+        let folder = try AppPaths.supportFolder()
         return AppConfiguration(databasePath: database.path(percentEncoded: false), workspaceRoot: folder + "/workspace", adapters: adapters)
     }
 }

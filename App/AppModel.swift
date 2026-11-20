@@ -112,7 +112,7 @@ final class AppModel {
             : await Onboarding.probe(host: services.agents, scratch: scratch, projects: state.projects.count)
         var adjusted = results
         adjusted.projects = state.projects.count
-        let support = (try? AppPaths.defaultDatabaseURL().deletingLastPathComponent().path(percentEncoded: false)) ?? ""
+        let support = (try? AppPaths.supportFolder()) ?? ""
         onboarding = Onboarding.checklist(adjusted, configDirectories: [.claude: support + "/claude-config", .codex: support + "/codex-home"])
     }
 
@@ -315,7 +315,7 @@ struct UITestGate: CapabilityGate {
 /// automatic runs stay locked by the compatibility gate until a live acceptance (ADR 0003).
 enum RealAdapters {
     static func make(host: ProcessHost) -> [any AgentAdapter] {
-        guard let support = try? AppPaths.defaultDatabaseURL().deletingLastPathComponent().path(percentEncoded: false) else { return [] }
+        guard let support = try? AppPaths.supportFolder() else { return [] }
         var adapters: [any AgentAdapter] = []
         if let claude = Onboarding.locate(.claude) {
             adapters.append(ClaudeCodeAdapter(configuration: ClaudeCodeConfiguration(
