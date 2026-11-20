@@ -278,7 +278,7 @@ public actor Scheduler {
             // Prepare, render and dispatch in the single handover transaction (it moves the
             // attempt to `starting`); a refusal is a failure before the turn.
             let d = planned.draft
-            let query = MemoryQuery(texts: [d.title, d.goal] + d.criteria, symbols: (d.writePaths ?? []) + d.readPaths)
+            let query = MemoryQuery(texts: [d.title, d.goal] + d.criteria, paths: (d.writePaths ?? []) + d.readPaths)
             do {
                 _ = try await memory.prepare(manifestID, attempt: attempt, reviewerProvider: reviewer, query: query)
                 let context = try await memory.dispatch(manifestID)
@@ -330,15 +330,18 @@ public actor Scheduler {
         for attempt in attempts.sorted(by: { $0.ordinal < $1.ordinal }) where attempt.startedAt != nil && attempt.state.isTerminal {
             let tier = attempt.tier ?? planned.tier
             if attempt.state == .failed, attempt.errorClass == "providerFailed" {
+                // A forgotten report is no evidence of a repeated failure: its own fingerprint.
                 let reason = try await failureReason(attempt.id)
-                result.append((CountedAttempt(tier: tier, failure: .providerFailed(fingerprint: FailureFingerprint.of(reason))), reason))
+                let fingerprint = reason.map { FailureFingerprint.of($0) } ?? "purged:\(attempt.id.uuidString)"
+                result.append((CountedAttempt(tier: tier, failure: .providerFailed(fingerprint: fingerprint)), reason ?? Store.purgedText))
                 continue
             }
             guard attempt.state == .succeeded else { continue }
             for candidate in candidates where candidate.authorAttemptID == attempt.id && candidate.state == .rejected {
                 let tests = try await store.testResults(candidate: candidate.id)
                 if let red = tests.last(where: { [.failed, .crashed, .inputsModified].contains($0.status) }) {
-                    result.append((CountedAttempt(tier: tier, failure: .redTest(fingerprint: FailureFingerprint.of(red.summary))), "Test: \(red.summary)"))
+                    let fingerprint = red.summary == Store.purgedText ? "purged:\(red.id.uuidString)" : FailureFingerprint.of(red.summary)
+                    result.append((CountedAttempt(tier: tier, failure: .redTest(fingerprint: fingerprint)), "Test: \(red.summary)"))
                     break
                 }
                 let blocking = try await store.findings(candidate: candidate.id).filter { $0.severity == .blocking }
@@ -352,12 +355,15 @@ public actor Scheduler {
         return result
     }
 
-    private func failureReason(_ attempt: AttemptID) async throws -> String {
-        for event in try await store.events(attempt: attempt, kind: .attemptCompleted).reversed() {
+    /// The provider's failure reason; nil when the completion's payload was purged by a forget.
+    private func failureReason(_ attempt: AttemptID) async throws -> String? {
+        let events = try await store.events(attempt: attempt, kind: .attemptCompleted)
+        for event in events.reversed() {
             if let data = event.payload, case .completed(.failed(let reason))? = try? JSONDecoder().decode(AgentEvent.self, from: data) {
                 return reason
             }
         }
+        if events.contains(where: { $0.payload == nil }) { return nil }
         return "providerFailed"
     }
 

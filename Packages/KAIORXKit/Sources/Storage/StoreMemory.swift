@@ -16,6 +16,10 @@ public enum MemoryError: Error, Equatable, Sendable {
     /// Dispatch refused: the manifest was revoked with this reason.
     case dispatchRefused(String)
     case invalidScope
+    /// A project or task entry cannot derive from another project's revision.
+    case foreignUpstream(MemoryRevisionID)
+    /// The task's candidate in verification comes from an attempt whose content was forgotten.
+    case candidateContentPurged(TaskID)
 }
 
 /// Who reads: the attempt's project and task, its provider and the planned reviewer provider.
@@ -58,7 +62,7 @@ public struct PurgeOutcome: Sendable, Equatable {
 }
 
 extension Store {
-    static let purgedText = "Inhalt gelöscht"
+    public static let purgedText = "Inhalt gelöscht"
 
     // MARK: Policy
 
@@ -92,54 +96,49 @@ extension Store {
     public func addMemory(_ draft: MemoryDraft) throws -> MemoryRevisionRecord {
         let db = try connection()
         let now = currentTime()
-        return try db.transaction {
-            let importKey = try Self.importKey(draft)
-            let existing = try db.query("SELECT id FROM memory_revision WHERE import_key = ?", [.text(importKey)]) {
-                try parseID($0.requiredText(0)) as MemoryRevisionID
-            }.first
-            if let existing { return try loadMemoryRevision(db, existing) }
-            try Self.checkContent(draft.title, draft.body)
-            guard !draft.sources.isEmpty else { throw MemoryError.noSource }
-            let entry = MemoryEntryID()
-            do {
-                try db.run(
-                    "INSERT INTO memory_entry (id, scope, project_id, task_id, pinned, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    [
-                        .text(entry.uuidString), .text(draft.scope.rawValue), .optional(draft.projectID?.uuidString),
-                        .optional(draft.taskID?.uuidString), .integer(draft.pinned ? 1 : 0), .integer(now),
-                    ]
-                )
-            } catch { throw MemoryError.invalidScope }
-            return try insertRevision(
-                db, entry: entry, number: 1, previous: nil, title: draft.title, body: draft.body, kind: draft.kind, author: draft.author,
-                sources: draft.sources, validUntil: draft.validUntil, importKey: importKey, now: now
-            )
-        }
+        return try db.transaction { try addMemory(db, draft, now: now) }
     }
 
-    /// Several new entries in one transaction (bulk import).
+    /// Several new entries in one transaction (bulk import), with the same idempotence as
+    /// `addMemory`: an already imported draft (also twice in one batch) returns its revision.
     @discardableResult
     public func addMemories(_ drafts: [MemoryDraft]) throws -> [MemoryRevisionRecord] {
         let db = try connection()
         let now = currentTime()
-        return try db.transaction {
-            try drafts.map { draft in
-                try Self.checkContent(draft.title, draft.body)
-                guard !draft.sources.isEmpty else { throw MemoryError.noSource }
-                let entry = MemoryEntryID()
-                try db.run(
-                    "INSERT INTO memory_entry (id, scope, project_id, task_id, pinned, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    [
-                        .text(entry.uuidString), .text(draft.scope.rawValue), .optional(draft.projectID?.uuidString),
-                        .optional(draft.taskID?.uuidString), .integer(draft.pinned ? 1 : 0), .integer(now),
-                    ]
-                )
-                return try insertRevision(
-                    db, entry: entry, number: 1, previous: nil, title: draft.title, body: draft.body, kind: draft.kind, author: draft.author,
-                    sources: draft.sources, validUntil: draft.validUntil, importKey: try Self.importKey(draft), now: now
-                )
+        return try db.transaction { try drafts.map { try addMemory(db, $0, now: now) } }
+    }
+
+    func addMemory(_ db: SQLiteConnection, _ draft: MemoryDraft, now: Int64) throws -> MemoryRevisionRecord {
+        // An import that was edited returns the entry's active revision. One that was retired
+        // without a successor or rejected leads to a successor key derived from that revision,
+        // so the same draft can be imported again and stays idempotent afterwards.
+        var importKey = try Self.importKey(draft)
+        while let holder = try db.query("SELECT id, state FROM memory_revision WHERE import_key = ?", [.text(importKey)], {
+            (try parseID($0.requiredText(0)) as MemoryRevisionID, try $0.requiredText(1))
+        }).first {
+            if holder.1 == MemoryRevisionState.active.rawValue || holder.1 == MemoryRevisionState.proposed.rawValue {
+                return try loadMemoryRevision(db, holder.0)
             }
+            // Edited since (a successor is active): that is the entry the import became.
+            if let current = try activeRevision(db, try Self.entryID(db, holder.0)) { return try loadMemoryRevision(db, current) }
+            importKey = Canonical.sha256Hex(Data((importKey + "\u{0}" + holder.0.uuidString).utf8))
         }
+        try Self.checkContent(draft.title, draft.body)
+        guard !draft.sources.isEmpty else { throw MemoryError.noSource }
+        let entry = MemoryEntryID()
+        do {
+            try db.run(
+                "INSERT INTO memory_entry (id, scope, project_id, task_id, pinned, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    .text(entry.uuidString), .text(draft.scope.rawValue), .optional(draft.projectID?.uuidString),
+                    .optional(draft.taskID?.uuidString), .integer(draft.pinned ? 1 : 0), .integer(now),
+                ]
+            )
+        } catch { throw MemoryError.invalidScope }
+        return try insertRevision(
+            db, entry: entry, number: 1, previous: nil, title: draft.title, body: draft.body, kind: draft.kind, author: draft.author,
+            sources: draft.sources, validUntil: draft.validUntil, importKey: importKey, now: now
+        )
     }
 
     /// A successor revision (editing). With `author: .user` it replaces the active revision at
@@ -259,7 +258,7 @@ extension Store {
                 if delivery == ManifestDelivery.prepared.rawValue {
                     try revokeManifest(db, manifest, reason: "grantRevoked", now: now)
                 } else {
-                    try db.run("UPDATE attempt SET session_handle = NULL WHERE id = ?", [.text(attempt.uuidString)])
+                    try db.run("UPDATE attempt SET session_handle = NULL, resume_blocked_at = ? WHERE id = ?", [.integer(now), .text(attempt.uuidString)])
                     if let record = try? loadAttempt(db, attempt).record, !record.state.isTerminal { open.append(attempt) }
                 }
             }
@@ -270,9 +269,11 @@ extension Store {
     // MARK: Retrieval
 
     /// Revisions in the reader's scope (task, project, global if allowed), active and not
-    /// expired; with a provider also granted for it (and the reviewer provider) and allowed by
-    /// the policy, and not stale.
-    func memoryReadSet(_ db: SQLiteConnection, _ reader: MemoryReader, stale: Set<MemoryRevisionID>, grants: Bool, now: Int64) throws -> [MemoryRevisionID: (MemoryScope, Int64, Bool)] {
+    /// expired (with `expired`, expired ones too); with a provider also granted for it (and the
+    /// reviewer provider) and allowed by the policy, and not stale.
+    func memoryReadSet(
+        _ db: SQLiteConnection, _ reader: MemoryReader, stale: Set<MemoryRevisionID>, grants: Bool, expired: Bool = false, now: Int64
+    ) throws -> [MemoryRevisionID: (MemoryScope, Int64, Bool)] {
         let policy = try memoryPolicy(db, reader.projectID)
         if grants, let provider = reader.provider {
             guard policy.providers.contains(provider) else { return [:] }
@@ -281,11 +282,11 @@ extension Store {
         let rows = try db.query(
             """
             SELECT r.id, e.scope, r.confirmed_at, e.pinned FROM memory_revision r JOIN memory_entry e ON e.id = r.entry_id
-            WHERE r.state = 'active' AND (r.valid_until IS NULL OR r.valid_until > ?)
+            WHERE r.state = 'active' AND (? = 1 OR r.valid_until IS NULL OR r.valid_until > ?)
             AND ((e.scope = 'task' AND e.task_id = ? AND e.project_id = ?) OR (e.scope = 'project' AND e.project_id = ?)
                 OR (e.scope = 'global' AND ? = 1))
             """,
-            [.integer(now), .optional(reader.taskID?.uuidString), .text(reader.projectID.uuidString), .text(reader.projectID.uuidString),
+            [.integer(expired ? 1 : 0), .integer(now), .optional(reader.taskID?.uuidString), .text(reader.projectID.uuidString), .text(reader.projectID.uuidString),
              .integer(policy.allowGlobal || reader.provider == nil ? 1 : 0)]
         ) { (try parseID($0.requiredText(0)) as MemoryRevisionID, try parseEnum($0.requiredText(1)) as MemoryScope, $0.int(2), $0.int(3) == 1) }
         var result: [MemoryRevisionID: (MemoryScope, Int64, Bool)] = [:]
@@ -308,37 +309,55 @@ extension Store {
     }
 
     /// Candidates for a context package: the read set, pins, FTS hits (at most 20 per scope, in
-    /// one query with the read-set filter), graph neighbours and withheld contradictions.
+    /// one query with the read-set filter), graph neighbours and withheld contradictions. The
+    /// `contradicts` rule holds for every excerpt (pin, hit, neighbour): a contradicting
+    /// revision in the scope set (expired ones included) that may not be used withholds it.
     public func memoryCandidates(_ reader: MemoryReader, query: String?, stale: Set<MemoryRevisionID>) throws -> RetrievalCandidates {
         let db = try connection()
         let now = currentTime()
         return try db.transaction {
             let usable = try memoryReadSet(db, reader, stale: stale, grants: true, now: now)
-            let inScope = try memoryReadSet(db, reader, stale: [], grants: false, now: now)
+            let inScope = try memoryReadSet(db, reader, stale: [], grants: false, expired: true, now: now)
             var result = RetrievalCandidates()
             let usableJSON = try Self.json(usable.keys.map(\.uuidString))
+            var contradicted: [MemoryRevisionID: Bool] = [:]
+            /// True (and recorded as withheld) when a contradicting in-scope revision is not usable.
+            func withheld(_ revision: MemoryRevisionID) throws -> Bool {
+                if let known = contradicted[revision] { return known }
+                let others = try db.query(
+                    """
+                    SELECT CASE WHEN from_revision_id = ? THEN to_revision_id ELSE from_revision_id END FROM memory_edge
+                    WHERE type = 'contradicts' AND (from_revision_id = ? OR to_revision_id = ?)
+                    """,
+                    [.text(revision.uuidString), .text(revision.uuidString), .text(revision.uuidString)]
+                ) { try parseID($0.requiredText(0)) as MemoryRevisionID }
+                let blocked = others.contains { inScope[$0] != nil && usable[$0] == nil }
+                contradicted[revision] = blocked
+                if blocked, !result.withheld.contains(revision) { result.withheld.append(revision) }
+                return blocked
+            }
             func firstChunk(_ revision: MemoryRevisionID, reason: SelectionReason) throws -> ExcerptCandidate? {
-                guard let info = usable[revision] else { return nil }
+                guard let info = usable[revision], try !withheld(revision) else { return nil }
                 return try db.query(
-                    "SELECT rowid, byte_from, byte_to, revision_id FROM memory_chunk WHERE revision_id = ? ORDER BY ordinal LIMIT 1",
+                    "SELECT rowid, byte_from, byte_to, body FROM memory_chunk WHERE revision_id = ? ORDER BY ordinal LIMIT 1",
                     [.text(revision.uuidString)]
                 ) { row in
                     ExcerptCandidate(
                         chunkRowID: row.int(0), revisionID: revision, entryID: try Self.entryID(db, revision), scope: info.0, confirmedAt: info.1,
-                        byteFrom: Int(row.int(1)), byteTo: Int(row.int(2)), reason: reason
+                        byteFrom: Int(row.int(1)), byteTo: Int(row.int(2)), reason: reason, digest: Canonical.sha256Hex(Data(try row.requiredText(3).utf8))
                     )
                 }.first
             }
-            for (revision, info) in usable where info.2 {
+            for (revision, info) in usable.sorted(by: { $0.key.uuidString < $1.key.uuidString }) where info.2 {
                 if let pin = try firstChunk(revision, reason: .pin) { result.pins.append(pin) }
             }
             guard let query, !query.isEmpty else { return result }
             let hits = try db.query(
                 """
                 WITH ranked AS MATERIALIZED (SELECT rowid AS fts_rowid, bm25(memory_fts) AS score FROM memory_fts WHERE memory_fts MATCH ?)
-                SELECT rowid, revision_id, byte_from, byte_to, score FROM (
+                SELECT rowid, revision_id, byte_from, byte_to, score, body FROM (
                     SELECT c.rowid AS rowid, c.revision_id AS revision_id, c.byte_from AS byte_from, c.byte_to AS byte_to, c.ordinal AS ordinal,
-                        e.scope AS scope, ranked.score AS score,
+                        c.body AS body, e.scope AS scope, ranked.score AS score,
                         ROW_NUMBER() OVER (PARTITION BY e.scope ORDER BY ranked.score, c.revision_id, c.ordinal) AS n
                     FROM ranked
                     JOIN memory_chunk c ON c.rowid = ranked.fts_rowid
@@ -348,26 +367,16 @@ extension Store {
                 ORDER BY score, revision_id, ordinal
                 """,
                 [.text(query), .text(usableJSON)]
-            ) { (row: SQLRow) in (row.int(0), try parseID(row.requiredText(1)) as MemoryRevisionID, Int(row.int(2)), Int(row.int(3)), row.double(4)) }
-            for (rowid, revision, from, to, score) in hits {
-                guard let info = usable[revision] else { continue }
-                // A contradicting revision in scope that may not be used: leave the fact out.
-                let contradictions = try db.query(
-                    """
-                    SELECT CASE WHEN from_revision_id = ? THEN to_revision_id ELSE from_revision_id END FROM memory_edge
-                    WHERE type = 'contradicts' AND (from_revision_id = ? OR to_revision_id = ?)
-                    """,
-                    [.text(revision.uuidString), .text(revision.uuidString), .text(revision.uuidString)]
-                ) { try parseID($0.requiredText(0)) as MemoryRevisionID }
-                if contradictions.contains(where: { inScope[$0] != nil && usable[$0] == nil }) {
-                    if !result.withheld.contains(revision) { result.withheld.append(revision) }
-                    continue
-                }
+            ) { (row: SQLRow) in
+                (row.int(0), try parseID(row.requiredText(1)) as MemoryRevisionID, Int(row.int(2)), Int(row.int(3)), row.double(4), try row.requiredText(5))
+            }
+            for (rowid, revision, from, to, score, body) in hits {
+                guard let info = usable[revision], try !withheld(revision) else { continue }
                 result.hits.append(ExcerptCandidate(
                     chunkRowID: rowid, revisionID: revision, entryID: try Self.entryID(db, revision), scope: info.0, confirmedAt: info.1,
-                    byteFrom: from, byteTo: to, score: score, reason: .lexical
+                    byteFrom: from, byteTo: to, score: score, reason: .lexical, digest: Canonical.sha256Hex(Data(body.utf8))
                 ))
-                // One neighbour over verifies/depends_on, itself usable.
+                // One neighbour over verifies/depends_on, itself usable and not withheld.
                 let neighbours = try db.query(
                     """
                     SELECT CASE WHEN from_revision_id = ? THEN to_revision_id ELSE from_revision_id END AS other FROM memory_edge
@@ -473,8 +482,11 @@ extension Store {
     /// The single handover point (ADR 0006 §6): rechecks every item and the policy, consent and
     /// attempt, then marks the manifest `dispatched` and moves the attempt `reserved → starting`
     /// in one transaction. A refusal revokes the manifest. With `manual`, the attempt does not
-    /// move and the manifest becomes a manual handoff.
-    public func dispatchManifest(_ id: MemoryManifestID, stale: Set<MemoryRevisionID>, manual: Bool = false) throws {
+    /// move and the manifest becomes a manual handoff. `rendered` are the items the caller
+    /// rendered: if the manifest no longer holds exactly these, the text is not what was checked.
+    public func dispatchManifest(
+        _ id: MemoryManifestID, stale: Set<MemoryRevisionID>, manual: Bool = false, rendered: [ManifestItemRecord]? = nil
+    ) throws {
         let db = try connection()
         let now = currentTime()
         let refusal: String? = try db.transaction { () throws -> String? in
@@ -488,6 +500,7 @@ extension Store {
                 return reason
             }
             if !manual, attempt.record.state != .reserved { return try refuse("attemptNotReserved") }
+            if let rendered, rendered != manifest.items { return try refuse("manifestChanged") }
             if try db.query("SELECT content_purged_at FROM attempt WHERE id = ?", [.text(manifest.attemptID.uuidString)]) { $0.optionalInt(0) }.first ?? nil != nil {
                 return try refuse("contentPurged")
             }
@@ -591,12 +604,13 @@ extension Store {
                 """,
                 [.text(revJSON)]
             ) { try $0.requiredText(0) }
-            // Candidates of affected authors, their reviewers, and later author attempts of the same task.
+            // Candidates of affected authors, their reviewers, and later attempts of the same task:
+            // authors (repair prompts) and reviewers, also those that have not recorded a review yet.
             let followed = try db.query(
                 """
                 SELECT r.reviewer_attempt_id FROM candidate c JOIN review r ON r.candidate_id = c.id
                 WHERE c.author_attempt_id IN (SELECT value FROM json_each(?)) AND r.reviewer_attempt_id IS NOT NULL
-                UNION SELECT later.id FROM attempt a JOIN attempt later ON later.task_id = a.task_id AND later.role = 'author'
+                UNION SELECT later.id FROM attempt a JOIN attempt later ON later.task_id = a.task_id
                     AND later.reserved_at >= a.reserved_at AND later.id <> a.id
                 WHERE a.id IN (SELECT value FROM json_each(?)) AND a.role = 'author'
                 """,
@@ -636,11 +650,39 @@ extension Store {
                 try db.run("UPDATE event SET payload_id = NULL, payload_purged_at = ? WHERE seq = ?", [.integer(now), .integer(seq)])
                 try db.run("DELETE FROM artifact WHERE id = ? AND kind = 'eventPayload'", [.text(artifact)])
             }
-            try db.run("UPDATE attempt SET content_purged_at = ?, session_handle = NULL WHERE id = ?", [.integer(now), .text(attempt)])
+            try db.run(
+                "UPDATE attempt SET content_purged_at = ?, session_handle = NULL, resume_blocked_at = ? WHERE id = ?",
+                [.integer(now), .integer(now), .text(attempt)]
+            )
             try appendEvent(
                 db, kind: .contentPurged, projectID: loaded.projectID, taskID: loaded.record.taskID.uuidString, attemptID: attempt,
                 payload: Canonical.encode(["reason": "memoryForgotten", "payloads": String(payloads.count)]), dedupKey: nil, now: now
             )
+        }
+        // Candidate events (state changes with test summaries in their reason, test and review
+        // results) carry no attempt: their payloads go by the candidate they name.
+        let candidateEvents = try db.query(
+            """
+            SELECT e.seq, e.payload_id FROM event e JOIN artifact p ON p.id = e.payload_id
+            WHERE e.attempt_id IS NULL AND (
+                json_extract(CAST(p.inline_content AS TEXT), '$.entityID') IN (SELECT id FROM candidate WHERE author_attempt_id IN (SELECT value FROM json_each(?1)))
+                OR json_extract(CAST(p.inline_content AS TEXT), '$.candidateID') IN (SELECT id FROM candidate WHERE author_attempt_id IN (SELECT value FROM json_each(?1))))
+            """,
+            [.text(attJSON)]
+        ) { ($0.int(0), try $0.requiredText(1)) }
+        // Finding decisions name only the finding.
+        let findingEvents = try db.query(
+            """
+            SELECT e.seq, e.payload_id FROM event e JOIN artifact p ON p.id = e.payload_id
+            WHERE e.attempt_id IS NULL AND json_extract(CAST(p.inline_content AS TEXT), '$.findingID') IN (
+                SELECT f.id FROM finding f JOIN review r ON r.id = f.review_id JOIN candidate c ON c.id = r.candidate_id
+                WHERE c.author_attempt_id IN (SELECT value FROM json_each(?)))
+            """,
+            [.text(attJSON)]
+        ) { ($0.int(0), try $0.requiredText(1)) }
+        for (seq, artifact) in candidateEvents + findingEvents {
+            try db.run("UPDATE event SET payload_id = NULL, payload_purged_at = ? WHERE seq = ?", [.integer(now), .integer(seq)])
+            try db.run("DELETE FROM artifact WHERE id = ? AND kind = 'eventPayload'", [.text(artifact)])
         }
         let text = Self.purgedText
         try db.run(
@@ -649,10 +691,10 @@ extension Store {
         )
         try db.run(
             """
-            UPDATE finding SET impact = ?, suggestion = ? WHERE review_id IN (SELECT r.id FROM review r JOIN candidate c ON c.id = r.candidate_id
-                WHERE c.author_attempt_id IN (SELECT value FROM json_each(?)))
+            UPDATE finding SET impact = ?1, suggestion = ?1, reason = CASE WHEN reason IS NULL THEN NULL ELSE ?1 END WHERE review_id IN (SELECT r.id FROM review r JOIN candidate c ON c.id = r.candidate_id
+                WHERE c.author_attempt_id IN (SELECT value FROM json_each(?2)))
             """,
-            [.text(text), .text(text), .text(attJSON)]
+            [.text(text), .text(attJSON)]
         )
         try db.run(
             "UPDATE test_result SET summary = ? WHERE candidate_id IN (SELECT id FROM candidate WHERE author_attempt_id IN (SELECT value FROM json_each(?)))",
@@ -729,8 +771,10 @@ extension Store {
         return try ids.map { try loadMemoryRevision(db, $0) }
     }
 
-    /// Sources of a revision as a viewer in `viewer` may see them: a global revision shown in
-    /// another project than its sources' origin reveals no origin (ADR 0006 §4).
+    /// Sources of a revision as a viewer in `viewer` may see them (ADR 0006 §4): nothing of
+    /// another project shows. A derived source whose upstream lies in another project is reduced
+    /// to its kind, for every scope; a global revision shows a source in full only to the
+    /// project it came from, any other viewer sees kind and time.
     public func memorySources(_ revision: MemoryRevisionID, viewer: ProjectID?) throws -> [MemorySourceRecord] {
         let db = try connection()
         let sources = try db.query(
@@ -748,14 +792,23 @@ extension Store {
                 eventSeq: row.optionalInt(12), upstreamRevisionID: try row.text(13).map(parseID)
             ))
         }
+        guard let viewer else { return sources }
         let record = try loadMemoryRevision(db, revision)
-        guard let viewer, record.scope == .global else { return sources }
         return try sources.map { source in
-            guard let upstream = source.draft.upstreamRevisionID else { return source }
-            let origin = try loadMemoryRevision(db, upstream)
-            if origin.projectID == nil || origin.projectID == viewer { return source }
+            // Every project the source names: its upstream's (nil for a global upstream), its
+            // origin, its task's and its attempt's.
+            var homes: [ProjectID?] = []
+            if let upstream = source.draft.upstreamRevisionID { homes.append(try loadMemoryRevision(db, upstream).projectID) }
+            if let origin = source.draft.originProjectID { homes.append(origin) }
+            if let task = source.draft.originTaskID { homes.append(try parseID(try loadTask(db, task).projectID)) }
+            if let attempt = source.draft.attemptID { homes.append(try parseID(try loadAttempt(db, attempt).projectID)) }
+            let named = homes.compactMap { $0 }
+            let visible = record.scope == .global
+                ? !named.isEmpty && homes.count == named.count && named.allSatisfy { $0 == viewer }
+                : named.allSatisfy { $0 == viewer }
+            if visible { return source }
             var hidden = source
-            hidden.draft = MemorySourceDraft(kind: .derived, observedAt: source.draft.observedAt, locator: "crossProject")
+            hidden.draft = MemorySourceDraft(kind: source.draft.kind, observedAt: source.draft.observedAt, locator: "crossProject")
             return hidden
         }
     }
@@ -818,14 +871,17 @@ extension Store {
         if !found.isEmpty { throw MemoryError.secretFound(found.map(\.kind)) }
     }
 
-    /// Scope, sources and content: the same import twice is one revision.
+    /// Every attribute of the draft: the same import twice is one revision; a draft that
+    /// differs in anything (also pin, kind, expiry, author) is a new one.
     static func importKey(_ draft: MemoryDraft) throws -> String {
         struct Key: Encodable {
             var scope: String, project: String?, task: String?, sources: [MemorySourceDraft], content: String
+            var kind: String, author: String, pinned: Bool, validUntil: Int64?
         }
         return Canonical.sha256Hex(try Canonical.encode(Key(
             scope: draft.scope.rawValue, project: draft.projectID?.uuidString, task: draft.taskID?.uuidString, sources: draft.sources,
-            content: Canonical.sha256Hex(Data((draft.title + "\u{0}" + draft.body).utf8))
+            content: Canonical.sha256Hex(Data((draft.title + "\u{0}" + draft.body).utf8)),
+            kind: draft.kind.rawValue, author: draft.author.rawValue, pinned: draft.pinned, validUntil: draft.validUntil
         )))
     }
 
@@ -857,6 +913,10 @@ extension Store {
             // An older, concrete revision, and no cycle through derivations.
             let up = try loadMemoryRevision(db, upstream)
             guard up.confirmedAt != nil || up.state == .proposed else { throw MemoryError.upstreamNotOlder(upstream) }
+            // A project or task entry derives only from its own project or from a global entry;
+            // only a global entry may carry another project's knowledge (ADR 0006 §4).
+            let own = try loadMemoryRevision(db, revision)
+            if own.scope != .global, up.scope != .global, up.projectID != own.projectID { throw MemoryError.foreignUpstream(upstream) }
             var frontier = [upstream.uuidString]
             var seen = Set<String>()
             while let next = frontier.popLast() {

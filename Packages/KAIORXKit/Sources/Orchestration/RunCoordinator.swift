@@ -74,9 +74,12 @@ public actor RunCoordinator {
         self.adapters = byProvider
     }
 
-    /// Call once at app start, before any `start`.
+    /// Call once at app start, before any `start` and before the scheduler: recovers attempts
+    /// and runs purge jobs left pending by a forget (ADR 0006 §7).
     public func bootstrap() async throws -> RecoveryReport {
-        try await store.recoverAfterRestart()
+        let report = try await store.recoverAfterRestart()
+        try await store.runPurgeJobs()
+        return report
     }
 
     public func start(_ request: StartRequest) async throws -> StartResult {
@@ -98,14 +101,27 @@ public actor RunCoordinator {
     }
 
     /// Starts an attempt that is already `reserved` (for example by the scheduler's atomic
-    /// reservation) on its adapter. A cancel that won the race ends it without a start.
+    /// reservation), or `starting` after a memory dispatch, on its adapter. No process exists
+    /// before this call, so a cancel that won the race (`cancelling`) ends it as `cancelled`.
     public func launch(_ id: AttemptID, spec: AttemptSpec) async throws -> StartResult {
         guard let adapter = adapters[spec.provider] else {
-            let state = try await transition(id, errorClass: "adapterUnavailable") { $0 == .reserved ? .failed : nil }
+            let state = try await transition(id, errorClass: "adapterUnavailable") { current in
+                switch current {
+                case .reserved, .starting: .failed
+                case .cancelling: .cancelled
+                default: nil
+                }
+            }
             if state == .cancelled { return .cancelledBeforeStart(id) }
             return .failedToStart(id, reason: "No adapter for \(spec.provider.rawValue)")
         }
-        let state = try await transition(id) { $0 == .reserved ? .starting : nil }
+        let state = try await transition(id) { current in
+            switch current {
+            case .reserved: .starting
+            case .cancelling: .cancelled
+            default: nil
+            }
+        }
         guard state == .starting else { return .cancelledBeforeStart(id) }
 
         let handle: any RunHandle

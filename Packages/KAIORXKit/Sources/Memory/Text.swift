@@ -4,7 +4,7 @@ import Foundation
 /// Text helpers of the memory retriever (ADR 0006 §6). Retriever version: bump on any change
 /// that can alter a selection.
 public enum Retriever {
-    public static let version = 1
+    public static let version = 2
     /// Bytes per estimated token.
     public static let bytesPerToken = 4
     public static func tokens(_ byteCount: Int) -> Int { (byteCount + bytesPerToken - 1) / bytesPerToken }
@@ -44,8 +44,16 @@ public enum Chunker {
             index += 1
         }
         if start < bytes.count { pieces.append(start..<bytes.count) }
+        // UTF-8 offsets where a `Character` (grapheme cluster) starts, plus the end.
+        var boundaries = Set<Int>()
+        var offset = 0
+        for character in body {
+            boundaries.insert(offset)
+            offset += character.utf8.count
+        }
+        boundaries.insert(bytes.count)
         var merged: [Range<Int>] = []
-        for piece in pieces.flatMap({ split($0, bytes) }) {
+        for piece in pieces.flatMap({ split($0, bytes, boundaries: boundaries) }) {
             if let last = merged.last, piece.upperBound - last.lowerBound <= maxBytes {
                 merged[merged.count - 1] = last.lowerBound..<piece.upperBound
             } else {
@@ -64,16 +72,21 @@ public enum Chunker {
     }
 
     /// A range longer than `maxBytes`, cut at the last newline, else space, else character
-    /// boundary before the limit.
-    static func split(_ range: Range<Int>, _ bytes: [UInt8]) -> [Range<Int>] {
+    /// boundary before the limit. Every cut is a `Character` boundary, so neither a UTF-8
+    /// sequence nor a grapheme cluster (combining marks, ZWJ sequences) is split; a single
+    /// cluster longer than the limit stays whole.
+    static func split(_ range: Range<Int>, _ bytes: [UInt8], boundaries: Set<Int>) -> [Range<Int>] {
         var result: [Range<Int>] = []
         var start = range.lowerBound
         while range.upperBound - start > maxBytes {
             var cut = start + maxBytes
             if let newline = (start + maxBytes / 2..<cut).last(where: { bytes[$0] == 0x0A }) { cut = newline + 1 }
             else if let space = (start + maxBytes / 2..<cut).last(where: { bytes[$0] == 0x20 }) { cut = space + 1 }
-            // Never inside a UTF-8 sequence (continuation bytes are 10xxxxxx).
-            while cut > start + 1, cut < bytes.count, bytes[cut] & 0xC0 == 0x80 { cut -= 1 }
+            while cut > start, !boundaries.contains(cut) { cut -= 1 }
+            if cut == start {
+                cut = start + maxBytes
+                while cut < range.upperBound, !boundaries.contains(cut) { cut += 1 }
+            }
             result.append(start..<cut)
             start = cut
         }
@@ -93,9 +106,9 @@ public enum Identifiers {
             for (i, c) in chars.enumerated() {
                 let prev = i > 0 ? chars[i - 1] : nil
                 let next = i + 1 < chars.count ? chars[i + 1] : nil
+                // `sha256Digest` → `sha256`, `digest`: an uppercase letter after a digit also starts a part.
                 let boundary = prev.map { p in
-                    (c.isUppercase && p.isLowercase) || (c.isUppercase && p.isUppercase && (next?.isLowercase ?? false))
-                        || (c.isLetter && p.isNumber && false)
+                    (c.isUppercase && (p.isLowercase || p.isNumber)) || (c.isUppercase && p.isUppercase && (next?.isLowercase ?? false))
                 } ?? false
                 if boundary, !current.isEmpty { parts.append(current); current = "" }
                 current.append(c)
@@ -138,9 +151,10 @@ public enum QueryTerms {
         "that", "from", "at", "when", "what", "how", "should", "must",
     ]
 
-    /// At most twelve terms: symbols first, then words of the texts, without stopwords and
-    /// duplicates (case-insensitive), in order.
-    public static func extract(texts: [String], symbols: [String] = []) -> [String] {
+    /// At most twelve terms (ADR 0006 §5): identifiers from the texts (title, goal, criteria)
+    /// and the file names of `paths` (read and write areas) first, then the other words of the
+    /// texts, without stopwords and duplicates (case-insensitive), each group in order.
+    public static func extract(texts: [String], paths: [String] = []) -> [String] {
         var seen = Set<String>()
         var result: [String] = []
         func add(_ term: String) {
@@ -149,8 +163,12 @@ public enum QueryTerms {
             guard trimmed.count > 1, !stopwords.contains(key), seen.insert(key).inserted, result.count < maxTerms else { return }
             result.append(trimmed)
         }
-        for symbol in symbols { add(symbol) }
-        for text in texts { for word in Identifiers.words(text) { add(word) } }
+        let words = texts.flatMap(Identifiers.words)
+        for word in words where Identifiers.isIdentifier(word) { add(word) }
+        for path in paths {
+            if let name = path.split(separator: "/").last { add(String(name)) }
+        }
+        for word in words { add(word) }
         return result
     }
 
@@ -163,10 +181,10 @@ public enum QueryTerms {
             var forms = [term.lowercased()]
             if Identifiers.isIdentifier(term) { forms += Identifiers.split(term) }
             for form in forms {
-                let cleaned = form.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) || $0 == "_" }
-                let text = String(String.UnicodeScalarView(cleaned))
-                guard text.count > 1, seen.insert(text).inserted else { continue }
-                literals.append("\"" + text.replacingOccurrences(of: "\"", with: "\"\"") + "\"")
+                // A quoted FTS5 string is literal (only `"` is special and is doubled); the
+                // tokenizer turns `6.2` into the phrase `6 2`, which matches the indexed text.
+                guard form.count > 1, form.contains(where: { $0.isLetter || $0.isNumber }), seen.insert(form).inserted else { continue }
+                literals.append("\"" + form.replacingOccurrences(of: "\"", with: "\"\"") + "\"")
             }
         }
         return literals.isEmpty ? nil : literals.joined(separator: " OR ")

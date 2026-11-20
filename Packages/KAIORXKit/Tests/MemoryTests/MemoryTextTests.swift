@@ -27,12 +27,12 @@ import Testing
     }
 
     @Test func queryTermsAreLiteralAndBounded() {
-        let terms = QueryTerms.extract(texts: ["Speicherformat der Migration prüfen", "and the OR NEAR(x) \"quote\""], symbols: ["buildCandidate"])
+        let terms = QueryTerms.extract(texts: ["Speicherformat der Migration prüfen", "and the OR NEAR(x) \"quote\" in buildCandidate"])
         #expect(terms.first == "buildCandidate")
         #expect(!terms.contains("der") && !terms.contains("and"))
         #expect(terms.count <= QueryTerms.maxTerms)
         let query = QueryTerms.ftsQuery(["buildCandidate", "NEAR", "x\"y", "col:value"])!
-        #expect(query == #""buildcandidate" OR "build" OR "candidate" OR "near" OR "xy" OR "colvalue""#)
+        #expect(query == #""buildcandidate" OR "build" OR "candidate" OR "near" OR "x""y" OR "col:value""#)
         #expect(QueryTerms.ftsQuery(["*", "-"]) == nil)
         #expect(QueryTerms.extract(texts: (1...40).map { "wort\($0)" }).count == 12)
     }
@@ -66,5 +66,38 @@ import Testing
         #expect(text.hasPrefix("Project memory (quoted reference material"))
         #expect(text.contains("[M1] Projektnotiz „Format“ · Revision 3\n````"))
         #expect(ContextRenderer.render([]) == "")
+    }
+
+    @Test func identifiersSplitAfterDigits() {
+        #expect(Identifiers.split("sha256Digest") == ["sha256", "digest"])
+        #expect(Identifiers.split("base64Encode") == ["base64", "encode"])
+        #expect(Identifiers.split("HTTPServer2") == ["http", "server2"])
+    }
+
+    @Test func chunksNeverSplitAGraphemeCluster() {
+        let body = String(repeating: "a", count: 999) + "e\u{0301}" + "rest"
+        let chunks = Chunker.chunks(body)
+        #expect(chunks.map(\.text).joined() == body)
+        #expect(chunks.allSatisfy { $0.text.unicodeScalars.first != "\u{0301}" })
+        // One cluster longer than the limit stays whole.
+        let long = "x " + "e" + String(repeating: "\u{0301}", count: 600)
+        #expect(Chunker.chunks(long).map(\.text).joined() == long)
+        #expect(Chunker.chunks(long).allSatisfy { $0.text.unicodeScalars.first != "\u{0301}" })
+    }
+
+    @Test func duplicateNeighboursAndTextsUseNoSlots() {
+        let entry = MemoryEntryID()
+        let r = MemoryRevisionID(), s = MemoryRevisionID(), n1 = MemoryRevisionID(), n2 = MemoryRevisionID()
+        func c(_ row: Int64, _ rev: MemoryRevisionID, score: Double, reason: SelectionReason = .lexical, digest: String? = nil) -> ExcerptCandidate {
+            ExcerptCandidate(chunkRowID: row, revisionID: rev, entryID: entry, scope: .project, confirmedAt: 1, byteFrom: Int(row), byteTo: Int(row) + 200,
+                score: score, reason: reason, digest: digest)
+        }
+        let first = c(100, n1, score: 0, reason: .graph), second = c(200, n2, score: 0, reason: .graph)
+        let hits = [c(1, r, score: -5), c(2, r, score: -4), c(3, r, score: -3), c(4, r, score: -2), c(5, s, score: -1)]
+        let chosen = Selector.select(pins: [], hits: hits, neighbours: [1: first, 2: first, 3: first, 4: first, 5: second], limits: SelectionLimits())
+        #expect(chosen.map(\.chunkRowID) == [1, 100, 2, 5, 200])
+        // The same text twice takes one slot; the next candidate fills the other.
+        let same = [c(10, r, score: -3, digest: "d"), c(20, s, score: -2, digest: "d"), c(30, n1, score: -1, digest: "e")]
+        #expect(Selector.select(pins: [], hits: same, neighbours: [:], limits: SelectionLimits()).map(\.chunkRowID) == [10, 30])
     }
 }

@@ -2,7 +2,7 @@
 /// consent, accounts, plans, worktrees, budgets, candidates and Git operations follow as new
 /// migrations with their packages; applied migrations are never edited.
 public enum CoreSchema {
-    public static let migrations: [Migration] = [v1, v2, v3, v4, v5, v6]
+    public static let migrations: [Migration] = [v1, v2, v3, v4, v5, v6, v7]
 
     static let v1 = Migration(version: 1, name: "core", sql: """
         CREATE TABLE project (
@@ -663,5 +663,11 @@ public enum CoreSchema {
 
         ALTER TABLE event ADD COLUMN payload_purged_at INTEGER;
         ALTER TABLE attempt ADD COLUMN content_purged_at INTEGER;
+        """)
+
+    /// Package G check round: an attempt that received revoked or forgotten memory may never
+    /// get a session handle again (no resume), even from a late `started` event.
+    static let v7 = Migration(version: 7, name: "memoryChecks", sql: """
+        ALTER TABLE attempt ADD COLUMN resume_blocked_at INTEGER;
         """)
 }

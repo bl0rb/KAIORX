@@ -336,9 +336,10 @@ extension Store {
                 throw IntegrationStoreError.staleEvidence(candidate: id, oid: oid)
             }
             try requireTaskInVerification(db, candidate)
+            let purged = try contentPurged(db, candidate)
             let result = TestResultRecord(
                 id: TestResultID(), candidateID: id, candidateOID: oid, profileDigest: profileDigest, status: status,
-                exitCode: exitCode, changedTestInputs: changedTestInputs, summary: summary, at: now
+                exitCode: exitCode, changedTestInputs: changedTestInputs, summary: purged ? Self.purgedText : summary, at: now
             )
             try db.run(
                 """
@@ -347,7 +348,7 @@ extension Store {
                 """,
                 [
                     .text(result.id.uuidString), .text(id.uuidString), .text(oid), .text(profileDigest), .text(status.rawValue),
-                    .optional(exitCode), .text(try Self.json(changedTestInputs)), .text(summary), .integer(now),
+                    .optional(exitCode), .text(try Self.json(changedTestInputs)), .text(result.summary), .integer(now),
                 ]
             )
             try bumpEvidence(db, id)
@@ -383,9 +384,10 @@ extension Store {
                     throw IntegrationStoreError.reviewAttemptNotUsable(reviewerAttemptID)
                 }
             }
+            let purged = try contentPurged(db, candidate)
             let review = ReviewRecord(
                 id: ReviewID(), candidateID: id, candidateOID: oid, reviewerAttemptID: reviewerAttemptID, origin: origin,
-                reviewerProvider: reviewerProvider, status: status, summary: summary, at: now
+                reviewerProvider: reviewerProvider, status: status, summary: purged ? Self.purgedText : summary, at: now
             )
             try db.run(
                 """
@@ -394,7 +396,7 @@ extension Store {
                 """,
                 [
                     .text(review.id.uuidString), .text(id.uuidString), .text(oid), .optional(reviewerAttemptID?.uuidString),
-                    .text(origin.rawValue), .optional(reviewerProvider?.rawValue), .text(status.rawValue), .text(summary), .integer(now),
+                    .text(origin.rawValue), .optional(reviewerProvider?.rawValue), .text(status.rawValue), .text(review.summary), .integer(now),
                 ]
             )
             for finding in findings {
@@ -405,7 +407,8 @@ extension Store {
                     """,
                     [
                         .text(FindingID().uuidString), .text(review.id.uuidString), .text(finding.severity.rawValue),
-                        .optional(finding.path), .optional(finding.line), .text(finding.impact), .text(finding.suggestion),
+                        .optional(finding.path), .optional(finding.line), .text(purged ? Self.purgedText : finding.impact),
+                        .text(purged ? Self.purgedText : finding.suggestion),
                     ]
                 )
             }
@@ -442,6 +445,7 @@ extension Store {
             try requireTaskInVerification(db, candidate)
             try bumpEvidence(db, candidate.id)
             if (reason).isEmpty { throw DomainError.reasonRequired(entity: "finding", state: disposition.rawValue) }
+            let reason = try contentPurged(db, candidate) ? Self.purgedText : reason
             try db.run("UPDATE finding SET disposition = ?, reason = ? WHERE id = ?", [.text(disposition.rawValue), .text(reason), .text(id.uuidString)])
             try appendEvent(
                 db, kind: .findingDecided, projectID: row.1, taskID: row.2, attemptID: nil,
@@ -655,9 +659,19 @@ extension Store {
         try appendEvent(
             db, kind: .candidateStateChanged, projectID: candidate.projectID.uuidString, taskID: candidate.taskID?.uuidString,
             attemptID: nil,
-            payload: Canonical.encode(StateChange(entityID: candidate.id.uuidString, from: candidate.state.rawValue, to: target.rawValue, reason: reason)),
+            payload: Canonical.encode(StateChange(
+                entityID: candidate.id.uuidString, from: candidate.state.rawValue, to: target.rawValue,
+                reason: try contentPurged(db, candidate) ? reason.map { _ in Self.purgedText } : reason
+            )),
             dedupKey: nil, now: now
         )
+    }
+
+    /// The candidate's author attempt had its content forgotten: texts that arrive later about
+    /// it (test and review summaries, findings, transition reasons) are not stored (ADR 0006 §7).
+    func contentPurged(_ db: SQLiteConnection, _ candidate: CandidateRecord) throws -> Bool {
+        guard let author = candidate.authorAttemptID else { return false }
+        return try db.query("SELECT content_purged_at FROM attempt WHERE id = ?", [.text(author.uuidString)]) { $0.optionalInt(0) }.first ?? nil != nil
     }
 
     func releaseCandidate(_ db: SQLiteConnection, _ id: CandidateID, to target: CandidateState, now: Int64) throws {

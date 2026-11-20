@@ -9,6 +9,17 @@ public struct TreeEntry: Sendable, Equatable {
 }
 
 extension GitRunner {
+    /// The full OID of the commit `revision` names, or nil if it names none.
+    public func commitOID(_ revision: String, repository: RepositoryInfo) async throws -> String? {
+        guard !revision.hasPrefix("-") else { return nil }
+        let result = try await run(
+            ["rev-parse", "--verify", "--quiet", "--end-of-options", "\(revision)^{commit}"], in: repository.topLevel, allowedExitCodes: [0, 1]
+        )
+        guard case .exited(0) = result.termination else { return nil }
+        let oid = result.stdout.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return oid.isEmpty ? nil : oid
+    }
+
     /// The entry at `path` in `commit`, or nil if there is none.
     public func treeEntry(_ path: String, in commit: String, repository: RepositoryInfo) async throws -> TreeEntry? {
         let fields = nulFields(try await run(

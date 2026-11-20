@@ -12,17 +12,18 @@ public enum MemoryBrokerError: Error, Equatable, Sendable {
     case excludedPath(String)
     case attemptNotFound(AttemptID)
     case digestMismatch(position: Int)
+    case invalidCommit(String)
 }
 
-/// What a context package is about: texts and symbols for the query terms.
+/// What a context package is about: texts and the read and write paths for the query terms.
 public struct MemoryQuery: Sendable, Equatable {
     public var texts: [String]
-    public var symbols: [String]
+    public var paths: [String]
     public var inputWindowTokens: Int?
 
-    public init(texts: [String], symbols: [String] = [], inputWindowTokens: Int? = nil) {
+    public init(texts: [String], paths: [String] = [], inputWindowTokens: Int? = nil) {
         self.texts = texts
-        self.symbols = symbols
+        self.paths = paths
         self.inputWindowTokens = inputWindowTokens
     }
 }
@@ -56,14 +57,18 @@ public actor MemoryBroker {
         let name = (path as NSString).lastPathComponent.lowercased()
         if Self.excludedNames.contains(name) || Self.excludedSuffixes.contains(where: name.hasSuffix) { throw MemoryBrokerError.excludedPath(path) }
         let repository = try await workspace.attach(project)
-        guard let entry = try await git.treeEntry(path, in: commit, repository: repository) else { throw MemoryBrokerError.invalidPath(path) }
+        // The source records the commit itself, never a moving ref or an option-like string.
+        guard !commit.hasPrefix("-"), let resolved = try await git.commitOID(commit, repository: repository) else {
+            throw MemoryBrokerError.invalidCommit(commit)
+        }
+        guard let entry = try await git.treeEntry(path, in: resolved, repository: repository) else { throw MemoryBrokerError.invalidPath(path) }
         guard entry.type == "blob", entry.mode == "100644" || entry.mode == "100755" else { throw MemoryBrokerError.notAFile(path, mode: entry.mode) }
         let size = try await git.blobSize(entry.oid, repository: repository)
         guard size <= Self.maxSourceBytes else { throw MemoryBrokerError.tooLarge(path, size) }
         let data = try await git.blob(entry.oid, repository: repository)
         guard !data.contains(0), let text = String(data: data, encoding: .utf8) else { throw MemoryBrokerError.binary(path) }
         let source = MemorySourceDraft(
-            kind: .git, observedAt: time, locator: path, gitOID: commit, blobOID: entry.oid, sourceDigest: Canonical.sha256Hex(data),
+            kind: .git, observedAt: time, locator: path, gitOID: resolved, blobOID: entry.oid, sourceDigest: Canonical.sha256Hex(data),
             originProjectID: project
         )
         return (source, text)
@@ -100,7 +105,7 @@ public actor MemoryBroker {
         let base = try await baseOID(attempt, job: job)
         let stale = try await staleRevisions(project: job.projectID, base: base)
         let reader = MemoryReader(projectID: job.projectID, taskID: task.id, provider: attempt.provider, reviewerProvider: reviewerProvider)
-        let terms = QueryTerms.extract(texts: query.texts, symbols: query.symbols)
+        let terms = QueryTerms.extract(texts: query.texts, paths: query.paths)
         let candidates = try await store.memoryCandidates(reader, query: QueryTerms.ftsQuery(terms), stale: stale)
         let chosen = Selector.select(
             pins: candidates.pins, hits: candidates.hits, neighbours: candidates.neighbours,
@@ -125,6 +130,11 @@ public actor MemoryBroker {
     /// The package text: quoted excerpts with their source markers; each excerpt's digest is
     /// checked against the immutable revision.
     public func render(_ manifestID: MemoryManifestID) async throws -> String {
+        try await rendered(manifestID).text
+    }
+
+    /// The package text and the items it was rendered from.
+    private func rendered(_ manifestID: MemoryManifestID) async throws -> (text: String, items: [ManifestItemRecord]) {
         let manifest = try await store.manifest(manifestID)
         guard let attempt = try await store.attempt(manifest.attemptID), let task = try await store.task(attempt.taskID),
               let job = try await store.jobs().first(where: { $0.id == task.jobID }) else { throw MemoryBrokerError.attemptNotFound(manifest.attemptID) }
@@ -135,37 +145,44 @@ public actor MemoryBroker {
             guard Canonical.sha256Hex(Data(text.utf8)) == item.excerptDigest else { throw MemoryBrokerError.digestMismatch(position: item.position) }
             excerpts.append(RenderedExcerpt(marker: try await marker(revision, item: item, viewer: job.projectID), text: text))
         }
-        return ContextRenderer.render(excerpts)
+        return (ContextRenderer.render(excerpts), manifest.items)
     }
 
     /// The handover: stale evidence is recomputed, then the store rechecks and dispatches in one
-    /// transaction (moving the attempt to `starting`). Returns the rendered package.
+    /// transaction (moving the attempt to `starting`). The transaction also checks that the
+    /// manifest still holds exactly the rendered items (a deselection meanwhile refuses).
+    /// Returns the rendered package.
     public func dispatch(_ manifestID: MemoryManifestID) async throws -> String {
-        let text = try await render(manifestID)
-        let manifest = try await store.manifest(manifestID)
-        guard let attempt = try await store.attempt(manifest.attemptID), let task = try await store.task(attempt.taskID),
-              let job = try await store.jobs().first(where: { $0.id == task.jobID }) else { throw MemoryBrokerError.attemptNotFound(manifest.attemptID) }
-        let stale = try await staleRevisions(project: job.projectID, base: manifest.baseOID)
-        try await store.dispatchManifest(manifestID, stale: stale)
-        return text
+        try await send(manifestID, manual: false)
     }
 
     /// A manual handoff: the same checks, the user carries the text over.
     public func handOff(_ manifestID: MemoryManifestID) async throws -> String {
-        let text = try await render(manifestID)
+        try await send(manifestID, manual: true)
+    }
+
+    private func send(_ manifestID: MemoryManifestID, manual: Bool) async throws -> String {
+        let (text, items) = try await rendered(manifestID)
         let manifest = try await store.manifest(manifestID)
         guard let attempt = try await store.attempt(manifest.attemptID), let task = try await store.task(attempt.taskID),
               let job = try await store.jobs().first(where: { $0.id == task.jobID }) else { throw MemoryBrokerError.attemptNotFound(manifest.attemptID) }
-        try await store.dispatchManifest(manifestID, stale: try await staleRevisions(project: job.projectID, base: manifest.baseOID), manual: true)
+        let stale = try await staleRevisions(project: job.projectID, base: manifest.baseOID)
+        try await store.dispatchManifest(manifestID, stale: stale, manual: manual, rendered: items)
         return text
     }
 
     // MARK: Revocation and forgetting
 
-    /// Revokes a grant and cancels open attempts that already received its content.
+    /// Revokes a grant and cancels open attempts that already received its content; a failed
+    /// cancel does not stop the others (the revocation is already committed), its error is
+    /// rethrown afterwards.
     public func revokeGrant(_ grant: MemoryGrantID) async throws -> [AttemptID] {
         let open = try await store.revokeMemoryGrant(grant)
-        for attempt in open { try await coordinator.cancel(attempt, reason: "memoryGrantRevoked") }
+        var failure: (any Error)?
+        for attempt in open {
+            do { try await coordinator.cancel(attempt, reason: "memoryGrantRevoked") } catch { failure = failure ?? error }
+        }
+        if let failure { throw failure }
         return open
     }
 
@@ -173,17 +190,23 @@ public actor MemoryBroker {
     /// content are cancelled and the purge job runs.
     @discardableResult
     public func forget(_ entries: [MemoryEntryID]) async throws -> ForgetReport {
-        let report = try await store.forgetMemory(entries)
-        for attempt in report.attempts { try await coordinator.cancel(attempt, reason: "memoryForgotten") }
-        try await store.runPurgeJobs()
-        return report
+        try await finishForget(try await store.forgetMemory(entries))
     }
 
     @discardableResult
     public func forgetProject(_ project: ProjectID) async throws -> ForgetReport {
-        let report = try await store.forgetProjectMemory(project)
-        for attempt in report.attempts { try await coordinator.cancel(attempt, reason: "memoryForgotten") }
+        try await finishForget(try await store.forgetProjectMemory(project))
+    }
+
+    /// Cancels every open affected attempt and runs the purge job even if a cancel fails; the
+    /// first cancel error is rethrown afterwards. A job left pending runs at the next start.
+    private func finishForget(_ report: ForgetReport) async throws -> ForgetReport {
+        var failure: (any Error)?
+        for attempt in report.attempts {
+            do { try await coordinator.cancel(attempt, reason: "memoryForgotten") } catch { failure = failure ?? error }
+        }
         try await store.runPurgeJobs()
+        if let failure { throw failure }
         return report
     }
 

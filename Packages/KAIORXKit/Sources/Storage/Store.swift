@@ -312,6 +312,16 @@ public actor Store {
                     [.text(reservation.taskID.uuidString)]
                 ) { try $0.requiredText(0) }.first
                 if let openReviewer { throw StoreError.activeReviewerExists(taskID: reservation.taskID, attemptID: try parseID(openReviewer)) }
+                // A candidate whose author's content was forgotten gets no new reviewer: its
+                // texts would be stored again (ADR 0006 §7).
+                let purged = try db.query(
+                    """
+                    SELECT c.id FROM candidate c JOIN attempt a ON a.id = c.author_attempt_id
+                    WHERE c.task_id = ? AND c.state NOT IN ('published', 'rejected', 'superseded') AND a.content_purged_at IS NOT NULL
+                    """,
+                    [.text(reservation.taskID.uuidString)]
+                ) { try $0.requiredText(0) }.first
+                if purged != nil { throw MemoryError.candidateContentPurged(reservation.taskID) }
             }
             let ordinal = try db.query(
                 "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM attempt WHERE task_id = ? AND role = ?",
@@ -393,14 +403,18 @@ public actor Store {
                 ) { $0.int(0) }
                 if !seen.isEmpty { return .ignored(.duplicate) }
             }
-            // An attempt whose content was forgotten keeps headers only (ADR 0006 §7).
-            let purged = try db.query("SELECT content_purged_at FROM attempt WHERE id = ?", [.text(attemptID.uuidString)]) { $0.optionalInt(0) }.first ?? nil
-            let payload: Data? = purged == nil ? try Canonical.encode(event) : nil
+            // An attempt whose content was forgotten keeps headers only (ADR 0006 §7); one whose
+            // memory was revoked or forgotten never gets a session handle back (no resume).
+            let marks = try db.query("SELECT content_purged_at, resume_blocked_at FROM attempt WHERE id = ?", [.text(attemptID.uuidString)]) {
+                ($0.optionalInt(0), $0.optionalInt(1))
+            }.first
+            let payload: Data? = marks?.0 == nil ? try Canonical.encode(event) : nil
+            let resumeBlocked = marks?.1 != nil
 
             // Any provider event proves the process runs.
             if attempt.record.state == .starting {
                 var sessionID: String?
-                if case let .started(id) = event { sessionID = id }
+                if case let .started(id) = event, !resumeBlocked { sessionID = id }
                 try db.run(
                     "UPDATE attempt SET session_handle = COALESCE(?, session_handle) WHERE id = ?",
                     [.optional(sessionID), .text(attemptID.uuidString)]
@@ -412,7 +426,8 @@ public actor Store {
                 )
                 if isStartEvent { return .recorded(seq: seq) }
                 attempt = try loadAttempt(db, attemptID)
-            } else if case let .started(sessionID) = event {
+            } else if case .started(let reported) = event {
+                let sessionID = resumeBlocked ? nil : reported
                 // `started` can arrive after an early cancel moved the attempt to `cancelling`.
                 // Keep the session handle and start time reconciliation needs; no state change.
                 guard attempt.record.startedAt == nil || (attempt.record.sessionHandle == nil && sessionID != nil) else {

@@ -308,7 +308,7 @@ struct MemoryHarness {
         let note = try await h.store.addMemory(MemoryDraft(scope: .project, projectID: h.project, title: "Parser", body: "Der Parser nutzt parsePlan aus src/A.", sources: [.user(at: 1)]))
         try await h.store.grantMemory([note.id], to: h.project, provider: .claude)
         try await h.store.grantMemory([note.id], to: h.project, provider: .fake)
-        try await h.activate([planTask("A", writes: ["src/A"])])
+        try await h.activate([planTask("A", writes: ["src/Parser.swift"])])
         let scheduler = Scheduler(store: h.store, coordinator: h.coordinator, workspace: h.service, gate: TestGate(automatic: true, access: true), limits: h.limits, memory: broker)
         let attempt = try #require(try await scheduler.tick().reserved.first)
         _ = try await h.coordinator.waitUntilFinished(attempt)

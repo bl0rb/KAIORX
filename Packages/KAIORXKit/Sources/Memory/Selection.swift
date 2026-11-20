@@ -13,10 +13,12 @@ public struct ExcerptCandidate: Sendable, Equatable, Hashable {
     /// BM25 of the match (lower is better); 0 for pins and neighbours.
     public var score: Double
     public var reason: SelectionReason
+    /// SHA-256 of the excerpt text, when known: the same text is selected only once.
+    public var digest: String?
 
     public init(
         chunkRowID: Int64, revisionID: MemoryRevisionID, entryID: MemoryEntryID, scope: MemoryScope, confirmedAt: Int64,
-        byteFrom: Int, byteTo: Int, score: Double = 0, reason: SelectionReason
+        byteFrom: Int, byteTo: Int, score: Double = 0, reason: SelectionReason, digest: String? = nil
     ) {
         self.chunkRowID = chunkRowID
         self.revisionID = revisionID
@@ -27,6 +29,7 @@ public struct ExcerptCandidate: Sendable, Equatable, Hashable {
         self.byteTo = byteTo
         self.score = score
         self.reason = reason
+        self.digest = digest
     }
 
     public var tokens: Int { Retriever.tokens(byteTo - byteFrom) }
@@ -46,9 +49,10 @@ public struct SelectionLimits: Sendable, Equatable {
 
 public enum Selector {
     /// Pins first (at most two), then text hits by BM25, each followed by at most one graph
-    /// neighbour (two in all). Ties: task before project before global, later confirmation,
-    /// revision ID, byte offset. At most two excerpts per revision, six in all, within the
-    /// token budget. Deterministic for the same input.
+    /// neighbour (two chosen in all). Ties: task before project before global, later
+    /// confirmation, revision ID, byte offset. At most two excerpts per revision, six in all,
+    /// within the token budget; the same chunk or text (digest) only once, before it takes a
+    /// slot. Deterministic for the same input.
     public static func select(
         pins: [ExcerptCandidate], hits: [ExcerptCandidate], neighbours: [Int64: ExcerptCandidate], limits: SelectionLimits
     ) -> [ExcerptCandidate] {
@@ -60,25 +64,28 @@ public enum Selector {
             return a.byteFrom < b.byteFrom
         }
         var sequence = Array(pins.sorted(by: order).prefix(limits.maxPins))
-        var neighboursUsed = 0
         for hit in hits.sorted(by: order) {
             sequence.append(hit)
-            if neighboursUsed < limits.maxNeighbours, let neighbour = neighbours[hit.chunkRowID] {
-                sequence.append(neighbour)
-                neighboursUsed += 1
-            }
+            if let neighbour = neighbours[hit.chunkRowID] { sequence.append(neighbour) }
         }
         var chosen: [ExcerptCandidate] = []
         var perRevision: [MemoryRevisionID: Int] = [:]
         var seen = Set<Int64>()
+        var digests = Set<String>()
+        var neighboursChosen = 0
         var tokens = 0
         for candidate in sequence where chosen.count < limits.maxExcerpts {
-            guard seen.insert(candidate.chunkRowID).inserted else { continue }
+            let isNeighbour = candidate.reason == .graph
+            if isNeighbour, neighboursChosen >= limits.maxNeighbours { continue }
+            guard !seen.contains(candidate.chunkRowID), candidate.digest.map({ !digests.contains($0) }) ?? true else { continue }
             guard perRevision[candidate.revisionID, default: 0] < limits.maxPerRevision else { continue }
             guard tokens + candidate.tokens <= limits.maxTokens else { continue }
             chosen.append(candidate)
+            seen.insert(candidate.chunkRowID)
+            if let digest = candidate.digest { digests.insert(digest) }
             perRevision[candidate.revisionID, default: 0] += 1
             tokens += candidate.tokens
+            if isNeighbour { neighboursChosen += 1 }
         }
         return chosen
     }
