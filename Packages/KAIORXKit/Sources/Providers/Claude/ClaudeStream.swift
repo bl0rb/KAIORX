@@ -44,11 +44,21 @@ public enum ClaudeCommand {
 
     /// Only what the CLI needs. Provider overrides, API keys, gateways and key helpers are never
     /// passed, so the run cannot fall back from the subscription to another billing source.
-    public static func environment(configDirectory: String, temporaryDirectory: String, home: String) -> [String: String] {
+    /// `USER`/`LOGNAME`: Claude Code finds its subscription login in the keychain under the
+    /// account name; without them it reports `loggedIn: false` (third live run, ADR 0008).
+    public static func environment(
+        configDirectory: String, temporaryDirectory: String, home: String, user: String = accountName
+    ) -> [String: String] {
         [
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home, "TMPDIR": temporaryDirectory, "LANG": "en_US.UTF-8",
-            "CLAUDE_CONFIG_DIR": configDirectory,
+            "USER": user, "LOGNAME": user, "CLAUDE_CONFIG_DIR": configDirectory,
         ]
+    }
+
+    /// The login name of the process owner from the user database, not from the environment.
+    public static var accountName: String {
+        if let entry = getpwuid(getuid()), let name = entry.pointee.pw_name { return String(cString: name) }
+        return NSUserName()
     }
 }
 
