@@ -142,7 +142,10 @@ func run(_ arguments: [String]) async throws {
             let identity = try await BinaryIdentity.probe(native, host: host)
             let entry = CompatibilityMatrix.entry(for: provider, version: identity.version)
             print("\(provider.rawValue): \(identity.version) \(native) (Matrix: \(entry?.status.rawValue ?? "fehlt"))")
-            print("  Anmeldung (selbst ausführen): \(Onboarding.loginCommand(provider, configDirectory: try configDirectory(provider)))")
+            // Codex refuses a CODEX_HOME that does not exist: create both folders, owner-only.
+            let folder = try configDirectory(provider)
+            try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            print("  Anmeldung (selbst ausführen): \(Onboarding.loginCommand(provider, configDirectory: folder))")
         }
         let scratch = try RunFolders.base() + "/preflight"
         try FileManager.default.createDirectory(atPath: scratch, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
