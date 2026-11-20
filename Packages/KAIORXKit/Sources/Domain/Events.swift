@@ -34,6 +34,9 @@ public struct EventKind: RawRepresentable, Hashable, Sendable, Codable, Expressi
     public static let quotaBlocked: EventKind = "quota.blocked"
     public static let quotaReleased: EventKind = "quota.released"
     public static let quotaObserved: EventKind = "quota.observed"
+    public static let memoryDispatched: EventKind = "memory.dispatched"
+    public static let memoryRevoked: EventKind = "memory.revoked"
+    public static let contentPurged: EventKind = "content.purged"
 }
 
 public enum Canonical {

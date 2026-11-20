@@ -129,7 +129,7 @@ public enum WriteArea: Sendable, Codable, Equatable, Hashable {
 
     /// Relative, slash-separated, without `.` segments or trailing slash. `nil` if the path
     /// leaves the repository, is absolute, names `.git`, or contains control characters.
-    static func normalize(_ raw: String) -> String? {
+    public static func normalize(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         guard !trimmed.hasPrefix("/"), !trimmed.hasPrefix("~"),
               !trimmed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || $0 == "\\" }) else { return nil }

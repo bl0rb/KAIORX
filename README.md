@@ -23,6 +23,8 @@ Package E (check and integrate) is in progress. A sealed author result is merged
 
 Package F (plan and scheduling) is in progress. A job's tasks form a validated plan (a DAG with write areas, criteria and difficulty), kept as immutable revisions. A scheduler starts ready tasks in critical-path order within slot, write-area, consent, quota and budget limits, and picks a model tier with repair and escalation rules. Without a live-verified provider, only an explicit user start runs. See `docs/adr/0005-plan-scheduler-routing.md`.
 
+Package G (memory and sources) is in progress. Confirmed task, project and global notes with provenance (user, Git blob, test, review, derived) are searchable with SQLite FTS5. An agent gets only excerpts granted for its project, task and provider (and the planned reviewer), selected deterministically and sent in one handover transaction with the attempt start. Forgetting removes every local copy, including derived notes, the content of attempts that received it and old app backups. See `docs/adr/0006-memory-und-quellen.md`.
+
 ## Build and test
 
 ```sh

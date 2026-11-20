@@ -393,7 +393,9 @@ public actor Store {
                 ) { $0.int(0) }
                 if !seen.isEmpty { return .ignored(.duplicate) }
             }
-            let payload = try Canonical.encode(event)
+            // An attempt whose content was forgotten keeps headers only (ADR 0006 §7).
+            let purged = try db.query("SELECT content_purged_at FROM attempt WHERE id = ?", [.text(attemptID.uuidString)]) { $0.optionalInt(0) }.first ?? nil
+            let payload: Data? = purged == nil ? try Canonical.encode(event) : nil
 
             // Any provider event proves the process runs.
             if attempt.record.state == .starting {
@@ -662,6 +664,12 @@ public actor Store {
                 try changeTaskState(db, try loadTask(db, task.record.id), to: .conflict, reason: "conflict still open", now: now)
             }
         }
+    }
+
+    /// The memory dispatch moves a reserved attempt to `starting` in its own transaction (ADR 0006 §6).
+    @discardableResult
+    func changeAttemptStateForDispatch(_ db: SQLiteConnection, _ attempt: LoadedAttempt, now: Int64) throws -> Int64 {
+        try changeAttemptState(db, attempt, to: .starting, errorClass: nil, kind: nil, payload: nil, now: now)
     }
 
     @discardableResult

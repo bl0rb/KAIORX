@@ -40,6 +40,10 @@ struct SQLRow {
         isNull(column) ? nil : int(column)
     }
 
+    func double(_ column: Int32) -> Double {
+        sqlite3_column_double(statement, column)
+    }
+
     /// Reads the full byte length, so text with embedded NUL characters survives.
     func text(_ column: Int32) -> String? {
         guard let pointer = sqlite3_column_text(statement, column) else { return nil }
@@ -111,6 +115,8 @@ final class SQLiteConnection {
             throw SQLiteError(code: SQLITE_ERROR, message: "WAL journal mode unavailable (got \(mode ?? "nil"))")
         }
         try execute("PRAGMA synchronous = FULL")
+        // Deleted content is overwritten, not left in free pages (ADR 0006).
+        try execute("PRAGMA secure_delete = ON")
     }
 
     /// Runs one or more statements without parameters.

@@ -49,10 +49,16 @@ public actor Scheduler {
     private let workspace: WorkspaceService
     private let gate: any CapabilityGate
     private let limits: SchedulerLimits
+    /// Appends the attempt's project memory (ADR 0006 §6) when set.
+    private let memory: MemoryBroker?
     /// Reservation size when the profile has no typical token count (marked uncertain).
     public static let defaultReservationTokens = 50_000
 
-    public init(store: Store, coordinator: RunCoordinator, workspace: WorkspaceService, gate: any CapabilityGate, limits: SchedulerLimits = SchedulerLimits()) {
+    public init(
+        store: Store, coordinator: RunCoordinator, workspace: WorkspaceService, gate: any CapabilityGate, limits: SchedulerLimits = SchedulerLimits(),
+        memory: MemoryBroker? = nil
+    ) {
+        self.memory = memory
         self.store = store
         self.coordinator = coordinator
         self.workspace = workspace
@@ -225,7 +231,8 @@ public actor Scheduler {
                 continue
             }
             let reviewProfile = ModelProfile.smallest(profiles, provider: reviewer.draft.provider, role: .reviewer, atLeast: .fast)
-            let spec = makeSpec(c, task: task, profile: profile, decision: decision, failure: counted.last?.1)
+            var spec = makeSpec(c, task: task, profile: profile, decision: decision, failure: counted.last?.1)
+            if memory != nil { spec.memoryManifestID = MemoryManifestID() }
             let reservation = ScheduledReservation(
                 attemptID: spec.attemptID, taskID: task.id, planID: c.planID, consentID: consent.id, profile: profile, tier: profile.tier,
                 specDigest: try spec.digest(), reservedTokens: profile.typicalTokens ?? Self.defaultReservationTokens,
@@ -240,7 +247,7 @@ public actor Scheduler {
                 continue
             case .reserved(let attempt):
                 report.reserved.append(attempt)
-                try await launch(attempt, spec: spec, job: c.job)
+                try await launch(attempt, spec: spec, job: c.job, reviewer: reviewer.draft.provider, planned: c.planned)
                 return
             }
         }
@@ -256,7 +263,7 @@ public actor Scheduler {
 
     /// Prepares the attempt's worktree at its recorded base and starts it. A failure before the
     /// turn cancels the reservation; the task returns to `ready` for a spaced retry.
-    private func launch(_ attempt: AttemptID, spec: AttemptSpec, job: JobRecord) async throws {
+    private func launch(_ attempt: AttemptID, spec: AttemptSpec, job: JobRecord, reviewer: ProviderKind, planned: PlannedTask) async throws {
         guard let record = try await store.attempt(attempt), let base = record.baseOID else { return }
         let tree: WorktreeRecord
         do {
@@ -267,6 +274,20 @@ public actor Scheduler {
         }
         var spec = spec
         spec.workingDirectory = await workspace.path(of: tree)
+        if let memory, let manifestID = spec.memoryManifestID {
+            // Prepare, render and dispatch in the single handover transaction (it moves the
+            // attempt to `starting`); a refusal is a failure before the turn.
+            let d = planned.draft
+            let query = MemoryQuery(texts: [d.title, d.goal] + d.criteria, symbols: (d.writePaths ?? []) + d.readPaths)
+            do {
+                _ = try await memory.prepare(manifestID, attempt: attempt, reviewerProvider: reviewer, query: query)
+                let context = try await memory.dispatch(manifestID)
+                if !context.isEmpty { spec.prompt += "\n\n" + context }
+            } catch {
+                try await failBeforeTurn(attempt, errorClass: "memoryRefused")
+                return
+            }
+        }
         _ = try await coordinator.launch(attempt, spec: spec)
     }
 
@@ -294,7 +315,7 @@ public actor Scheduler {
 
     // MARK: History
 
-    static let technicalStartFailures: Set<String> = ["startFailed", "adapterUnavailable", "worktreeFailed"]
+    static let technicalStartFailures: Set<String> = ["startFailed", "adapterUnavailable", "worktreeFailed", "memoryRefused"]
 
     static func isTechnicalStartFailure(_ attempt: AttemptRecord) -> Bool {
         attempt.state == .failed && attempt.startedAt == nil && technicalStartFailures.contains(attempt.errorClass ?? "")

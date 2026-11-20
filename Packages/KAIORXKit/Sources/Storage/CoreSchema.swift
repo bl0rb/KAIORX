@@ -2,7 +2,7 @@
 /// consent, accounts, plans, worktrees, budgets, candidates and Git operations follow as new
 /// migrations with their packages; applied migrations are never edited.
 public enum CoreSchema {
-    public static let migrations: [Migration] = [v1, v2, v3, v4, v5]
+    public static let migrations: [Migration] = [v1, v2, v3, v4, v5, v6]
 
     static let v1 = Migration(version: 1, name: "core", sql: """
         CREATE TABLE project (
@@ -445,5 +445,223 @@ public enum CoreSchema {
         ALTER TABLE plan_revision ADD COLUMN based_on_plan_id TEXT REFERENCES plan_revision(id);
         ALTER TABLE attempt ADD COLUMN process_lost INTEGER NOT NULL DEFAULT 0 CHECK (process_lost IN (0, 1));
         ALTER TABLE quota_block ADD COLUMN end_source TEXT CHECK (end_source IN ('given', 'retryAfter', 'reset', 'fallback', 'open'));
+        """)
+
+    /// Package G (ADR 0006): project memory with provenance, FTS5, grants, manifests and purge jobs.
+    static let v6 = Migration(version: 6, name: "memory", sql: """
+        CREATE TABLE project_memory_policy (
+            project_id TEXT PRIMARY KEY NOT NULL REFERENCES project(id),
+            allow_global INTEGER NOT NULL DEFAULT 0 CHECK (allow_global IN (0, 1)),
+            allowed_providers_json TEXT NOT NULL DEFAULT '[]',
+            rev INTEGER NOT NULL DEFAULT 1 CHECK (rev >= 1)
+        ) STRICT;
+
+        CREATE TABLE memory_entry (
+            id TEXT PRIMARY KEY NOT NULL,
+            scope TEXT NOT NULL CHECK (scope IN ('global', 'project', 'task')),
+            project_id TEXT REFERENCES project(id),
+            task_id TEXT REFERENCES task(id),
+            pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+            created_at INTEGER NOT NULL,
+            CHECK ((scope = 'global' AND project_id IS NULL AND task_id IS NULL)
+                OR (scope = 'project' AND project_id IS NOT NULL AND task_id IS NULL)
+                OR (scope = 'task' AND project_id IS NOT NULL AND task_id IS NOT NULL))
+        ) STRICT;
+        CREATE INDEX memory_entry_project ON memory_entry (project_id, scope);
+        CREATE INDEX memory_entry_task ON memory_entry (task_id);
+        CREATE TRIGGER memory_entry_task_project BEFORE INSERT ON memory_entry WHEN NEW.task_id IS NOT NULL BEGIN
+            SELECT RAISE(ABORT, 'memory task not in project') WHERE NOT EXISTS (
+                SELECT 1 FROM task t JOIN job j ON j.id = t.job_id WHERE t.id = NEW.task_id AND j.project_id = NEW.project_id);
+        END;
+        CREATE TRIGGER memory_entry_scope_fixed BEFORE UPDATE OF scope, project_id, task_id ON memory_entry BEGIN
+            SELECT RAISE(ABORT, 'memory scope is fixed');
+        END;
+
+        CREATE TABLE memory_revision (
+            id TEXT PRIMARY KEY NOT NULL,
+            entry_id TEXT NOT NULL REFERENCES memory_entry(id) ON DELETE CASCADE,
+            number INTEGER NOT NULL CHECK (number >= 1),
+            previous_id TEXT REFERENCES memory_revision(id) DEFERRABLE INITIALLY DEFERRED,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('preference', 'decision', 'observation', 'convention')),
+            state TEXT NOT NULL CHECK (state IN ('proposed', 'active', 'retired', 'rejected')),
+            author_kind TEXT NOT NULL CHECK (author_kind IN ('user', 'proposal')),
+            created_at INTEGER NOT NULL,
+            confirmed_at INTEGER,
+            valid_until INTEGER,
+            content_digest TEXT NOT NULL,
+            import_key TEXT UNIQUE,
+            UNIQUE (entry_id, number),
+            CHECK (state NOT IN ('active', 'retired') OR confirmed_at IS NOT NULL)
+        ) STRICT;
+        CREATE UNIQUE INDEX memory_one_active ON memory_revision (entry_id) WHERE state = 'active';
+        CREATE TRIGGER memory_revision_previous BEFORE INSERT ON memory_revision WHEN NEW.previous_id IS NOT NULL BEGIN
+            SELECT RAISE(ABORT, 'memory previous revision') WHERE NOT EXISTS (
+                SELECT 1 FROM memory_revision p WHERE p.id = NEW.previous_id AND p.entry_id = NEW.entry_id AND p.number < NEW.number);
+        END;
+        CREATE TRIGGER memory_revision_frozen BEFORE UPDATE OF entry_id, number, previous_id, title, body, kind, content_digest, import_key
+            ON memory_revision BEGIN
+            SELECT RAISE(ABORT, 'memory revision content is immutable');
+        END;
+
+        CREATE TABLE memory_source (
+            id TEXT PRIMARY KEY NOT NULL,
+            revision_id TEXT NOT NULL REFERENCES memory_revision(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL CHECK (kind IN ('user', 'git', 'test', 'review', 'derived')),
+            observed_at INTEGER NOT NULL,
+            locator TEXT CHECK (locator IS NULL OR (substr(locator, 1, 1) NOT IN ('/', '~') AND instr(locator, '..') = 0)),
+            git_oid TEXT,
+            blob_oid TEXT,
+            byte_from INTEGER,
+            byte_to INTEGER,
+            source_digest TEXT,
+            origin_project_id TEXT REFERENCES project(id),
+            origin_task_id TEXT REFERENCES task(id),
+            attempt_id TEXT REFERENCES attempt(id),
+            event_seq INTEGER REFERENCES event(seq),
+            upstream_revision_id TEXT REFERENCES memory_revision(id),
+            CHECK (kind <> 'git' OR (origin_project_id IS NOT NULL AND git_oid IS NOT NULL AND locator IS NOT NULL AND blob_oid IS NOT NULL)),
+            CHECK (kind NOT IN ('test', 'review') OR (attempt_id IS NOT NULL AND origin_project_id IS NOT NULL AND git_oid IS NOT NULL
+                AND (event_seq IS NOT NULL OR source_digest IS NOT NULL))),
+            CHECK (kind <> 'derived' OR upstream_revision_id IS NOT NULL),
+            CHECK (upstream_revision_id IS NULL OR upstream_revision_id <> revision_id),
+            CHECK (byte_from IS NULL OR (byte_from >= 0 AND byte_to > byte_from))
+        ) STRICT;
+        CREATE INDEX memory_source_revision ON memory_source (revision_id);
+        CREATE INDEX memory_source_upstream ON memory_source (upstream_revision_id);
+        CREATE INDEX memory_source_attempt ON memory_source (attempt_id);
+        CREATE TRIGGER memory_source_scope BEFORE INSERT ON memory_source BEGIN
+            -- Global entries: only the user's own text or a derivation.
+            SELECT RAISE(ABORT, 'memory global source') WHERE NEW.kind NOT IN ('user', 'derived') AND EXISTS (
+                SELECT 1 FROM memory_revision r JOIN memory_entry e ON e.id = r.entry_id WHERE r.id = NEW.revision_id AND e.scope = 'global');
+            -- Evidence of a project or task entry comes from its own project.
+            SELECT RAISE(ABORT, 'memory source project') WHERE NEW.origin_project_id IS NOT NULL AND EXISTS (
+                SELECT 1 FROM memory_revision r JOIN memory_entry e ON e.id = r.entry_id
+                WHERE r.id = NEW.revision_id AND e.scope <> 'global' AND e.project_id <> NEW.origin_project_id);
+            SELECT RAISE(ABORT, 'memory source attempt') WHERE NEW.attempt_id IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM attempt a JOIN task t ON t.id = a.task_id JOIN job j ON j.id = t.job_id
+                WHERE a.id = NEW.attempt_id AND j.project_id = NEW.origin_project_id);
+            SELECT RAISE(ABORT, 'memory source event') WHERE NEW.event_seq IS NOT NULL AND NOT EXISTS (
+                SELECT 1 FROM event ev WHERE ev.seq = NEW.event_seq AND ev.attempt_id = NEW.attempt_id);
+        END;
+
+        CREATE TABLE memory_edge (
+            id TEXT PRIMARY KEY NOT NULL,
+            from_revision_id TEXT NOT NULL REFERENCES memory_revision(id) ON DELETE CASCADE,
+            to_revision_id TEXT NOT NULL REFERENCES memory_revision(id) ON DELETE CASCADE,
+            type TEXT NOT NULL CHECK (type IN ('depends_on', 'verifies', 'contradicts', 'related_to')),
+            evidence_source_id TEXT NOT NULL REFERENCES memory_source(id) ON DELETE CASCADE,
+            confirmed_at INTEGER NOT NULL,
+            UNIQUE (from_revision_id, to_revision_id, type),
+            CHECK (from_revision_id <> to_revision_id),
+            CHECK (type NOT IN ('related_to', 'contradicts') OR from_revision_id < to_revision_id)
+        ) STRICT;
+        CREATE TRIGGER memory_edge_rules BEFORE INSERT ON memory_edge BEGIN
+            SELECT RAISE(ABORT, 'memory edge evidence') WHERE NOT EXISTS (
+                SELECT 1 FROM memory_source s WHERE s.id = NEW.evidence_source_id AND s.revision_id IN (NEW.from_revision_id, NEW.to_revision_id));
+            -- Same project (task entries with their own task, project or global), or one end global.
+            SELECT RAISE(ABORT, 'memory edge scope') WHERE EXISTS (
+                SELECT 1 FROM memory_revision ra JOIN memory_entry a ON a.id = ra.entry_id,
+                    memory_revision rb JOIN memory_entry b ON b.id = rb.entry_id
+                WHERE ra.id = NEW.from_revision_id AND rb.id = NEW.to_revision_id
+                AND a.scope <> 'global' AND b.scope <> 'global'
+                AND (a.project_id <> b.project_id
+                    OR (a.scope = 'task' AND b.scope = 'task' AND a.task_id <> b.task_id)));
+        END;
+
+        CREATE TABLE memory_grant (
+            id TEXT PRIMARY KEY NOT NULL,
+            revision_id TEXT NOT NULL REFERENCES memory_revision(id) ON DELETE CASCADE,
+            target_project_id TEXT NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+            provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex', 'fake')),
+            granted_at INTEGER NOT NULL,
+            revoked_at INTEGER
+        ) STRICT;
+        CREATE UNIQUE INDEX memory_grant_active ON memory_grant (revision_id, target_project_id, provider) WHERE revoked_at IS NULL;
+        CREATE TRIGGER memory_grant_target BEFORE INSERT ON memory_grant BEGIN
+            -- Grants only narrow: project and task entries to their own project, global ones only where allowed.
+            SELECT RAISE(ABORT, 'memory grant target') WHERE EXISTS (
+                SELECT 1 FROM memory_revision r JOIN memory_entry e ON e.id = r.entry_id WHERE r.id = NEW.revision_id
+                AND ((e.scope <> 'global' AND e.project_id <> NEW.target_project_id)
+                    OR (e.scope = 'global' AND NOT EXISTS (
+                        SELECT 1 FROM project_memory_policy p WHERE p.project_id = NEW.target_project_id AND p.allow_global = 1))));
+        END;
+
+        CREATE TABLE memory_chunk (
+            rowid INTEGER PRIMARY KEY,
+            revision_id TEXT NOT NULL REFERENCES memory_revision(id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            byte_from INTEGER NOT NULL CHECK (byte_from >= 0),
+            byte_to INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            symbols TEXT NOT NULL,
+            chunker_version INTEGER NOT NULL,
+            UNIQUE (revision_id, ordinal),
+            CHECK (byte_to > byte_from)
+        ) STRICT;
+        CREATE VIRTUAL TABLE memory_fts USING fts5(
+            title, body, symbols, content = 'memory_chunk', content_rowid = 'rowid', tokenize = 'unicode61'
+        );
+        INSERT INTO memory_fts(memory_fts, rank) VALUES ('secure-delete', 1);
+        CREATE TRIGGER memory_chunk_ai AFTER INSERT ON memory_chunk BEGIN
+            INSERT INTO memory_fts(rowid, title, body, symbols) VALUES (NEW.rowid, NEW.title, NEW.body, NEW.symbols);
+        END;
+        CREATE TRIGGER memory_chunk_ad AFTER DELETE ON memory_chunk BEGIN
+            INSERT INTO memory_fts(memory_fts, rowid, title, body, symbols) VALUES ('delete', OLD.rowid, OLD.title, OLD.body, OLD.symbols);
+        END;
+        CREATE TRIGGER memory_chunk_immutable BEFORE UPDATE ON memory_chunk BEGIN
+            SELECT RAISE(ABORT, 'memory chunks are immutable');
+        END;
+        INSERT INTO memory_fts(memory_fts) VALUES ('rebuild');
+        INSERT INTO memory_fts(memory_fts, rank) VALUES ('integrity-check', 1);
+
+        CREATE TABLE memory_manifest (
+            id TEXT PRIMARY KEY NOT NULL,
+            attempt_id TEXT NOT NULL REFERENCES attempt(id),
+            provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex', 'fake')),
+            reviewer_provider TEXT CHECK (reviewer_provider IN ('claude', 'codex', 'fake')),
+            model_ref TEXT,
+            policy_version INTEGER NOT NULL,
+            retriever_version INTEGER NOT NULL,
+            base_oid TEXT,
+            created_at INTEGER NOT NULL,
+            delivery TEXT NOT NULL CHECK (delivery IN ('prepared', 'dispatched', 'manual', 'revoked')),
+            token_estimate INTEGER NOT NULL CHECK (token_estimate >= 0),
+            dispatched_at INTEGER,
+            revoked_reason TEXT
+        ) STRICT;
+        CREATE UNIQUE INDEX memory_manifest_attempt ON memory_manifest (attempt_id) WHERE delivery <> 'revoked';
+        CREATE TRIGGER memory_manifest_provider BEFORE INSERT ON memory_manifest BEGIN
+            SELECT RAISE(ABORT, 'memory manifest provider') WHERE NOT EXISTS (
+                SELECT 1 FROM attempt a WHERE a.id = NEW.attempt_id AND a.provider = NEW.provider);
+        END;
+
+        CREATE TABLE memory_manifest_item (
+            manifest_id TEXT NOT NULL REFERENCES memory_manifest(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL CHECK (position >= 0),
+            revision_id TEXT NOT NULL REFERENCES memory_revision(id) ON DELETE CASCADE,
+            byte_from INTEGER NOT NULL,
+            byte_to INTEGER NOT NULL,
+            excerpt_digest TEXT NOT NULL,
+            token_estimate INTEGER NOT NULL,
+            reason TEXT NOT NULL CHECK (reason IN ('pin', 'lexical', 'graph')),
+            rank INTEGER NOT NULL,
+            PRIMARY KEY (manifest_id, position)
+        ) STRICT;
+        CREATE INDEX memory_manifest_item_revision ON memory_manifest_item (revision_id);
+
+        CREATE TABLE purge_job (
+            id TEXT PRIMARY KEY NOT NULL,
+            opaque_targets TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('pending', 'done')),
+            cursor INTEGER NOT NULL DEFAULT 0,
+            at INTEGER NOT NULL,
+            done_at INTEGER
+        ) STRICT;
+
+        ALTER TABLE event ADD COLUMN payload_purged_at INTEGER;
+        ALTER TABLE attempt ADD COLUMN content_purged_at INTEGER;
         """)
 }

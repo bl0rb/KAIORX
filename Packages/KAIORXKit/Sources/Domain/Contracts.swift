@@ -102,6 +102,9 @@ public struct AttemptSpec: Sendable, Codable, Equatable {
     public var writablePaths: [String]?
     public var deadline: Int64?
     public var prompt: String
+    /// The memory manifest whose rendered context is appended at start (ADR 0006 §6); the spec
+    /// digest covers this ID, not the rendered text.
+    public var memoryManifestID: MemoryManifestID?
 
     public init(
         attemptID: AttemptID, taskID: TaskID, projectID: ProjectID, role: AttemptRole,

@@ -5,16 +5,18 @@ let package = Package(
     name: "KAIORXKit",
     platforms: [.macOS(.v15)],
     products: [
-        .library(name: "KAIORXKit", targets: ["Domain", "Storage", "Providers", "Orchestration", "ProcessHost", "Workspace"]),
+        .library(name: "KAIORXKit", targets: ["Domain", "Storage", "Providers", "Orchestration", "ProcessHost", "Workspace", "Memory"]),
         .executable(name: "kaiorx-dev", targets: ["kaiorx-dev"]),
     ],
     targets: [
         // Values, IDs, commands, events and state machines. No SQLite, SwiftUI or vendor wire formats.
         .target(name: "Domain"),
+        // Pure memory logic (ADR 0006): chunks, query terms, selection, secret scan, rendering.
+        .target(name: "Memory", dependencies: ["Domain"]),
         // Single-writer SQLite store on the system SQLite3 library (ADR 0001).
         .target(
             name: "Storage",
-            dependencies: ["Domain"],
+            dependencies: ["Domain", "Memory"],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         // Adapter contract, the deterministic fake, and the Claude Code and Codex adapters.
@@ -25,16 +27,17 @@ let package = Package(
         // Host Git: worktrees per attempt, sealed results under private refs, test runs.
         .target(name: "Workspace", dependencies: ["ProcessHost"]),
         // Starts attempts, persists their event streams, recovers after restart.
-        .target(name: "Orchestration", dependencies: ["Domain", "Storage", "Providers", "ProcessHost", "Workspace"]),
+        .target(name: "Orchestration", dependencies: ["Domain", "Storage", "Providers", "ProcessHost", "Workspace", "Memory"]),
         // Development CLI until the Xcode app exists: open projects, start fake runs, list active runs.
         .executableTarget(name: "kaiorx-dev", dependencies: ["Domain", "Storage", "Providers", "Orchestration"]),
 
         .testTarget(name: "DomainTests", dependencies: ["Domain"]),
         .testTarget(name: "StorageTests", dependencies: ["Domain", "Storage"]),
+        .testTarget(name: "MemoryTests", dependencies: ["Domain", "Memory"]),
         // Test support: fixture programs that speak the provider protocols, and a JSON Schema checker.
         .target(name: "ProviderFixtures", dependencies: ["Providers"], path: "Tests/ProviderFixtures"),
         .testTarget(name: "ProvidersTests", dependencies: ["Domain", "Providers", "ProcessHost", "ProviderFixtures"], exclude: ["Fixtures"]),
-        .testTarget(name: "OrchestrationTests", dependencies: ["Domain", "Storage", "Providers", "Orchestration", "ProcessHost", "Workspace", "ProviderFixtures"]),
+        .testTarget(name: "OrchestrationTests", dependencies: ["Domain", "Storage", "Providers", "Orchestration", "ProcessHost", "Workspace", "ProviderFixtures", "Memory"]),
         .testTarget(name: "ProcessHostTests", dependencies: ["ProcessHost"]),
         .testTarget(name: "WorkspaceTests", dependencies: ["ProcessHost", "Workspace"]),
     ]
