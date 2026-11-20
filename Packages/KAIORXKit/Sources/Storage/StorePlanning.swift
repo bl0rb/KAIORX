@@ -698,7 +698,7 @@ extension Store {
                 OR EXISTS (SELECT 1 FROM consent c WHERE c.account_id = a.account_id AND c.revoked_at >= a.reserved_at))
             ORDER BY a.reserved_at, a.id
             """
-        ) { try parseID($0.requiredText(0)) }
+        ) { try parseID($0.requiredText(0)) as AttemptID }
     }
 
     public func provider(of account: AccountID) throws -> ProviderKind? {

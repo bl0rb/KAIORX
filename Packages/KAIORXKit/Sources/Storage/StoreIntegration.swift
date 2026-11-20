@@ -282,7 +282,7 @@ extension Store {
             LIMIT 1
             """,
             values
-        ) { try parseID($0.requiredText(0)) }.first
+        ) { try parseID($0.requiredText(0)) as CandidateID }.first
     }
 
     /// Moves a candidate. Leaving it as rejected or superseded revokes its open approvals.
