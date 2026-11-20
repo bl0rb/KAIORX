@@ -87,6 +87,13 @@ Lauf `20261120-1220-6cff`; kein Anbieter hat bestanden.
 - **Verborgener Benutzerordner:** Der App-Server brach beim Start ab, weil er `CODEX_HOME` nicht auflösen konnte (`failed to canonicalize CODEX_HOME: Operation not permitted`). `realpath` braucht die Metadaten jedes Ordners darüber, und die lagen im verborgenen Benutzerordner. `Confinement` erlaubt jetzt für die Ordner über jedem sichtbaren oder beschreibbaren Pfad nur `file-read-metadata` auf genau diesen Ordner (`literal`), nicht deren Inhalt; Auflisten und Lesen bleiben verweigert (Test mit echtem `sandbox-exec`).
 - **Claude:** `auth status` meldete im Kit wieder `loggedIn: false`, obwohl der Kontoinhaber sich unmittelbar davor im selben Konfigurationsordner angemeldet hatte (Konto in `.claude.json` eingetragen). Die Vergleichsmessung des Kontoinhabers (`claude auth status --json` mit der Umgebung des Kits, ohne Isolation) zeigte die Ursache: ohne `USER`/`LOGNAME` `loggedIn: false`, mit beiden angemeldet (Abo). Claude Code sucht die Anmeldung im Schlüsselbund unter dem Kontonamen. Die Claude-Umgebung enthält jetzt `USER` und `LOGNAME`, genommen aus der Benutzerdatenbank (`getpwuid`), nicht aus der Umgebung von KAIORX. Der Kontoname steht damit im Prozess; in Aufzeichnungen wird er wie bisher redigiert.
 
+## Vierter Live-Lauf (20. November 2026)
+
+Lauf `20261120-1240-0b6e`, Claude-Teil (Codex folgt nach dem Widerruf im selben Lauf).
+
+- **Claude:** Anmeldung (Max, vom Kontoinhaber bestätigt), Abrechnung, Lesen (Kennwort genannt, Ordner unverändert), Schreiben (nur `allowed/`), Abbruch (als ungeklärt erfasst, kein Prozess übrig) und **Lesen mit verborgenem Benutzerordner** bestanden. Isolation scheiterte nur am lesbaren Benutzerordner. Damit ist für Claude belegt, dass es mit verborgenem Benutzerordner arbeitet; das Produkt übernimmt das Verbergen, sobald derselbe Beleg für Codex vorliegt (Punkt 6).
+- **Aufzeichnungen:** Vier Claude-Aufzeichnungen wurden ohne Angabe des Grundes verworfen. Der Bericht nennt jetzt Art, Zeile und Ort des übrig gebliebenen Werts (zum Beispiel „Benutzername in Zeile 7, assistant: message.content[].text“), nie den Wert; Schlüssel, die nicht wie Protokollvokabular aussehen oder selbst einen privaten Wert enthalten, erscheinen als `?`. Bekannte Pfade werden zusätzlich in der Form ersetzt, in der Claude Code Projektordner benennt (`/Users/x/a b` → `-Users-x-a-b`).
+
 ## Nicht in A
 
 SIWC-Anmeldung und Token-Erneuerung, natürlicher Ablauf einer Anmeldung (der Widerruf ist der Stellvertreter), absichtlich erschöpftes Kontingent, Installation verwalteter Hooks, gespeicherte erwartete Kontoidentität im Produkt (braucht eine Migration).

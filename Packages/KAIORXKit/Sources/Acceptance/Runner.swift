@@ -290,18 +290,20 @@ public actor AcceptanceRunner {
         let redactor = fixtureRedactor(run)
         let base = "\(run.provider.rawValue)-\(run.identity?.version ?? "?")-\(step.rawValue)"
         if !errors.isEmpty {
-            if let redacted = try? redactor.redact(lines: errors) {
+            do {
+                let redacted = try redactor.redact(lines: errors)
                 let name = base + "-stderr.log"
                 try? Data((redacted.joined(separator: "\n") + "\n").utf8).write(to: URL(filePath: folders.fixtures + "/" + name), options: .atomic)
                 state.providers[index].fixtures.append(name)
                 notes.append("Fehlerausgabe: \(name)")
-            } else {
-                notes.append("Fehlerausgabe verworfen: privater Wert nach Redaktion")
+            } catch {
+                notes.append("Fehlerausgabe verworfen: \(Self.discardReason(error))")
             }
         }
         guard !lines.isEmpty else { return nil }
-        guard let redacted = try? redactor.redact(lines: lines) else {
-            notes.append("Aufzeichnung verworfen: privater Wert nach Redaktion")
+        let redacted: [String]
+        do { redacted = try redactor.redact(lines: lines) } catch {
+            notes.append("Aufzeichnung verworfen: \(Self.discardReason(error))")
             return nil
         }
         let name = base + ".jsonl"
@@ -309,6 +311,12 @@ public actor AcceptanceRunner {
         try? Data((redacted.joined(separator: "\n") + "\n").utf8).write(to: URL(filePath: path), options: .atomic)
         state.providers[index].fixtures.append(name)
         return name
+    }
+
+    /// What survived the redaction and where (never the value).
+    static func discardReason(_ error: Error) -> String {
+        if case FixtureRedactor.Failure.privateValueRemains(let what) = error { return "privater Wert nach Redaktion (\(what))" }
+        return "privater Wert nach Redaktion"
     }
 
     func fixtureRedactor(_ run: ProviderRun) -> FixtureRedactor {
@@ -319,7 +327,13 @@ public actor AcceptanceRunner {
                 (folders.repoA, "<repo-a>"), (folders.repoB, "<repo-b>"), (folders.outside, "<outside>"), (folders.temporary, "<tmp>"),
                 (folders.root, "<run>"), (run.configDirectory, "<config>"), (run.nativePath, "<binary>"), (canaries["facts"]!, "<canary-facts>"),
                 (context.home, "<home>"),
-            ]
+            ],
+            // Not a dictionary literal: a host named like the user must not trap on a duplicate key.
+            labels: Dictionary([
+                (NSUserName(), "Benutzername"), (ProcessInfo.processInfo.hostName, "Rechnername"), (context.home, "Benutzerordner"),
+                (canaries["neighbour"]!, "Kanarienwert Nachbar"), (canaries["home"]!, "Kanarienwert Benutzerordner"),
+                (canaries["outside"]!, "Kanarienwert außen"), (canaries["env"]!, "Kanarienwert Umgebung"),
+            ]) { first, _ in first }
         )
     }
 

@@ -371,7 +371,8 @@ $out->({type => 'result', subtype => 'success', is_error => JSON::PP::false, usa
         recorder.errorSink("read \(canary)")
         #expect(await runner.storeFixture(0, step: .author) == "claude-?-author.jsonl")
         #expect(!FileManager.default.fileExists(atPath: folders.fixtures + "/claude-?-author-stderr.log"))
-        #expect(await runner.notes.contains("Fehlerausgabe verworfen: privater Wert nach Redaktion"))
+        #expect(await runner.notes.contains("Fehlerausgabe verworfen: privater Wert nach Redaktion (Kanarienwert Benutzerordner in Zeile 1)"))
+        #expect(await !runner.notes.joined().contains(canary))
 
         recorder.errorSink("only standard error")
         #expect(await runner.storeFixture(0, step: .cancel) == nil)
@@ -475,5 +476,38 @@ $out->({type => 'result', subtype => 'success', is_error => JSON::PP::false, usa
         var placeholders: [String: String] = [:]
         #expect(try redactor.redact("ERROR open /Users/someone/x: denied", placeholders: &placeholders) == "ERROR open <home>/x: denied")
         #expect(throws: FixtureRedactor.Failure.self) { try redactor.redact("user matzetest", placeholders: &placeholders) }
+    }
+
+    /// Fourth live run: four Claude recordings were discarded without a hint. The failure names
+    /// the kind, the line and where in the JSON, never the value.
+    @Test func aDiscardedRecordingSaysWhatAndWhereButNotTheValue() throws {
+        let redactor = FixtureRedactor(denylist: ["matzetest"], paths: [], labels: ["matzetest": "Benutzername"])
+        let lines = [
+            #"< {"type":"system","subtype":"init"}"#,
+            #"< {"type":"assistant","message":{"content":[{"type":"text","text":"Hallo matzetest"}]}}"#,
+        ]
+        #expect(throws: FixtureRedactor.Failure.privateValueRemains("Benutzername in Zeile 2, assistant: message.content[].text")) {
+            try redactor.redact(lines: lines)
+        }
+        // A key that is itself private is not named.
+        #expect(throws: FixtureRedactor.Failure.privateValueRemains("Benutzername in Zeile 1, result: ?")) {
+            try redactor.redact(lines: [#"< {"type":"result","matzetest":1}"#])
+        }
+        // Plain text lines and secrets.
+        #expect(throws: FixtureRedactor.Failure.privateValueRemains("Benutzername in Zeile 1")) {
+            try redactor.redact(lines: ["user matzetest"])
+        }
+        #expect(throws: FixtureRedactor.Failure.privateValueRemains("secret:assignment in Zeile 1, user: message.content[].content")) {
+            try redactor.redact(lines: [#"< {"type":"user","message":{"content":[{"content":"password = hunter2hunter2"}]}}"#])
+        }
+    }
+
+    /// Claude derives folder names from paths (`/Users/x/a b` → `-Users-x-a-b`); those are
+    /// replaced like the paths themselves.
+    @Test func pathsAreAlsoReplacedInTheirDashedForm() throws {
+        let redactor = FixtureRedactor(denylist: ["matzetest"], paths: [("/Users/matzetest/Library/Application Support/run", "<run>")])
+        var placeholders: [String: String] = [:]
+        let out = try redactor.redact("projects/-Users-matzetest-Library-Application-Support-run-data/x", placeholders: &placeholders)
+        #expect(out == "projects/<run>-data/x")
     }
 }

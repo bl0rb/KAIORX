@@ -11,9 +11,19 @@ public struct FixtureRedactor: Sendable {
     /// Replaced by a stable placeholder wherever they appear (home, worktree, temp folders).
     public var paths: [(String, String)]
 
-    public init(denylist: [String], paths: [(String, String)]) {
+    /// What a denylisted value is (for example "Benutzername"), named when a fixture is discarded.
+    public var labels: [String: String]
+
+    /// Each path is also replaced in its dashed form (every character except ASCII letters and
+    /// digits as `-`), as Claude Code names its project folders.
+    public init(denylist: [String], paths: [(String, String)], labels: [String: String] = [:]) {
         self.denylist = denylist.filter { $0.count >= 3 }
-        self.paths = paths.sorted { $0.0.count > $1.0.count }
+        self.labels = labels
+        let dashed = paths.compactMap { path, placeholder -> (String, String)? in
+            let form = String(path.map { $0.isASCII && ($0.isLetter || $0.isNumber) ? $0 : "-" })
+            return form == path || path.isEmpty ? nil : (form, placeholder)
+        }
+        self.paths = (paths + dashed).sorted { $0.0.count > $1.0.count }
     }
 
     public enum Failure: Error, Equatable, Sendable {
@@ -55,9 +65,45 @@ public struct FixtureRedactor: Sendable {
             text = text.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
         }
         let secrets = SecretScanner.ranges(text)
-        if !secrets.isEmpty { throw Failure.privateValueRemains("secret:\(secrets[0].kind)") }
-        if denylist.contains(where: { Self.containsToken($0, in: text) }) { throw Failure.privateValueRemains("denylist") }
+        if let first = secrets.first {
+            throw Failure.privateValueRemains("secret:\(first.kind)" + location(in: text) { !SecretScanner.ranges($0).isEmpty })
+        }
+        if let hit = denylist.first(where: { Self.containsToken($0, in: text) }) {
+            throw Failure.privateValueRemains((labels[hit] ?? "denylist") + location(in: text) { Self.containsToken(hit, in: $0) })
+        }
         return prefix + text
+    }
+
+    /// Where in a JSON line a check hits: the event type and the key path of the first string
+    /// (or key) it hits, as `", assistant: message.content[].text"`. Only keys that look like
+    /// protocol vocabulary and pass every check are named; others become `?`. Never the value.
+    func location(in text: String, hits: (String) -> Bool) -> String {
+        guard let data = text.data(using: .utf8), let json = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) else { return "" }
+        func safe(_ key: String) -> Bool {
+            key.range(of: #"^[A-Za-z_][A-Za-z0-9_]{0,40}$"#, options: .regularExpression) != nil && !hits(key)
+                && !denylist.contains { Self.containsToken($0, in: key) }
+        }
+        func search(_ value: Any, _ path: [String]) -> [String]? {
+            switch value {
+            case let object as [String: Any]:
+                for key in object.keys.sorted() {
+                    let name = safe(key) ? key : "?"
+                    if hits(key) { return path + [name] }
+                    if let found = search(object[key]!, path + [name]) { return found }
+                }
+                return nil
+            case let array as [Any]:
+                for element in array { if let found = search(element, path.isEmpty ? ["[]"] : path.dropLast() + [path.last! + "[]"]) { return found } }
+                return nil
+            case let string as String:
+                return hits(string) ? path : nil
+            default:
+                return nil
+            }
+        }
+        guard let path = search(json, []) else { return "" }
+        let type = ((json as? [String: Any])?["type"] as? String).flatMap { $0.range(of: #"^[a-z_]{1,30}$"#, options: .regularExpression) != nil ? $0 : nil }
+        return ", " + (type.map { "\($0): " } ?? "") + path.joined(separator: ".")
     }
 
     /// A denylisted literal as a whole token (a short user name like `kai` must not match `kaiorx`).
@@ -114,6 +160,12 @@ public struct FixtureRedactor: Sendable {
     /// Redacts all lines; any failure means no fixture at all.
     public func redact(lines: [String]) throws -> [String] {
         var placeholders: [String: String] = [:]
-        return try lines.map { try redact($0, placeholders: &placeholders) }
+        return try lines.enumerated().map { index, line in
+            do { return try redact(line, placeholders: &placeholders) } catch Failure.privateValueRemains(let what) {
+                // "Benutzername, assistant: …" → "Benutzername in Zeile 2, assistant: …"
+                let parts = what.split(separator: ",", maxSplits: 1)
+                throw Failure.privateValueRemains("\(parts[0]) in Zeile \(index + 1)" + (parts.count > 1 ? ",\(parts[1])" : ""))
+            }
+        }
     }
 }
