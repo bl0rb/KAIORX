@@ -268,127 +268,193 @@ extension Store {
 
     // MARK: Retrieval
 
-    /// Revisions in the reader's scope (task, project, global if allowed), active and not
-    /// expired (with `expired`, expired ones too); with a provider also granted for it (and the
-    /// reviewer provider) and allowed by the policy, and not stale.
-    func memoryReadSet(
-        _ db: SQLiteConnection, _ reader: MemoryReader, stale: Set<MemoryRevisionID>, grants: Bool, expired: Bool = false, now: Int64
-    ) throws -> [MemoryRevisionID: (MemoryScope, Int64, Bool)] {
-        let policy = try memoryPolicy(db, reader.projectID)
-        if grants, let provider = reader.provider {
-            guard policy.providers.contains(provider) else { return [:] }
-            if let reviewer = reader.reviewerProvider, !policy.providers.contains(reviewer) { return [:] }
+    /// The read set of a reader (ADR 0006 §4, §5) as SQL over `memory_revision r JOIN
+    /// memory_entry e`, so a retrieval checks only the revisions it touches (pins, FTS matches,
+    /// neighbours, contradictions) instead of loading every revision of the scope first.
+    ///
+    /// - In scope: active, and task (the reader's task in its project), project (the reader's
+    ///   project) or global (allowed by the policy, or the owner's own view); expired ones too.
+    /// - Usable: in scope, not expired, and for a provider reader also not stale and granted to
+    ///   the reader's project for the provider and the reviewer provider.
+    struct MemoryReadSet {
+        /// A condition with its parameters, in the order of its `?` placeholders.
+        struct Condition {
+            var sql: String
+            var values: [SQLValue]
         }
-        let rows = try db.query(
-            """
-            SELECT r.id, e.scope, r.confirmed_at, e.pinned FROM memory_revision r JOIN memory_entry e ON e.id = r.entry_id
-            WHERE r.state = 'active' AND (? = 1 OR r.valid_until IS NULL OR r.valid_until > ?)
-            AND ((e.scope = 'task' AND e.task_id = ? AND e.project_id = ?) OR (e.scope = 'project' AND e.project_id = ?)
-                OR (e.scope = 'global' AND ? = 1))
-            """,
-            [.integer(expired ? 1 : 0), .integer(now), .optional(reader.taskID?.uuidString), .text(reader.projectID.uuidString), .text(reader.projectID.uuidString),
-             .integer(policy.allowGlobal || reader.provider == nil ? 1 : 0)]
-        ) { (try parseID($0.requiredText(0)) as MemoryRevisionID, try parseEnum($0.requiredText(1)) as MemoryScope, $0.int(2), $0.int(3) == 1) }
-        var result: [MemoryRevisionID: (MemoryScope, Int64, Bool)] = [:]
-        for (id, scope, confirmed, pinned) in rows {
-            if grants, let provider = reader.provider {
-                if stale.contains(id) { continue }
-                for p in [provider] + (reader.reviewerProvider.map { [$0] } ?? []) {
-                    let granted = try !db.query(
-                        "SELECT 1 FROM memory_grant WHERE revision_id = ? AND target_project_id = ? AND provider = ? AND revoked_at IS NULL",
-                        [.text(id.uuidString), .text(reader.projectID.uuidString), .text(p.rawValue)]
-                    ) { $0.int(0) }.isEmpty
-                    if !granted { result[id] = nil; break }
-                    result[id] = (scope, confirmed, pinned)
-                }
-            } else {
-                result[id] = (scope, confirmed, pinned)
+
+        /// Active and in scope, expired ones included.
+        let inScope: Condition
+        /// What a revision in scope also needs to be usable (`1` when nothing).
+        let extra: Condition
+
+        /// nil when the reader may receive nothing: its provider or reviewer provider is not
+        /// allowed by the project's policy.
+        init?(_ policy: (allowGlobal: Bool, providers: Set<ProviderKind>, rev: Int), reader: MemoryReader, stale: Set<MemoryRevisionID>, now: Int64) throws {
+            let project = SQLValue.text(reader.projectID.uuidString)
+            var scopes = ["(e.scope = 'project' AND e.project_id = ?)"]
+            var scopeValues = [project]
+            if let task = reader.taskID {
+                scopes.append("(e.scope = 'task' AND e.task_id = ? AND e.project_id = ?)")
+                scopeValues += [.text(task.uuidString), project]
             }
+            if policy.allowGlobal || reader.provider == nil { scopes.append("e.scope = 'global'") }
+            inScope = Condition(sql: "r.state = 'active' AND (\(scopes.joined(separator: " OR ")))", values: scopeValues)
+            var parts = ["(r.valid_until IS NULL OR r.valid_until > ?)"]
+            var values: [SQLValue] = [.integer(now)]
+            if let provider = reader.provider {
+                guard policy.providers.contains(provider) else { return nil }
+                if let reviewer = reader.reviewerProvider, !policy.providers.contains(reviewer) { return nil }
+                if !stale.isEmpty {
+                    parts.append("r.id NOT IN (SELECT value FROM json_each(?))")
+                    values.append(.text(try Store.json(stale.map(\.uuidString).sorted())))
+                }
+                for p in Set([provider] + (reader.reviewerProvider.map { [$0] } ?? [])).sorted(by: { $0.rawValue < $1.rawValue }) {
+                    parts.append(
+                        "EXISTS (SELECT 1 FROM memory_grant g WHERE g.revision_id = r.id AND g.target_project_id = ? AND g.provider = ? AND g.revoked_at IS NULL)"
+                    )
+                    values += [project, .text(p.rawValue)]
+                }
+            }
+            extra = Condition(sql: parts.joined(separator: " AND "), values: values)
         }
-        return result
+
+        var usable: Condition { Condition(sql: "\(inScope.sql) AND \(extra.sql)", values: inScope.values + extra.values) }
+        /// In scope but not usable: such a revision withholds what it contradicts.
+        var blocking: Condition { Condition(sql: "\(inScope.sql) AND NOT (\(extra.sql))", values: inScope.values + extra.values) }
     }
 
-    /// Candidates for a context package: the read set, pins, FTS hits (at most 20 per scope, in
-    /// one query with the read-set filter), graph neighbours and withheld contradictions. The
-    /// `contradicts` rule holds for every excerpt (pin, hit, neighbour): a contradicting
-    /// revision in the scope set (expired ones included) that may not be used withholds it.
+    func memoryReadSet(_ db: SQLiteConnection, _ reader: MemoryReader, stale: Set<MemoryRevisionID>, now: Int64) throws -> MemoryReadSet? {
+        try MemoryReadSet(try memoryPolicy(db, reader.projectID), reader: reader, stale: stale, now: now)
+    }
+
+    /// Candidates for a context package: pins, FTS hits (at most 20 per scope, in one query with
+    /// the read-set filter), graph neighbours and withheld contradictions. The `contradicts` rule
+    /// holds for every excerpt (pin, hit, neighbour): a contradicting revision in the scope set
+    /// (expired ones included) that may not be used withholds it.
     public func memoryCandidates(_ reader: MemoryReader, query: String?, stale: Set<MemoryRevisionID>) throws -> RetrievalCandidates {
         let db = try connection()
         let now = currentTime()
         return try db.transaction {
-            let usable = try memoryReadSet(db, reader, stale: stale, grants: true, now: now)
-            let inScope = try memoryReadSet(db, reader, stale: [], grants: false, expired: true, now: now)
             var result = RetrievalCandidates()
-            let usableJSON = try Self.json(usable.keys.map(\.uuidString))
+            guard let readSet = try memoryReadSet(db, reader, stale: stale, now: now) else { return result }
+            let usable = readSet.usable
+            let blocking = readSet.blocking
             var contradicted: [MemoryRevisionID: Bool] = [:]
+            // The queries below fix their join order (CROSS JOIN): starting from the few FTS
+            // matches or edge ends, every read-set check is a key lookup. Left to itself, the
+            // planner may start from all entries of the project instead (no statistics), which
+            // made each per-hit edge query cost milliseconds at 10,000 revisions.
+            /// The other ends of a revision's edges of the given types, as a materialized CTE `o`.
+            func otherEnds(_ types: String) -> String {
+                """
+                WITH o(other) AS MATERIALIZED (
+                    SELECT to_revision_id FROM memory_edge WHERE from_revision_id = ? AND type IN (\(types))
+                    UNION ALL SELECT from_revision_id FROM memory_edge WHERE to_revision_id = ? AND type IN (\(types)))
+                """
+            }
             /// True (and recorded as withheld) when a contradicting in-scope revision is not usable.
             func withheld(_ revision: MemoryRevisionID) throws -> Bool {
                 if let known = contradicted[revision] { return known }
-                let others = try db.query(
+                let id = SQLValue.text(revision.uuidString)
+                let blocked = try !db.query(
                     """
-                    SELECT CASE WHEN from_revision_id = ? THEN to_revision_id ELSE from_revision_id END FROM memory_edge
-                    WHERE type = 'contradicts' AND (from_revision_id = ? OR to_revision_id = ?)
+                    \(otherEnds("'contradicts'"))
+                    SELECT 1 FROM o CROSS JOIN memory_revision r ON r.id = o.other CROSS JOIN memory_entry e ON e.id = r.entry_id
+                    WHERE \(blocking.sql) LIMIT 1
                     """,
-                    [.text(revision.uuidString), .text(revision.uuidString), .text(revision.uuidString)]
-                ) { try parseID($0.requiredText(0)) as MemoryRevisionID }
-                let blocked = others.contains { inScope[$0] != nil && usable[$0] == nil }
+                    [id, id] + blocking.values
+                ) { $0.int(0) }.isEmpty
                 contradicted[revision] = blocked
                 if blocked, !result.withheld.contains(revision) { result.withheld.append(revision) }
                 return blocked
             }
-            func firstChunk(_ revision: MemoryRevisionID, reason: SelectionReason) throws -> ExcerptCandidate? {
-                guard let info = usable[revision], try !withheld(revision) else { return nil }
+            /// A usable revision with its entry, scope and confirmation time.
+            typealias Usable = (revision: MemoryRevisionID, entry: MemoryEntryID, scope: MemoryScope, confirmedAt: Int64)
+            func usableRow(_ row: SQLRow) throws -> Usable {
+                (try parseID(row.requiredText(0)), try parseID(row.requiredText(1)), try parseEnum(row.requiredText(2)), row.int(3))
+            }
+            func firstChunk(_ info: Usable, reason: SelectionReason) throws -> ExcerptCandidate? {
+                guard try !withheld(info.revision) else { return nil }
                 return try db.query(
                     "SELECT rowid, byte_from, byte_to, body FROM memory_chunk WHERE revision_id = ? ORDER BY ordinal LIMIT 1",
-                    [.text(revision.uuidString)]
+                    [.text(info.revision.uuidString)]
                 ) { row in
                     ExcerptCandidate(
-                        chunkRowID: row.int(0), revisionID: revision, entryID: try Self.entryID(db, revision), scope: info.0, confirmedAt: info.1,
+                        chunkRowID: row.int(0), revisionID: info.revision, entryID: info.entry, scope: info.scope, confirmedAt: info.confirmedAt,
                         byteFrom: Int(row.int(1)), byteTo: Int(row.int(2)), reason: reason, digest: Canonical.sha256Hex(Data(try row.requiredText(3).utf8))
                     )
                 }.first
             }
-            for (revision, info) in usable.sorted(by: { $0.key.uuidString < $1.key.uuidString }) where info.2 {
-                if let pin = try firstChunk(revision, reason: .pin) { result.pins.append(pin) }
+            let pins = try db.query(
+                """
+                SELECT r.id, r.entry_id, e.scope, r.confirmed_at FROM memory_entry e CROSS JOIN memory_revision r ON r.entry_id = e.id
+                WHERE e.pinned = 1 AND \(usable.sql) ORDER BY r.id
+                """,
+                usable.values, usableRow
+            )
+            for info in pins {
+                if let pin = try firstChunk(info, reason: .pin) { result.pins.append(pin) }
             }
             guard let query, !query.isEmpty else { return result }
+            // The read-set filter applies before the 20-per-scope window, so revisions the reader
+            // may not use never take a slot; the body is read only for the rows that remain.
             let hits = try db.query(
                 """
                 WITH ranked AS MATERIALIZED (SELECT rowid AS fts_rowid, bm25(memory_fts) AS score FROM memory_fts WHERE memory_fts MATCH ?)
-                SELECT rowid, revision_id, byte_from, byte_to, score, body FROM (
-                    SELECT c.rowid AS rowid, c.revision_id AS revision_id, c.byte_from AS byte_from, c.byte_to AS byte_to, c.ordinal AS ordinal,
-                        c.body AS body, e.scope AS scope, ranked.score AS score,
+                SELECT w.rowid, w.revision_id, w.entry_id, w.scope, w.confirmed_at, c.byte_from, c.byte_to, w.score, c.body FROM (
+                    SELECT c.rowid AS rowid, c.revision_id AS revision_id, c.ordinal AS ordinal, r.entry_id AS entry_id, e.scope AS scope,
+                        r.confirmed_at AS confirmed_at, ranked.score AS score,
                         ROW_NUMBER() OVER (PARTITION BY e.scope ORDER BY ranked.score, c.revision_id, c.ordinal) AS n
                     FROM ranked
-                    JOIN memory_chunk c ON c.rowid = ranked.fts_rowid
-                    JOIN memory_revision r ON r.id = c.revision_id JOIN memory_entry e ON e.id = r.entry_id
-                    WHERE c.revision_id IN (SELECT value FROM json_each(?))
-                ) WHERE n <= 20
-                ORDER BY score, revision_id, ordinal
+                    CROSS JOIN memory_chunk c ON c.rowid = ranked.fts_rowid
+                    CROSS JOIN memory_revision r ON r.id = c.revision_id CROSS JOIN memory_entry e ON e.id = r.entry_id
+                    WHERE \(usable.sql)
+                ) w JOIN memory_chunk c ON c.rowid = w.rowid
+                WHERE w.n <= 20
+                ORDER BY w.score, w.revision_id, w.ordinal
                 """,
-                [.text(query), .text(usableJSON)]
+                [.text(query)] + usable.values
             ) { (row: SQLRow) in
-                (row.int(0), try parseID(row.requiredText(1)) as MemoryRevisionID, Int(row.int(2)), Int(row.int(3)), row.double(4), try row.requiredText(5))
+                (
+                    row.int(0), try parseID(row.requiredText(1)) as MemoryRevisionID, try parseID(row.requiredText(2)) as MemoryEntryID,
+                    try parseEnum(row.requiredText(3)) as MemoryScope, row.int(4), Int(row.int(5)), Int(row.int(6)), row.double(7), try row.requiredText(8)
+                )
             }
-            for (rowid, revision, from, to, score, body) in hits {
-                guard let info = usable[revision], try !withheld(revision) else { continue }
+            for (rowid, revision, entry, scope, confirmedAt, from, to, score, body) in hits {
+                guard try !withheld(revision) else { continue }
                 result.hits.append(ExcerptCandidate(
-                    chunkRowID: rowid, revisionID: revision, entryID: try Self.entryID(db, revision), scope: info.0, confirmedAt: info.1,
+                    chunkRowID: rowid, revisionID: revision, entryID: entry, scope: scope, confirmedAt: confirmedAt,
                     byteFrom: from, byteTo: to, score: score, reason: .lexical, digest: Canonical.sha256Hex(Data(body.utf8))
                 ))
+                guard result.neighbours[rowid] == nil else { continue }
                 // One neighbour over verifies/depends_on, itself usable and not withheld.
+                let id = SQLValue.text(revision.uuidString)
                 let neighbours = try db.query(
                     """
-                    SELECT CASE WHEN from_revision_id = ? THEN to_revision_id ELSE from_revision_id END AS other FROM memory_edge
-                    WHERE type IN ('verifies', 'depends_on') AND (from_revision_id = ? OR to_revision_id = ?) ORDER BY other
+                    \(otherEnds("'verifies', 'depends_on'"))
+                    SELECT r.id, r.entry_id, e.scope, r.confirmed_at FROM o
+                    CROSS JOIN memory_revision r ON r.id = o.other CROSS JOIN memory_entry e ON e.id = r.entry_id
+                    WHERE \(usable.sql) ORDER BY r.id
                     """,
-                    [.text(revision.uuidString), .text(revision.uuidString), .text(revision.uuidString)]
-                ) { try parseID($0.requiredText(0)) as MemoryRevisionID }
-                if result.neighbours[rowid] == nil, let neighbour = try neighbours.lazy.compactMap({ try firstChunk($0, reason: .graph) }).first {
+                    [id, id] + usable.values, usableRow
+                )
+                if let neighbour = try neighbours.lazy.compactMap({ try firstChunk($0, reason: .graph) }).first {
                     result.neighbours[rowid] = neighbour
                 }
             }
             return result
+        }
+    }
+
+    /// The first of `revisions` the reader may not use (in the given order), or nil.
+    func firstUnusable(_ db: SQLiteConnection, _ reader: MemoryReader, _ revisions: [MemoryRevisionID], stale: Set<MemoryRevisionID>, now: Int64) throws -> MemoryRevisionID? {
+        guard let usable = try memoryReadSet(db, reader, stale: stale, now: now)?.usable else { return revisions.first }
+        return try revisions.first { revision in
+            try db.query(
+                "SELECT 1 FROM memory_revision r CROSS JOIN memory_entry e ON e.id = r.entry_id WHERE r.id = ? AND \(usable.sql)",
+                [.text(revision.uuidString)] + usable.values
+            ) { $0.int(0) }.isEmpty
         }
     }
 
@@ -510,9 +576,8 @@ extension Store {
                 let reader = MemoryReader(
                     projectID: project, taskID: attempt.record.taskID, provider: manifest.provider, reviewerProvider: manifest.reviewerProvider
                 )
-                let usable = try memoryReadSet(db, reader, stale: stale, grants: true, now: now)
-                if let missing = manifest.items.first(where: { usable[$0.revisionID] == nil }) {
-                    return try refuse("revisionNotUsable:\(missing.revisionID.uuidString)")
+                if let missing = try firstUnusable(db, reader, manifest.items.map(\.revisionID), stale: stale, now: now) {
+                    return try refuse("revisionNotUsable:\(missing.uuidString)")
                 }
             }
             try db.run(
