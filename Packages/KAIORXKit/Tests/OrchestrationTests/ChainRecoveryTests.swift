@@ -48,6 +48,123 @@ import Testing
         #expect(try await harness.sh("git status --porcelain", in: harness.service.path(of: recovered)).contains("docs/"))
     }
 
+    // Review finding: `git add -A -- .` refuses an empty nested repository, which left the seal
+    // entry prepared and the task looping on re-seals that collided with the existing result ref.
+    @Test func aRecoveredSealWithAnEmptyNestedRepositoryCompletes() async throws {
+        var harness = try await ServiceHarness()
+        let (record, operation, commit) = try await interruptedSeal(
+            harness, "echo 'let a = 5' > src/a.swift && git init -q src/sub && mkdir docs && echo x > docs/out.md", allowed: ["src"]
+        )
+        try await harness.restart()
+
+        let report = try await harness.service.reconcile()
+        #expect(report.applied == [operation] && report.skipped.isEmpty && report.missingWorktrees.isEmpty)
+        let recovered = try await harness.service.worktree(record.id)
+        #expect(recovered.state == .frozen && recovered.sealStatus == .committed && recovered.resultOID == commit)
+        #expect(recovered.rejectedPaths == ["docs/out.md": "recoveredUnknown", "src/sub": "recoveredUnknown"])
+        #expect(try await harness.store.gitOperations(state: .prepared).isEmpty)
+        // Nothing re-seals it, and a second recovery has nothing left to do.
+        await #expect(throws: WorkspaceServiceError.worktreeNotReady(record.id, .frozen)) {
+            _ = try await harness.service.seal(record.id, allowedPrefixes: ["src"], message: "Ergebnis")
+        }
+        #expect(try await harness.service.reconcile().isEmpty)
+        #expect(try await harness.store.gitOperations(state: .needsAttention).isEmpty)
+    }
+
+    @Test func differencesListUnstageablePathsInsteadOfFailing() async throws {
+        let harness = try await ServiceHarness()
+        try await harness.sh("mkdir lib && echo b > lib/b.txt && git add -A && git commit -q -m lib")
+        let record = try await harness.service.prepareWorktree(projectID: harness.project, attemptID: nil, kind: .author, base: try await harness.head())
+        // A nested repository without a commit, and a tracked folder replaced by a symlink.
+        try await harness.sh("echo 'let a = 7' > src/a.swift && git init -q nested && rm -rf lib && ln -s src lib", in: harness.service.path(of: record))
+        let location = try await harness.service.location(of: record)
+        let base = try await harness.git.tree(of: record.baseOID, in: try await harness.git.inspect(harness.checkout))
+        #expect(try await harness.git.differences(of: location, from: base) == ["lib", "lib/b.txt", "nested", "src/a.swift"])
+    }
+
+    @Test func aRecoveredSealWhoseWorktreeIsGoneNeedsConfirmation() async throws {
+        var harness = try await ServiceHarness()
+        let (record, operation, commit) = try await interruptedSeal(harness, "echo 'let a = 5' > src/a.swift", allowed: ["src"])
+        try await harness.sh("rm -rf '\(harness.service.path(of: record))'")
+        // A worktree an earlier recovery flagged while it left the entry open.
+        let (flagged, flaggedOperation, flaggedCommit) = try await interruptedSeal(harness, "echo 'let a = 6' > src/a.swift", allowed: ["src"])
+        try await harness.sh("rm -rf '\(harness.service.path(of: flagged))'")
+        try await harness.store.transitionWorktree(flagged.id, to: .needsAttention)
+        try await harness.restart()
+
+        let report = try await harness.service.reconcile()
+        #expect(Set(report.applied) == [operation, flaggedOperation] && report.skipped.isEmpty)
+        #expect(Set(report.missingWorktrees) == [record.id, flagged.id])
+        let marker = [RejectionReason.unknownPathsMarker: RejectionReason.recoveredUnknown.rawValue]
+        for (id, result) in [(record.id, commit), (flagged.id, flaggedCommit)] {
+            let recovered = try await harness.service.worktree(id)
+            // Committed with its result, but what it dropped is unknown: building waits for the user.
+            #expect(recovered.sealStatus == .committed && recovered.resultOID == result && recovered.state == .needsAttention)
+            #expect(recovered.rejectedPaths == marker)
+        }
+        let details = try await harness.store.gitOperations(state: .applied).filter { $0.id == operation }.compactMap(\.detail)
+        #expect(details.count == 1 && details[0].contains("dropped paths unknown"))
+        #expect(try await harness.store.gitOperations(state: .prepared).isEmpty)
+        #expect(try await harness.service.reconcile().applied.isEmpty)
+    }
+
+    /// The chain's author ran; the seal's ref update happened, the database write did not.
+    func interruptedChainSeal(_ h: ChainHarness, _ key: String, _ script: String) async throws -> (TaskID, WorktreeID, String) {
+        let (task, attempt, treeID) = try await h.runPlanned(key, script)
+        let tree = try await h.service.worktree(treeID)
+        let outcome = try await h.git.buildResult(
+            of: try await h.service.location(of: tree), base: tree.baseOID, allowedPrefixes: ["src/\(key)"], message: "Ergebnis"
+        )
+        let commit = try #require(outcome.commit)
+        let ref = "refs/kaiorx/results/\(attempt.uuidString)"
+        _ = try await h.store.prepareRefUpdate(projectID: h.project, worktreeID: treeID, ref: ref, expectedOld: nil, desiredNew: commit)
+        try await h.sh("git update-ref \(ref) \(commit)")
+        return (task, treeID, commit)
+    }
+
+    @Test func theChainNeitherLoopsNorBuildsARecoveredSealWithANestedRepository() async throws {
+        var h = try await ChainHarness()
+        try await h.activate([planTask("A", writes: ["src/A"])])
+        let (task, tree, commit) = try await interruptedChainSeal(h, "A", "mkdir -p src/A && echo x > src/A/f && git init -q src/A/sub")
+        try await h.restart()
+
+        #expect(try await h.store.gitOperations(state: .prepared).isEmpty)
+        let chain = h.chain()
+        #expect(try await chain.check(task) == .undeclared(resultOID: commit, rejected: ["src/A/sub": "recoveredUnknown"]))
+        for _ in 0..<2 {
+            let report = await chain.step()
+            #expect(report.sealed.isEmpty && report.built.isEmpty && report.issues.isEmpty)
+        }
+        #expect(await chain.issue(task) == nil)
+        #expect(try await h.candidates().isEmpty)
+        #expect(try await h.store.gitOperations(state: .needsAttention).isEmpty)
+        #expect(try await h.store.worktree(tree)?.state == .frozen)
+    }
+
+    @Test func theChainBuildsARecoveredSealWithUnknownPathsOnlyAfterConfirmation() async throws {
+        var h = try await ChainHarness()
+        try await h.activate([planTask("A", writes: ["src/A"])])
+        let (task, tree, commit) = try await interruptedChainSeal(h, "A", "mkdir -p src/A && echo x > src/A/f")
+        try await h.sh("rm -rf '\(h.service.path(of: try await h.service.worktree(tree)))'")
+        try await h.restart()
+
+        let chain = h.chain()
+        let marker = [RejectionReason.unknownPathsMarker: RejectionReason.recoveredUnknown.rawValue]
+        #expect(try await chain.check(task) == .undeclared(resultOID: commit, rejected: marker))
+        let report = await chain.step()
+        #expect(report.sealed.isEmpty && report.built.isEmpty && report.issues.isEmpty)
+        await #expect(throws: IntegrationError.undeclaredChanges([RejectionReason.unknownPathsMarker])) {
+            _ = try await h.integration.buildCandidate(from: tree)
+        }
+        #expect(try await h.candidates().isEmpty)
+
+        guard case .built(let candidate) = try await chain.buildConfirmed(try await h.shown(chain, task)) else {
+            Issue.record("not built")
+            return
+        }
+        #expect(try await h.paths(of: try #require(candidate.candidateOID)).contains("src/A/f"))
+    }
+
     @Test func recoveryPinsACandidateBeforeItRemovesTheIntegrationWorktree() async throws {
         var h = try await IntegrationHarness()
         let (task, tree) = try await h.authorResult("echo eins > a.txt")
