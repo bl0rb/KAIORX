@@ -49,6 +49,7 @@ struct RootView: View {
             case .newJob(let project): NewJobSheet(project: project)
             case .decision(let decision): DecisionView(decision: decision)
             case .reject(let candidate): RejectSheet(candidate: candidate)
+            case .testProfiles(let project): TestProfilesSheet(project: project)
             }
         }
         .alert("Hinweis", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
@@ -89,6 +90,11 @@ struct MainView: View {
                 Button { if let project = model.selectedProject { model.sheet = .newJob(project) } } label: { Label("Neuer Auftrag", systemImage: "plus") }
                     .disabled(model.selectedProject == nil)
                     .accessibilityIdentifier("newJob")
+                Button { if let project = model.selectedProject { model.sheet = .testProfiles(project) } } label: {
+                    Label("Testprofile", systemImage: "checkmark.shield")
+                }
+                .disabled(model.selectedProject == nil)
+                .accessibilityIdentifier("testProfiles")
                 Menu {
                     if model.pending.isEmpty { Text("Nichts wartet auf dich") }
                     ForEach(model.pending) { decision in

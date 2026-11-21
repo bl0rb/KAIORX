@@ -187,6 +187,7 @@ struct CandidateReviewView: View {
                     Label("Diff gekürzt: Die Datei ist größer als die Anzeigegrenze.", systemImage: "scissors").foregroundStyle(.orange)
                 }
                 DiffLinesView(lines: lines)
+                CandidateTestsView(candidate: candidate)
                 ForEach(findings, id: \.id) { finding in
                     FindingRow(finding: finding)
                 }

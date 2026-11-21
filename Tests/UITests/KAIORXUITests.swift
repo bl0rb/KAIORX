@@ -7,13 +7,14 @@ import XCTest
 final class KAIORXUITests: XCTestCase {
     var app: XCUIApplication!
 
-    func launch(script: String = "success") {
+    func launch(script: String = "success", seed: String? = nil) {
         app = XCUIApplication()
         app.launchArguments = ["-KAIORXUITest"]
         app.launchEnvironment = [
             "KAIORX_UITEST_FOLDER": NSTemporaryDirectory() + "kaiorx-uitest-\(UUID().uuidString)",
             "KAIORX_UITEST_SCRIPT": script,
         ]
+        if let seed { app.launchEnvironment["KAIORX_UITEST_SEED"] = seed }
         app.launch()
     }
 
@@ -72,6 +73,55 @@ final class KAIORXUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Wenn du ablehnst"].waitForExistence(timeout: 5))
         app.buttons["decisionApprove"].click()
         XCTAssertTrue(app.descendants(matching: .any)["attemptStatus"].waitForExistence(timeout: 30))
+    }
+
+    /// ADR 0010: a test profile is added, confirmed from its full command (Return confirms
+    /// nothing), and „Tests ausführen“ runs it on a candidate.
+    func testAConfirmedProfileRunsTestsOnACandidate() {
+        launch(seed: "candidate")
+        let openProfiles = app.buttons["openTestProfiles"]
+        XCTAssertTrue(openProfiles.waitForExistence(timeout: 30), "no candidate without a confirmed profile")
+        XCTAssertFalse(app.buttons["runTests"].exists)
+        openProfiles.click()
+
+        let name = app.textFields["profileName"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.click()
+        name.typeText("Schnelltest")
+        let executable = app.textFields["profileExecutable"]
+        executable.click()
+        executable.typeText("/bin/sh")
+        let arguments = app.textViews["profileArguments"]
+        arguments.click()
+        arguments.typeText("-c\ntest -f LEERWERT.md")
+        app.buttons["proposeTestProfile"].click()
+
+        let confirm = app.buttons["confirmTestProfile-Schnelltest"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 10))
+        let status = app.descendants(matching: .any)["testProfileStatus-Schnelltest"]
+        XCTAssertEqual(status.label, "Nicht bestätigt")
+        confirm.click()
+        // The page names the full command; Return is the safe choice and confirms nothing.
+        let command = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Befehl: /bin/sh -c 'test -f LEERWERT.md'")).firstMatch
+        XCTAssertTrue(command.waitForExistence(timeout: 5))
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        XCTAssertEqual(status.label, "Nicht bestätigt")
+        confirm.click()
+        let approve = app.buttons["decisionApprove"]
+        XCTAssertTrue(approve.waitForExistence(timeout: 5))
+        approve.click()
+        XCTAssertTrue(confirm.waitForNonExistence(timeout: 10))
+        XCTAssertEqual(status.label, "Bestätigt")
+        app.buttons["closeTestProfiles"].click()
+
+        let run = app.buttons["runTests"]
+        XCTAssertTrue(run.waitForExistence(timeout: 10))
+        run.click()
+        let passed = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'Tests bestanden'")).firstMatch
+        XCTAssertTrue(passed.waitForExistence(timeout: 60))
+        let reviewing = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'Im Review'")).firstMatch
+        XCTAssertTrue(reviewing.waitForExistence(timeout: 10))
     }
 
     func testARunningAttemptIsInterruptedFromTheKeyboard() {
