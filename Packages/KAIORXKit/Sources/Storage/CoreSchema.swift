@@ -2,7 +2,7 @@
 /// consent, accounts, plans, worktrees, budgets, candidates and Git operations follow as new
 /// migrations with their packages; applied migrations are never edited.
 public enum CoreSchema {
-    public static let migrations: [Migration] = [v1, v2, v3, v4, v5, v6, v7, v8]
+    public static let migrations: [Migration] = [v1, v2, v3, v4, v5, v6, v7, v8, v9]
 
     static let v1 = Migration(version: 1, name: "core", sql: """
         CREATE TABLE project (
@@ -675,5 +675,31 @@ public enum CoreSchema {
     static let v8 = Migration(version: 8, name: "approvalExpiry", sql: """
         ALTER TABLE approval ADD COLUMN expires_at INTEGER;
         CREATE INDEX approval_state_expiry ON approval (state, expires_at);
+        """)
+
+    /// Stage 0.6 (ADR 0010): the per-project test profile registry. A confirmation names the
+    /// digest it confirmed; changed content must drop it (confirm again).
+    static let v9 = Migration(version: 9, name: "testProfiles", sql: """
+        CREATE TABLE test_profile (
+            id TEXT PRIMARY KEY NOT NULL,
+            project_id TEXT NOT NULL REFERENCES project(id),
+            name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 80),
+            executable TEXT NOT NULL CHECK (substr(executable, 1, 1) = '/'),
+            arguments_json TEXT NOT NULL DEFAULT '[]',
+            working_directory TEXT NOT NULL DEFAULT '.' CHECK (length(working_directory) > 0 AND substr(working_directory, 1, 1) <> '/'),
+            timeout_seconds INTEGER NOT NULL CHECK (timeout_seconds BETWEEN 1 AND 21600),
+            writes_worktree INTEGER NOT NULL CHECK (writes_worktree IN (0, 1)),
+            test_input_prefixes_json TEXT NOT NULL DEFAULT '[]',
+            digest TEXT NOT NULL CHECK (length(digest) = 64),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            confirmed_digest TEXT,
+            confirmed_at INTEGER,
+            confirmed_by TEXT CHECK (confirmed_by IS NULL OR length(confirmed_by) > 0),
+            UNIQUE (project_id, name),
+            CHECK ((confirmed_at IS NULL) = (confirmed_by IS NULL) AND (confirmed_at IS NULL) = (confirmed_digest IS NULL)),
+            -- A confirmation only ever covers the stored content.
+            CHECK (confirmed_digest IS NULL OR confirmed_digest = digest)
+        ) STRICT;
         """)
 }
