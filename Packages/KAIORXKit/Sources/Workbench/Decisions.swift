@@ -18,6 +18,16 @@ public enum PendingDecision: Sendable, Equatable, Hashable, Identifiable {
     case uncertain(AttemptID)
     /// A candidate in review with findings that need a decision.
     case findings(CandidateID)
+    /// A sealed result the driver does not build on its own (ADR 0011): undeclared paths, an
+    /// empty or already contained result, only rejected changes, or a missing plan task.
+    case result(TaskID)
+    /// A conflicted candidate whose conflicts wait for the user's resolution.
+    case conflicts(CandidateID)
+    /// A built candidate waiting for the user to run its tests (ADR 0010: nothing runs them
+    /// automatically).
+    case tests(CandidateID)
+    /// A candidate in review waiting for the user to start or import a review (ADR 0009 §8).
+    case review(CandidateID)
 
     public var id: String {
         switch self {
@@ -25,6 +35,10 @@ public enum PendingDecision: Sendable, Equatable, Hashable, Identifiable {
         case .task(let id, let reason): "task:\(id.uuidString):\(reason.kind.rawValue)"
         case .uncertain(let id): "uncertain:\(id.uuidString)"
         case .findings(let id): "findings:\(id.uuidString)"
+        case .result(let id): "result:\(id.uuidString)"
+        case .conflicts(let id): "conflicts:\(id.uuidString)"
+        case .tests(let id): "tests:\(id.uuidString)"
+        case .review(let id): "review:\(id.uuidString)"
         }
     }
 }
@@ -32,10 +46,21 @@ public enum PendingDecision: Sendable, Equatable, Hashable, Identifiable {
 public enum PendingDecisions {
     static let userKinds: Set<WaitReason.Kind> = [.userDecision, .awaitingUserStart, .consent]
 
+    /// Whether a result check leaves the next step to the user (ADR 0011).
+    public static func needsUser(_ check: ResultCheck) -> Bool {
+        switch check {
+        case .empty, .contained, .rejectedOnly, .undeclared, .planTaskMissing: true
+        case .notApplicable, .awaitingSeal, .buildable, .candidate: false
+        }
+    }
+
     /// Everything in `project` (or every project) that waits for the user, oldest first.
+    /// `resultCheck` is the candidate chain's check of a task's result (nil: not known, no
+    /// result decision).
     public static func collect(
         _ state: WorkspaceState, project: ProjectID?, gate: @Sendable (CandidateID) async throws -> [GateItem],
-        openFindings: @Sendable (CandidateID) async throws -> Bool
+        openFindings: @Sendable (CandidateID) async throws -> Bool,
+        resultCheck: @Sendable (TaskID) async throws -> ResultCheck? = { _ in nil }
     ) async throws -> [PendingDecision] {
         func inProject(_ job: JobID) -> Bool {
             guard let project else { return true }
@@ -49,12 +74,22 @@ public enum PendingDecisions {
                 result.append(.publish(candidate.id))
             } else if candidate.state == .reviewing, try await openFindings(candidate.id) {
                 result.append(.findings(candidate.id))
+            } else if candidate.state == .conflicted, let task = candidate.taskID.flatMap({ state.tasks[$0] }), task.state == .conflict {
+                result.append(.conflicts(candidate.id))
+            } else if candidate.state == .built, let task = candidate.taskID.flatMap({ state.tasks[$0] }), task.state == .verifying {
+                result.append(.tests(candidate.id))
+            } else if state.needsReview(candidate) {
+                result.append(.review(candidate.id))
             }
         }
         for task in state.tasks.values.sorted(by: { ($0.createdAt, $0.id.uuidString) < ($1.createdAt, $1.id.uuidString) })
         where inProject(task.jobID) {
             if let reason = task.waitReason.flatMap(WaitReason.init(stored:)), userKinds.contains(reason.kind) {
                 result.append(.task(task.id, reason))
+            }
+            // A held task is not offered: its result decisions need `resultReady`.
+            if task.state == .resultReady, state.openCandidate(of: task.id) == nil, let check = try await resultCheck(task.id), needsUser(check) {
+                result.append(.result(task.id))
             }
         }
         for attempt in state.attempts.values.sorted(by: { ($0.reservedAt, $0.id.uuidString) < ($1.reservedAt, $1.id.uuidString) })
@@ -83,6 +118,12 @@ public struct DecisionSheet: Sendable, Equatable {
     public var shown: ShownApproval?
     /// For a delivery branch: the job, name and integration state the sheet showed.
     public var delivery: ShownDelivery?
+    /// For a result decision: the task version, worktree and check the sheet showed.
+    public var result: ShownResult?
+    /// For a conflict resolution: the candidate version and paths the sheet showed.
+    public var conflicts: ShownConflicts?
+    /// For a review start: the option (provider, model, commit, version) the sheet showed.
+    public var review: ReviewOption?
 
     public var canApprove: Bool { blockers.isEmpty }
 
