@@ -176,11 +176,11 @@ extension WorkbenchActions {
     }
 
     /// Discards the shown result: grant first, then `needsChanges`; the attempt count restarts
-    /// (ADR 0011 §7). The grant comes first: after a crash in between the user repeats the
-    /// discard, while the reverse order could leave a `needsChanges` task nothing picks up.
+    /// (ADR 0011 §7). Runs through the chain under the task's lock (`CandidateChain.discard`),
+    /// which checks the shown state again and voids the grant if the task cannot move.
     /// Offered for plan tasks only (the scheduler only takes plan tasks).
     public func discardResult(_ shown: ShownResult) async throws {
-        _ = try requireChain()
+        let chain = try requireChain()
         guard let scheduler = services.scheduler else { throw ActionError.unavailable("Scheduler") }
         switch shown.check {
         case .notApplicable, .candidate: throw ChainActionError.nothingToDecide(shown.task)
@@ -188,11 +188,7 @@ extension WorkbenchActions {
         }
         let task = try await requireTask(shown.task)
         guard task.planKey != nil else { throw ChainActionError.notAPlanTask(task.id) }
-        // The task must still be exactly where the sheet saw it, with the same result.
-        let tree = try await currentAuthorAttempt(of: task)?.worktreeID
-        guard task.version == shown.taskVersion, task.state == .resultReady, tree == shown.worktree else { throw ChainError.shownStateChanged }
-        try await scheduler.grant(task.id, actor: WorkbenchActor.user)
-        try await store.execute(Command(.transitionTask(id: task.id, to: .needsChanges, expectedVersion: shown.taskVersion)))
+        try await chain.discard(shown) { try await scheduler.grant($0, actor: WorkbenchActor.user) }
     }
 
     /// Clears the task's build backoff, so the driver tries again on its next pass.

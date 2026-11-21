@@ -465,6 +465,10 @@ struct ChainHarness {
         #expect(try await chain.check(task) == .planTaskMissing)
         #expect(try await h.store.worktree(tree)?.sealStatus == nil)
         #expect(try await h.store.worktree(tree)?.state == .ready)
+        // Reported once: later passes leave the report empty (the app refreshes on every
+        // non-empty one), while the issue stays readable.
+        for _ in 0..<3 { #expect(await chain.step() == ChainReport()) }
+        #expect(await chain.issue(task) == .planTaskMissing)
     }
 
     // 11
@@ -534,12 +538,16 @@ struct ChainHarness {
         let fake = try #require(try await chain.reviewOptions(first.id).first { $0.provider == .fake })
         let attempt = try await chain.startReview(fake, candidate: first.id)
         _ = try await h.coordinator.waitUntilFinished(attempt)
+        let old = try #require(try await h.store.worktrees().first { $0.attemptID == attempt && $0.kind == .reviewer })
         // The target moves before the review is collected: the candidate is superseded and rebuilt.
         try await h.advanceTarget("echo z > z.txt")
         _ = try await h.store.transitionCandidate(first.id, to: .superseded, reason: "target moved", onlyFrom: [.reviewing])
         let rebuilt = await chain.step()
         let second = try #require(rebuilt.built.first)
         #expect(rebuilt.collected.isEmpty)
+        // No candidate waits for the old reviewer's review any more: its worktree goes.
+        #expect(rebuilt.removedReviewerTrees == [old.id])
+        #expect(try await h.store.worktree(old.id)?.state == .removed)
         try await h.passTests(second)
         let report = await chain.step()
         #expect(report.collected.isEmpty)
@@ -685,5 +693,238 @@ struct ChainHarness {
         #expect(try await h.store.candidate(candidate.id)?.state == .accepted)
         // `startReview` re-reads the options (information only); `step` asked nothing.
         #expect(gate.count == asked * 2)
+    }
+
+    // 21: a removal Git refuses is tried once, not on every pass.
+    @Test func aRefusedReviewerTreeRemovalIsNotRepeated() async throws {
+        let h = try await ChainHarness()
+        let chain = h.chain()
+        let candidate = try await h.reviewingCandidate(chain)
+        h.reviewer.set(.crash)
+        let fake = try #require(try await chain.reviewOptions(candidate.id).first { $0.provider == .fake })
+        let attempt = try await chain.startReview(fake, candidate: candidate.id)
+        _ = try await h.coordinator.waitUntilFinished(attempt)
+        let tree = try #require(try await h.store.worktrees().first { $0.attemptID == attempt && $0.kind == .reviewer })
+        // Someone unlocked the worktree: it no longer looks like ours, Git's removal is refused.
+        try await h.sh("git worktree unlock -- '\(h.service.path(of: tree))'")
+        let first = await chain.step()
+        #expect(first.removedReviewerTrees.isEmpty)
+        #expect(try await h.store.worktree(tree.id)?.state == .needsAttention)
+        #expect(try await h.store.gitOperations(state: .failed).count == 1)
+        let events = try await h.store.eventHeaders(after: 0, limit: 100_000).count
+        for _ in 0..<3 { #expect(await chain.step() == ChainReport()) }
+        #expect(try await h.store.gitOperations(state: .failed).count == 1)
+        #expect(try await h.store.eventHeaders(after: 0, limit: 100_000).count == events)
+    }
+
+    // 22: the store can show a reviewer's end before its process exited.
+    @Test func aFailedReviewersTreeStaysWhileItsStreamIsLive() async throws {
+        let h = try await ChainHarness()
+        let flag = StreamFlag(false)
+        let chain = h.chain(streaming: { _ in flag.live })
+        let candidate = try await h.reviewingCandidate(chain)
+        h.reviewer.set(.crash)
+        flag.set(true)
+        let fake = try #require(try await chain.reviewOptions(candidate.id).first { $0.provider == .fake })
+        let attempt = try await chain.startReview(fake, candidate: candidate.id)
+        _ = try await h.coordinator.waitUntilFinished(attempt)
+        #expect(try await h.store.attempt(attempt)?.state == .failed)
+        let tree = try #require(try await h.store.worktrees().first { $0.attemptID == attempt && $0.kind == .reviewer })
+        #expect(await chain.step().removedReviewerTrees.isEmpty)
+        #expect(try await h.store.worktree(tree.id)?.state != .removed)
+        flag.set(false)
+        #expect(await chain.step().removedReviewerTrees == [tree.id])
+        #expect(try await h.store.worktree(tree.id)?.state == .removed)
+    }
+
+    // 23: a succeeded reviewer whose candidate ended before the collect leaves no worktree behind.
+    @Test func aFinishedReviewerOfARejectedCandidateIsRemoved() async throws {
+        let h = try await ChainHarness()
+        let flag = StreamFlag(false)
+        let chain = h.chain(streaming: { _ in flag.live })
+        let candidate = try await h.reviewingCandidate(chain)
+        // The reviewer's stream counts as live: nothing collects it yet.
+        flag.set(true)
+        let fake = try #require(try await chain.reviewOptions(candidate.id).first { $0.provider == .fake })
+        let attempt = try await chain.startReview(fake, candidate: candidate.id)
+        _ = try await h.coordinator.waitUntilFinished(attempt)
+        #expect(try await h.store.attempt(attempt)?.state == .succeeded)
+        let tree = try #require(try await h.store.worktrees().first { $0.attemptID == attempt && $0.kind == .reviewer })
+        var report = await chain.step()
+        #expect(report.collected.isEmpty && report.removedReviewerTrees.isEmpty)
+        try await h.integration.rejectCandidate(candidate.id, reason: "abgelehnt")
+        // Still live: the tree stays until the stream ended.
+        #expect(await chain.step().removedReviewerTrees.isEmpty)
+        flag.set(false)
+        report = await chain.step()
+        #expect(report.removedReviewerTrees == [tree.id])
+        #expect(report.collected.isEmpty)
+        #expect(try await h.store.worktree(tree.id)?.state == .removed)
+        #expect(try await h.store.reviews(candidate: candidate.id).isEmpty)
+    }
+
+    // 24: a refused collect of a task in verification stays readable and is retried on request.
+    @Test func aRefusedCollectStaysVisibleUntilRetried() async throws {
+        let h = try await ChainHarness()
+        let chain = h.chain()
+        let candidate = try await h.reviewingCandidate(chain)
+        let taskID = try #require(candidate.taskID)
+        let fake = try #require(try await chain.reviewOptions(candidate.id).first { $0.provider == .fake })
+        let attempt = try await chain.startReview(fake, candidate: candidate.id)
+        _ = try await h.coordinator.waitUntilFinished(attempt)
+        // Reading the candidate's changes fails once: the collect is refused.
+        let zero = String(repeating: "0", count: 40)
+        try await h.store.chainTestRun("UPDATE candidate SET previous_target_oid = ? WHERE id = ?", [.text(zero), .text(candidate.id.uuidString)])
+        var report = await chain.step()
+        guard case .collectFailed? = report.issues[taskID] else { Issue.record("no collect failure: \(report)"); return }
+        #expect(try await h.store.task(taskID)?.state == .verifying)
+        guard case .collectFailed? = await chain.issue(taskID) else { Issue.record("issue not readable"); return }
+        // Neither retried nor reported again on its own.
+        #expect(await chain.step() == ChainReport())
+        try await h.store.chainTestRun(
+            "UPDATE candidate SET previous_target_oid = ? WHERE id = ?", [.text(candidate.previousTargetOID), .text(candidate.id.uuidString)]
+        )
+        #expect(await chain.step().collected.isEmpty)
+        guard case .collectFailed? = await chain.issue(taskID) else { Issue.record("issue lost"); return }
+        await chain.retryBuild(taskID)
+        #expect(await chain.issue(taskID) == nil)
+        report = await chain.step()
+        #expect(report.collected.count == 1)
+        #expect(try await h.store.candidate(candidate.id)?.state == .accepted)
+        #expect(await chain.issue(taskID) == nil)
+    }
+
+    // 24b: the refused collect's issue clears once no candidate waits for that reviewer.
+    @Test func aRefusedCollectClearsOnceItsCandidateEnded() async throws {
+        let h = try await ChainHarness()
+        let chain = h.chain()
+        let candidate = try await h.reviewingCandidate(chain)
+        let taskID = try #require(candidate.taskID)
+        let fake = try #require(try await chain.reviewOptions(candidate.id).first { $0.provider == .fake })
+        let attempt = try await chain.startReview(fake, candidate: candidate.id)
+        _ = try await h.coordinator.waitUntilFinished(attempt)
+        let zero = String(repeating: "0", count: 40)
+        try await h.store.chainTestRun("UPDATE candidate SET previous_target_oid = ? WHERE id = ?", [.text(zero), .text(candidate.id.uuidString)])
+        _ = await chain.step()
+        guard case .collectFailed? = await chain.issue(taskID) else { Issue.record("no collect failure"); return }
+        try await h.store.chainTestRun(
+            "UPDATE candidate SET previous_target_oid = ? WHERE id = ?", [.text(candidate.previousTargetOID), .text(candidate.id.uuidString)]
+        )
+        // Superseded without a target move: the task stays in verification, nothing is rebuilt.
+        _ = try await h.store.transitionCandidate(candidate.id, to: .superseded, reason: "test", onlyFrom: [.reviewing])
+        let report = await chain.step()
+        #expect(report.built.isEmpty)
+        #expect(try await h.store.task(taskID)?.state == .verifying)
+        #expect(await chain.issue(taskID) == nil)
+    }
+
+    // 25: a discard holds the task's lock; the driver builds nothing meanwhile.
+    @Test func aDiscardHoldsTheTaskAgainstTheDriver() async throws {
+        let h = try await ChainHarness()
+        try await h.activate([planTask("A", writes: ["src/A"])])
+        let (task, _, tree) = try await h.runPlanned("A", "mkdir -p src/A && echo x > src/A/f")
+        _ = try await h.service.seal(tree, allowedPrefixes: ["src/A"], message: "r")
+        let chain = h.chain()
+        let shown = try await h.shown(chain, task)
+        guard case .buildable = shown.check else { Issue.record("not buildable: \(shown.check)"); return }
+        let (entered, enteredSignal) = AsyncStream.makeStream(of: Void.self)
+        let (proceed, proceedSignal) = AsyncStream.makeStream(of: Void.self)
+        let scheduler = h.scheduler()
+        async let discarded: Void = chain.discard(shown) { id in
+            enteredSignal.yield()
+            for await _ in proceed { break }
+            try await scheduler.grant(id, actor: "user")
+        }
+        for await _ in entered { break }
+        // The discard is between its check and its move: the driver's build waits.
+        let report = await chain.step()
+        #expect(report.built.isEmpty && report.issues.isEmpty)
+        #expect(try await h.merges() == 0)
+        await #expect(throws: ChainError.busy(task)) { try await chain.discard(shown) { _ in } }
+        proceedSignal.yield()
+        try await discarded
+        #expect(try await h.store.task(task)?.state == .needsChanges)
+        #expect(await chain.step().built.isEmpty)
+        #expect(try await h.merges() == 0)
+        #expect(try await h.candidates().isEmpty)
+    }
+
+    // 26: a discard whose move fails leaves no grant in effect.
+    @Test func aDiscardThatCannotMoveVoidsItsGrant() async throws {
+        let h = try await ChainHarness()
+        try await h.activate([planTask("A", writes: ["src/A"])])
+        let (task, _, _) = try await h.runPlanned("A", "mkdir -p docs && echo y > docs/g")
+        let chain = h.chain()
+        _ = await chain.step()
+        let shown = try await h.shown(chain, task)
+        guard case .rejectedOnly = shown.check else { Issue.record("not rejected only: \(shown.check)"); return }
+        let scheduler = h.scheduler()
+        let store = h.store
+        await #expect(throws: ChainError.shownStateChanged) {
+            try await chain.discard(shown) { id in
+                try await scheduler.grant(id, actor: "user")
+                // Another writer moves the task between the grant and the move (a hold).
+                let version = try #require(try await store.task(id)).version
+                try await store.execute(Command(.transitionTask(id: id, to: .blocked, expectedVersion: version)))
+            }
+        }
+        #expect(try await h.store.task(task)?.state == .blocked)
+        let grants = try await h.store.decisions(task: task).filter { $0.rule == "userGrant" }
+        #expect(grants.count == 2)
+        // The latest grant, the one the scheduler reads, counts from the start again.
+        #expect(grants.last?.outcome == "voided")
+        #expect(grants.last?.evidence["afterOrdinal"] == "0")
+        #expect(grants.last?.evidence["voids"] == grants.first?.id.uuidString)
+    }
+
+    /// A result writing two paths the integration state also wrote: a conflicted candidate.
+    private func twoConflicts(_ h: ChainHarness, _ chain: CandidateChain) async throws -> (CandidateRecord, String, [ConflictEntry]) {
+        try await h.activate([planTask("A", writes: ["src/A"])])
+        _ = try await h.runPlanned("A", "mkdir -p src/A && echo ergebnis > src/A/f && echo ergebnis > src/A/g")
+        try await h.advanceTarget("mkdir -p src/A && echo ziel > src/A/f && echo ziel > src/A/g")
+        let id = try #require(await chain.step().conflicted.first)
+        let candidate = try #require(try await h.store.candidate(id))
+        let tree = try await h.service.worktree(try #require(candidate.worktreeID))
+        let entries = try await chain.conflictDetails(id)
+        #expect(entries.map(\.path) == ["src/A/f", "src/A/g"])
+        return (candidate, h.service.path(of: tree), entries)
+    }
+
+    // 27: a resolution interrupted after staging some paths can be decided again in full.
+    @Test func anInterruptedResolutionCanBeResolvedAgain() async throws {
+        let h = try await ChainHarness()
+        let chain = h.chain()
+        let (candidate, path, before) = try await twoConflicts(h, chain)
+        // The earlier call staged one path, then the app ended.
+        try await h.sh("git checkout --theirs -- src/A/f && git add src/A/f", in: path)
+        #expect(try await h.sh("git ls-files -u", in: path).contains("src/A/g"))
+        #expect(!(try await h.sh("git ls-files -u", in: path)).contains("src/A/f"))
+        // Every recorded path is still shown, with its kind.
+        let entries = try await chain.conflictDetails(candidate.id)
+        #expect(entries == before)
+        let shown = ShownConflicts(candidate: candidate.id, version: candidate.version, paths: entries.map(\.path))
+        let built = try await chain.resolveConflicts(shown, ["src/A/f": .ours, "src/A/g": .theirs])
+        #expect(built.state == .built)
+        let oid = try #require(built.candidateOID)
+        // The decision made now counts, not what the interrupted call staged.
+        #expect(try await h.sh("git show \(oid):src/A/f") == "ziel")
+        #expect(try await h.sh("git show \(oid):src/A/g") == "ergebnis")
+        #expect(try await h.store.task(try #require(candidate.taskID))?.state == .verifying)
+    }
+
+    // 28: a resolution that committed before the candidate moved on is taken over.
+    @Test func aResolutionCommittedBeforeAnInterruptionIsReused() async throws {
+        let h = try await ChainHarness()
+        let chain = h.chain()
+        let (candidate, path, before) = try await twoConflicts(h, chain)
+        try await h.sh("git checkout --theirs -- src/A/f src/A/g && git add src/A && git commit -q --no-edit", in: path)
+        let head = try await h.sh("git rev-parse HEAD", in: path)
+        #expect(try await h.sh("git ls-files -u", in: path).isEmpty)
+        let entries = try await chain.conflictDetails(candidate.id)
+        #expect(entries == before)
+        let shown = ShownConflicts(candidate: candidate.id, version: candidate.version, paths: entries.map(\.path))
+        let built = try await chain.resolveConflicts(shown, ["src/A/f": .theirs, "src/A/g": .theirs])
+        #expect(built.state == .built)
+        #expect(built.candidateOID == head)
     }
 }
