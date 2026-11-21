@@ -20,6 +20,10 @@ public enum FixturePrograms {
         case waitForInterrupt
         /// Prints its start and end time around a pause, for overlap checks.
         case timestamped(seconds: Double)
+        /// Prints its start time, waits until `file` exists (at most 120 s), then prints its end
+        /// time: a test opens the gate only after every run has started, so the overlap holds
+        /// however slowly a busy machine starts the processes.
+        case timestampedUntil(file: String)
         /// Ignores SIGINT and SIGTERM, then waits (only SIGKILL ends it).
         case ignoreInterrupts
     }
@@ -47,6 +51,10 @@ public enum FixturePrograms {
                 body += "$SIG{INT} = 'IGNORE'; $SIG{TERM} = 'IGNORE'; while (1) { sleep(0.05); }\n"
             case .timestamped(let seconds):
                 body += "open(my $t, '>>', \"$tmp/times\"); printf $t \"%.3f\\n\", time; sleep(\(seconds)); printf $t \"%.3f\\n\", time; close $t;\n"
+            case .timestampedUntil(let file):
+                body += "{ open(my $t, '>>', \"$tmp/times\"); printf $t \"%.3f\\n\", time; close $t; "
+                    + "my $w = 0; while (!-e \(perlString(file)) && $w < 6000) { sleep(0.02); $w++; } "
+                    + "open($t, '>>', \"$tmp/times\"); printf $t \"%.3f\\n\", time; close $t; }\n"
             }
         }
         return """
@@ -89,7 +97,9 @@ public enum FixturePrograms {
         case widenedChange
     }
 
-    public static func codex(_ scenario: CodexScenario, file: String = "codex.txt", pauseSeconds: Double = 0) -> String {
+    /// `pauseUntil`: like `pauseSeconds`, but the pause lasts until that file exists (at most
+    /// 120 s; see `ClaudeStep.timestampedUntil`).
+    public static func codex(_ scenario: CodexScenario, file: String = "codex.txt", pauseSeconds: Double = 0, pauseUntil: String? = nil) -> String {
         """
         #!/usr/bin/perl
         use strict; use warnings; use JSON::PP; use Time::HiRes qw(sleep time);
@@ -144,6 +154,12 @@ public enum FixturePrograms {
                     next;
                 }
                 if (\(pauseSeconds) > 0) { open(my $t, '>>', "$tmp/times"); printf $t "%.3f\\n", time; sleep(\(pauseSeconds)); printf $t "%.3f\\n", time; close $t; }
+                my $gate = \(perlString(pauseUntil ?? ""));
+                if ($gate ne '') {
+                    open(my $t, '>>', "$tmp/times"); printf $t "%.3f\\n", time; close $t;
+                    my $w = 0; while (!-e $gate && $w < 6000) { sleep(0.02); $w++; }
+                    open($t, '>>', "$tmp/times"); printf $t "%.3f\\n", time; close $t;
+                }
                 my $target = $scenario eq 'outsideChange' ? '../escape.txt' : '\(file)';
                 my $change = {type => 'fileChange', id => 'fc-1', status => 'inProgress', changes => [{path => $target, kind => {type => 'add'}, diff => "+codex\\n"}]};
                 note('item/started', {threadId => $thread, turnId => $turn, startedAtMs => 3, item => $change});

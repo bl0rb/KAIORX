@@ -19,6 +19,10 @@ import Testing
         let layout = harness.layout
         let claudeState = root + "/claude-config"
         let codexState = root + "/codex-home"
+        // Each run waits for a gate in its own (readable) state folder; the test opens both only
+        // after both runs have started, so the overlap does not depend on machine load.
+        let claudeGate = claudeState + "/go", codexGate = codexState + "/go"
+        for state in [claudeState, codexState] { try FileManager.default.createDirectory(atPath: state, withIntermediateDirectories: true) }
         func confinement(_ state: String, files: [String], keychain: Bool) -> @Sendable (AttemptSpec, String) -> Confinement? {
             { spec, temporary in
                 RoleProfile.agentCLI(stateDirectory: state, writesWorktree: spec.role == .author, protectedStateFiles: files, needsKeychain: keychain).confinement(
@@ -30,7 +34,7 @@ import Testing
             configuration: ClaudeCodeConfiguration(
                 executable: try FixturePrograms.makeExecutable(FixturePrograms.claude([
                     .emit(["type": "system", "subtype": "init", "session_id": "s-claude"]),
-                    .timestamped(seconds: 0.4),
+                    .timestampedUntil(file: claudeGate),
                     .writeFile("claude.txt", "von claude\n"),
                     .emit(["type": "result", "subtype": "success", "is_error": false]),
                 ]), in: root, name: "claude"),
@@ -41,7 +45,7 @@ import Testing
         )
         let codex = CodexAppServerAdapter(
             configuration: CodexConfiguration(
-                executable: try FixturePrograms.makeExecutable(FixturePrograms.codex(.success, pauseSeconds: 0.4), in: root, name: "codex"),
+                executable: try FixturePrograms.makeExecutable(FixturePrograms.codex(.success, pauseUntil: codexGate), in: root, name: "codex"),
                 codexHome: codexState, temporaryRoot: layout.runsRoot, home: root, policy: .fixtureTesting,
                 confinement: confinement(codexState, files: RoleProfile.codexStateFiles, keychain: false), stopGrace: .seconds(1)
             ),
@@ -70,6 +74,12 @@ import Testing
             Issue.record("not started: \(claudeStart) / \(codexStart)")
             return
         }
+        func started(_ attempt: AttemptID) -> Bool {
+            ((try? String(contentsOfFile: layout.runsRoot + "/\(attempt.uuidString)/times", encoding: .utf8)) ?? "").contains("\n")
+        }
+        for _ in 0..<1_200 where !(started(claudeAttempt) && started(codexAttempt)) { try await Task.sleep(for: .milliseconds(50)) }
+        #expect(started(claudeAttempt) && started(codexAttempt), "a run never reached its turn")
+        for gate in [claudeGate, codexGate] { #expect(FileManager.default.createFile(atPath: gate, contents: Data()), "gate \(gate)") }
         #expect(try await coordinator.waitUntilFinished(claudeAttempt)?.state == .succeeded)
         #expect(try await coordinator.waitUntilFinished(codexAttempt)?.state == .succeeded)
         #expect(try await harness.store.attempt(codexAttempt)?.sessionHandle == "thr-1")
