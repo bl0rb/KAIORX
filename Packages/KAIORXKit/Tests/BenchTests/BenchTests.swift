@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import Bench
+import Workbench
 
 /// The harness itself at small sizes: every scenario runs, measures what it claims and reports
 /// honestly. The figures of the plan come from `kaiorx-bench --full` in a release build.
@@ -37,11 +38,20 @@ import Testing
         #expect(timelineCount + notListed == 15)
     }
 
-    @Test func replayReportsThatTheTimelineReadsEveryDelta() async throws {
-        let results = try await ReplayBench.run(.init(deltas: 120, repeats: 1))
-        let read = try #require(results.first { $0.metric == "events the timeline reads" })
-        #expect((read.value ?? 0) >= 122)  // started, 120 deltas, completed, plus state changes
-        #expect(read.verdict == .missed)
+    @Test func replayOpensTheLastViewWithoutReadingEveryDelta() async throws {
+        // The app's path at a twentieth of its sizes: pages of 25, open up to 50 events.
+        let limits = TimelinePaging.Limits(pageSize: 25, openRows: 30, openEvents: 50)
+        let results = try await ReplayBench.run(.init(deltas: 400, repeats: 1, limits: limits))
+        let full = try #require(results.first { $0.metric == "events a full history load reads" }?.value)
+        #expect(full >= 402)  // started, 400 deltas, completed, plus state changes
+        let read = try #require(results.first { $0.metric == "events the last view reads" })
+        #expect(read.value == 50 && read.verdict == .met)
+        #expect(results.first { $0.metric == "last-view rows unlike the full history" }?.verdict == .met)
+        #expect(results.first { $0.metric == "monitor: last view on selection" }?.stats?.count == 1)
+        #expect(results.first { $0.metric == "monitor: full history (comparison)" }?.stats?.count == 1)
+        // A run shorter than the opening limits is read whole: that is no saving.
+        let short = try await ReplayBench.run(.init(deltas: 20, repeats: 1, limits: limits))
+        #expect(short.first { $0.metric == "events the last view reads" }?.verdict == .missed)
     }
 
     @Test func approvalAndStopAreMeasuredWhileTwoRunsStream() async throws {
