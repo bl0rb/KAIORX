@@ -87,6 +87,10 @@ struct DecisionView: View {
                 scope: ["Kandidat \(Labels.short(candidate.candidateOID ?? "–"))"], ifRejected: "Der Kandidat bleibt im Review.",
                 approveLabel: "Zur Review-Ansicht", rejectLabel: "Später", reported: nil, blockers: [], shown: nil
             )
+        case .result, .conflicts, .tests, .review:
+            // These have their own sheets (`AppModel.open`); a stale route closes and reopens there.
+            dismiss()
+            model.open(decision)
         }
     }
 
@@ -108,6 +112,8 @@ struct DecisionView: View {
             case .uncertain(let id): try await actions.closeUncertain(id)
             case .findings(let id):
                 await MainActor.run { model.selectedTask = state.candidates[id]?.taskID }
+            case .result, .conflicts, .tests, .review:
+                break
             }
         }
         dismiss()
@@ -187,7 +193,13 @@ struct CandidateReviewView: View {
                     Label("Diff gekürzt: Die Datei ist größer als die Anzeigegrenze.", systemImage: "scissors").foregroundStyle(.orange)
                 }
                 DiffLinesView(lines: lines)
+                if candidate.state == .conflicted {
+                    CandidateConflictsView(candidate: candidate)
+                }
                 CandidateTestsView(candidate: candidate)
+                if candidate.state == .reviewing || candidate.state == .accepted {
+                    CandidateReviewStatusView(candidate: candidate)
+                }
                 ForEach(findings, id: \.id) { finding in
                     FindingRow(finding: finding)
                 }

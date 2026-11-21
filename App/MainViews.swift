@@ -52,6 +52,10 @@ struct RootView: View {
             case .testProfiles(let project): TestProfilesSheet(project: project)
             case .deliver(let job): DeliverBranchSheet(job: job)
             case .revert(let candidate): RevertSheet(candidate: candidate)
+            case .result(let task, let discard): ResultSheet(task: task, discard: discard)
+            case .resolveConflicts(let candidate): ResolveConflictsSheet(candidate: candidate)
+            case .startReview(let candidate): StartReviewSheet(candidate: candidate)
+            case .importReview(let candidate): ImportReviewSheet(candidate: candidate)
             }
         }
         .alert("Hinweis", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
@@ -100,7 +104,7 @@ struct MainView: View {
                 Menu {
                     if model.pending.isEmpty { Text("Nichts wartet auf dich") }
                     ForEach(model.pending) { decision in
-                        Button(model.title(of: decision)) { model.sheet = .decision(decision) }
+                        Button(model.title(of: decision)) { model.open(decision) }
                     }
                 } label: {
                     Label("Entscheidungen (\(model.pending.count))", systemImage: model.pending.isEmpty ? "hand.raised" : "hand.raised.fill")
@@ -140,6 +144,8 @@ struct SidebarView: View {
         }
         .onChange(of: model.selectedJob) { _, job in
             if let job, let project = model.state.jobs[job]?.projectID { model.selectedProject = project }
+            // A task chosen together with its job (`AppModel.show(task:)`) stays selected.
+            if let task = model.selectedTask, let job, model.state.tasks[task]?.jobID == job { return }
             model.selectedTask = nil
         }
         .navigationSplitViewColumnWidth(min: 200, ideal: 240)
@@ -221,6 +227,9 @@ struct TaskDetailView: View {
                             }
                         }
                     }
+                }
+                if ResultBox.applies(to: task), model.state.openCandidate(of: task.id) == nil {
+                    ResultBox(task: task)
                 }
                 if let candidate = model.candidate(for: task.id) {
                     CandidateReviewView(candidate: candidate)
@@ -426,8 +435,17 @@ extension AppModel {
         case .publish(let id): "Veröffentlichen: \(state.candidates[id].flatMap { $0.taskID }.flatMap { state.tasks[$0]?.title } ?? "Kandidat")"
         case .task(let id, let reason): "\(state.tasks[id]?.title ?? "Aufgabe"): \(Labels.wait(reason).text)"
         case .uncertain(let id): "Ungeklärter Lauf: \(state.attempts[id].flatMap { state.tasks[$0.taskID]?.title } ?? "")"
-        case .findings(let id): "Befunde entscheiden: \(state.candidates[id].flatMap { $0.taskID }.flatMap { state.tasks[$0]?.title } ?? "")"
+        case .findings(let id): "Befunde entscheiden: \(taskTitle(of: id))"
+        case .result(let id): "Ergebnis entscheiden: \(state.tasks[id]?.title ?? "")"
+        case .conflicts(let id): "Konflikt lösen: \(taskTitle(of: id))"
+        case .tests(let id): "Tests ausführen: \(taskTitle(of: id))"
+        case .review(let id): "Review starten: \(taskTitle(of: id))"
         }
+    }
+
+    /// The title of a candidate's task, or empty.
+    func taskTitle(of candidate: CandidateID) -> String {
+        state.candidates[candidate].flatMap { $0.taskID }.flatMap { state.tasks[$0]?.title } ?? ""
     }
 
     var selectedCancellable: AttemptID? {

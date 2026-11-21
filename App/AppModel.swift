@@ -33,6 +33,11 @@ final class AppModel {
     var restartNeeded = false
     /// Counts test profile changes (ADR 0010); views showing profiles reload on a new value.
     var testProfileRevision = 0
+    /// Counts passes of the candidate chain that changed something (ADR 0011); views showing a
+    /// result or a review reload on a new value.
+    var chainRevision = 0
+    /// What the candidate chain's last pass with a change did (volatile, not projected).
+    var chainReport = ChainReport()
 
     enum ActiveSheet: Identifiable, Equatable {
         case trustProject(String)
@@ -42,6 +47,11 @@ final class AppModel {
         case testProfiles(ProjectID)
         case deliver(JobID)
         case revert(CandidateID)
+        /// The decision on a task's result; `discard` opens it as „Ergebnis verwerfen“.
+        case result(TaskID, discard: Bool = false)
+        case resolveConflicts(CandidateID)
+        case startReview(CandidateID)
+        case importReview(CandidateID)
 
         var id: String {
             switch self {
@@ -52,6 +62,10 @@ final class AppModel {
             case .testProfiles(let id): "testProfiles:\(id.uuidString)"
             case .deliver(let id): "deliver:\(id.uuidString)"
             case .revert(let id): "revert:\(id.uuidString)"
+            case .result(let id, let discard): "result:\(id.uuidString)\(discard ? ":discard" : "")"
+            case .resolveConflicts(let id): "conflicts:\(id.uuidString)"
+            case .startReview(let id): "review:\(id.uuidString)"
+            case .importReview(let id): "import:\(id.uuidString)"
             }
         }
     }
@@ -60,6 +74,7 @@ final class AppModel {
     var actions: WorkbenchActions? { services.map(WorkbenchActions.init) }
     private var pump: Task<Void, Never>?
     private var ticker: Task<Void, Never>?
+    private var chainLoop: Task<Void, Never>?
     private var coalescer = Coalescer(interval: 100)
     private var batcher = AnnouncementBatcher()
     private var latest: WorkspaceState?
@@ -80,10 +95,11 @@ final class AppModel {
         case .ready(let services):
             self.services = services
             if launch.isUITest { await seedForUITests(services.store) }
-            let seeded = launch.seed == "candidate" ? await seedCandidateForUITests(services) : nil
+            var seeded = launch.seed == "candidate" ? await seedCandidateForUITests(services) : nil
             var fixtureJob: JobID?
             #if DEBUG
             if launch.isUITest, launch.fixture == "published" { fixtureJob = await seedPublishedJob(services) }
+            if launch.isUITest, seeded == nil, let seed = launch.seed { seeded = await seedChainForUITests(services, seed: seed) }
             #endif
             let projector = Projector(store: services.store)
             if let loaded = try? await projector.load() { state = loaded }
@@ -97,6 +113,8 @@ final class AppModel {
             phase = .ready
             startPump(projector)
             startTicker()
+            // After the seeds: a seeded result is sealed by the seed, never by a racing pass.
+            startChainLoop()
             await refreshDecisions()
             Task { await self.probe() }
         }
@@ -195,6 +213,26 @@ final class AppModel {
         }
     }
 
+    /// The candidate chain's host-only steps (seal, build, rebuild, collect, clean up; ADR 0011)
+    /// run in their own loop, so a long merge never delays a scheduler tick.
+    private func startChainLoop() {
+        guard let chain = services?.chain else { return }
+        chainLoop = Task.detached(priority: .utility) { [weak self] in
+            while !Task.isCancelled {
+                let report = await chain.step()
+                await self?.receive(report)
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private func receive(_ report: ChainReport) async {
+        guard report != ChainReport() else { return }
+        chainReport = report
+        chainRevision += 1
+        await refreshDecisions()
+    }
+
     private var decisionGeneration = 0
 
     /// Rebuilds the pending decisions from the current state; a refresh that finishes after a
@@ -204,13 +242,15 @@ final class AppModel {
         decisionGeneration += 1
         let generation = decisionGeneration
         let integration = services.integration
+        let chain = services.chain
         let collected = (try? await PendingDecisions.collect(
             state, project: nil,
             gate: { id in try await integration?.gateItems(id) ?? [.noCommit] },
             openFindings: { id in
                 let findings = try await services.store.findings(candidate: id)
                 return findings.contains { $0.severity.needsDecision && $0.disposition == .open }
-            }
+            },
+            resultCheck: { id in try await chain?.check(id) }
         )) ?? []
         if generation == decisionGeneration { pending = collected }
     }
@@ -225,6 +265,7 @@ final class AppModel {
     func shutdown() async {
         pump?.cancel()
         ticker?.cancel()
+        chainLoop?.cancel()
         if let services { await AppBootstrap.shutdown(services) }
     }
 
@@ -236,6 +277,32 @@ final class AppModel {
             do { try await work(actions) } catch { self.errorMessage = Self.describe(error) }
             await self.refreshDecisions()
         }
+    }
+
+    /// Opens the sheet (or the place) where a pending decision is taken.
+    func open(_ decision: PendingDecision) {
+        switch decision {
+        case .publish, .task, .uncertain, .findings: sheet = .decision(decision)
+        case .result(let task):
+            show(task: task)
+            sheet = .result(task)
+        case .conflicts(let candidate):
+            show(task: state.candidates[candidate]?.taskID)
+            sheet = .resolveConflicts(candidate)
+        case .review(let candidate):
+            show(task: state.candidates[candidate]?.taskID)
+            sheet = .startReview(candidate)
+        case .tests(let candidate):
+            // No sheet: „Tests ausführen“ in the candidate view runs the confirmed profile (ADR 0010).
+            show(task: state.candidates[candidate]?.taskID)
+        }
+    }
+
+    /// Selects a task and its job, so the detail view shows it.
+    func show(task: TaskID?) {
+        guard let task, let record = state.tasks[task] else { return }
+        if selectedJob != record.jobID { selectedJob = record.jobID }
+        selectedTask = task
     }
 
     func requestOpenProject() {
@@ -281,7 +348,8 @@ final class AppModel {
         case let error as TestProfileError: Labels.testProfileError(error)
         case TestProfileStoreError.digestChanged: "Das Testprofil hat sich geändert. Bitte die neue Fassung prüfen und bestätigen."
         case TestProfileStoreError.invalid(let issues): issues.map(Labels.testProfileIssue).joined(separator: " ")
-        default: String(describing: error)
+        // The candidate chain's texts; they fall back to the integration texts, then to the raw error.
+        default: ChainMessages.text(error)
         }
     }
 
@@ -338,8 +406,8 @@ struct LaunchMode: Sendable {
                 databasePath: folder + "/kaiorx.sqlite", workspaceRoot: folder + "/workspace",
                 // Author and reviewer must differ: the fake provider writes, a second fake reviews.
                 adapters: { _ in [
-                    FakeAdapter(provider: .fake) { _ in script == "hang" ? .waitsForCancel : .success() },
-                    FakeAdapter(provider: .codex) { _ in .success() },
+                    FakeAdapter(provider: .fake) { spec in UITestScripts.author(script, spec: spec) },
+                    FakeAdapter(provider: .codex) { spec in UITestScripts.reviewer(spec) },
                 ] },
                 gate: UITestGate()
             )
@@ -347,6 +415,37 @@ struct LaunchMode: Sendable {
         // The build's channel (Info.plist, per build configuration; unknown means distributed)
         // decides whether any real provider may run without the user's start (ADR 0009).
         return try AppConfiguration.standard(adapters: { host in RealAdapters.make(host: host) }, channel: .current())
+    }
+}
+
+/// The fake providers' behaviour in UI tests. Nothing here starts a process.
+enum UITestScripts {
+    /// `hang` waits for a cancel; `writes` leaves `src/neu.swift` in the author's worktree, so the
+    /// candidate chain has a change to seal and build; anything else succeeds without a change.
+    static func author(_ script: String, spec: AttemptSpec) -> FakeScript {
+        switch script {
+        case "hang": return .waitsForCancel
+        case "writes":
+            if let directory = spec.workingDirectory {
+                let file = URL(filePath: directory).appending(path: "src/neu.swift")
+                try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? "let neu = 2\n".write(to: file, atomically: true, encoding: .utf8)
+            }
+            return .success()
+        default: return .success()
+        }
+    }
+
+    /// The independent reviewer approves the candidate its prompt names
+    /// („Review candidate <oid> …“); any other run just succeeds.
+    static func reviewer(_ spec: AttemptSpec) -> FakeScript {
+        let words = spec.prompt.split(separator: " ", maxSplits: 3)
+        guard words.count >= 3, words[0] == "Review", words[1] == "candidate" else { return .success() }
+        let oid = String(words[2])
+        let verdict = #"```json\#n{"candidateOID": "\#(oid)", "verdict": "approve", "summary": "ok", "findings": []}\#n```"#
+        return FakeScript(steps: [
+            .emit(.started(sessionID: "uitest-review")), .emit(.messageFinal(itemID: "r", text: verdict)), .emit(.completed(.succeeded)),
+        ])
     }
 }
 

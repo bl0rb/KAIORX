@@ -9,6 +9,41 @@ import Workspace
 /// Prepared states for UI tests (`-KAIORXUITest` only, never in Release builds). They go through
 /// the real services on the temporary database and repository; no provider runs.
 extension AppModel {
+    /// The candidate chain's starting states (`KAIORX_UITEST_SEED`, ADR 0011), each in the opened
+    /// fixture repository. Runs before the chain loop starts, so every seal here is the seed's.
+    /// - `result`: an unsealed author result with one new file; the chain seals and builds it.
+    /// - `undeclared`: a sealed plan-task result whose seal dropped `NOTIZ.md`.
+    /// - `empty`: a sealed result of a run that changed nothing.
+    /// - `conflicted`: a conflicted candidate on `KONFLIKT.md`.
+    /// Returns the job and task to select, or nil for an unknown seed or a failed step.
+    func seedChainForUITests(_ services: AppServices, seed: String) async -> (job: JobID, task: TaskID)? {
+        guard let repo = launch.uiTestRepository else { return nil }
+        do {
+            let project = try await WorkbenchActions(services: services).openProject(at: repo)
+            switch seed {
+            case "result":
+                let seeded = try await UITestSeed.authorResult(
+                    services: services, project: project, title: "Neue Datei anlegen", writes: ["src/neu.swift": "let neu = 2\n"]
+                )
+                return (seeded.job, seeded.task)
+            case "undeclared":
+                let seeded = try await UITestSeed.undeclared(services: services, project: project, title: "Leerwert dokumentieren")
+                return (seeded.job, seeded.task)
+            case "empty":
+                let seeded = try await UITestSeed.empty(services: services, project: project, title: "Nichts zu tun")
+                return (seeded.job, seeded.task)
+            case "conflicted":
+                let seeded = try await UITestSeed.conflicted(services: services, project: project, title: "Konflikt anlegen")
+                return (seeded.job, seeded.task)
+            default:
+                return nil
+            }
+        } catch {
+            errorMessage = "UI-Test-Vorbereitung fehlgeschlagen: \(error)"
+            return nil
+        }
+    }
+
     /// `published`: the temporary repository opened as a project, one active job, and one task
     /// whose result was built, tested, reviewed (an imported approving review), approved and
     /// published onto the job's integration ref. Returns the job, or nil if a step failed.
