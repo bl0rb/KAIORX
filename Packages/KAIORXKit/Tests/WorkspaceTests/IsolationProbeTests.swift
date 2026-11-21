@@ -137,6 +137,44 @@ import Testing
         #expect(Set(probes) == [.launchctlSubmit, .launchServicesOpen, .defaultsWrite])
     }
 
+    /// A probe whose script never runs proves nothing (ADR 0002 §5): it is inconclusive, never
+    /// blocked. Safe without the opt-in: the shell never starts, so nothing reaches the session;
+    /// only the cleanup of unique, never-created names runs.
+    @Test(arguments: ["/nonexistent/sh", "/usr/bin/true"]) func aProbeWhoseScriptCannotStartIsInconclusive(shell: String) async throws {
+        let setup = try Setup()
+        defer { setup.close() }
+        var probes = IsolationProbes(host: setup.host)
+        probes.tools.shell = shell
+        let checked: [IsolationProbe] = [.writeGitLink, .launchctlSubmit, .launchServicesOpen, .defaultsWrite]
+        for confinement in [setup.testRunner(writesWorktree: false), setup.agentCLI(.claude, writesWorktree: true)] {
+            let report = await probes.run(checked, confinement: confinement, fixture: setup.fixture, listener: setup.listener, intrusive: true)
+            for probe in checked {
+                let outcome = try #require(report[probe])
+                #expect(!outcome.isBlocked && !outcome.isReached, "\(probe): \(outcome)")
+            }
+            #expect(Set(report.violations(of: .testRunner(writesWorktree: false)).map(\.probe)) == Set(checked))
+        }
+    }
+
+    /// A missing tool (wrong path) is not a sandbox refusal either.
+    @Test func aMissingToolIsInconclusive() async throws {
+        let setup = try Setup()
+        defer { setup.close() }
+        var probes = IsolationProbes(host: setup.host)
+        let missing = setup.fixture.base + "/missing"
+        probes.tools.launchctl = missing + "/launchctl"
+        probes.tools.open = missing + "/open"
+        probes.tools.defaults = missing + "/defaults"
+        let checked: [IsolationProbe] = [.launchctlSubmit, .launchServicesOpen, .defaultsWrite]
+        let report = await probes.run(
+            checked, confinement: setup.testRunner(writesWorktree: false), fixture: setup.fixture, listener: setup.listener, intrusive: true
+        )
+        for probe in checked {
+            let outcome = try #require(report[probe])
+            #expect(outcome == .inconclusive("tool missing: \(missing)/\(probe == .launchctlSubmit ? "launchctl" : probe == .defaultsWrite ? "defaults" : "open")"))
+        }
+    }
+
     @Test func mustBlockFollowsTheRole() {
         let reviewer = IsolationProbe.mustBlock(.reviewer)
         #expect(reviewer.contains(.writeWorktree) && reviewer.contains(.networkDNS) && !reviewer.contains(.readHiddenHome))

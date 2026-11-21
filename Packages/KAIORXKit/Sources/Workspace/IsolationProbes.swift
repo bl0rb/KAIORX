@@ -6,8 +6,10 @@ import Synchronization
 /// One synthetic escape attempt a confined process makes (ADR 0002 §5). Each probe runs a small
 /// shell or Perl script under the given `Confinement` through `ProcessHost`, and the suite
 /// checks the effect itself where it can (a marker read back, a file on disk, a connection the
-/// listener received, a job launchd lists), so a probe that merely failed to start never counts
-/// as "blocked" without a reason.
+/// listener received, a job launchd lists). "Blocked" needs proof on both sides: the script shows
+/// it ran (a first line with the run's token) and the attempt shows the refusal itself (EPERM,
+/// LaunchServices' permErr, defaults' write error). A probe that failed to start, found no tool or
+/// failed otherwise is inconclusive, never blocked.
 public enum IsolationProbe: String, CaseIterable, Sendable, Codable {
     /// Reads a marker in a folder of the (fake) home folder that holds no credentials (`Documents`).
     case readHiddenHome
@@ -248,6 +250,16 @@ public struct IsolationProbes: Sendable {
     public let host: ProcessHost
     /// Name for the DNS probe; an unconfined lookup of it reaches the resolver.
     public var dnsName: String = "apple.com"
+    /// The tools the probe scripts start (replaceable in tests: a probe that cannot start or
+    /// finds no tool must come out inconclusive, never blocked).
+    var tools = Tools()
+
+    struct Tools: Sendable {
+        var shell = "/bin/sh"
+        var launchctl = IsolationProbes.launchctl
+        var open = "/usr/bin/open"
+        var defaults = IsolationProbes.defaults
+    }
 
     public init(host: ProcessHost) {
         self.host = host
@@ -283,7 +295,7 @@ public struct IsolationProbes: Sendable {
     private func run(
         _ probe: IsolationProbe, confinement: Confinement?, fixture: IsolationProbeFixture, listener: LoopbackListener
     ) async -> IsolationProbeOutcome {
-        let context = Context(host: host, confinement: confinement, fixture: fixture)
+        let context = Context(host: host, confinement: confinement, fixture: fixture, tools: tools)
         do {
             switch probe {
             case .readHiddenHome: return try await context.read([fixture.hiddenHomeMarker])
@@ -310,6 +322,7 @@ private struct Context {
     let host: ProcessHost
     let confinement: Confinement?
     let fixture: IsolationProbeFixture
+    let tools: IsolationProbes.Tools
     /// Unique per probe run; names files, jobs and domains.
     let token = UUID().uuidString.prefix(12).lowercased()
 
@@ -328,7 +341,7 @@ private struct Context {
 
     /// A confined shell script; `arguments` become `$1…`.
     func shell(_ script: String, _ arguments: [String] = []) async throws -> ProcessResult {
-        try await host.run(spec("/bin/sh", ["-c", script, "probe"] + arguments))
+        try await host.run(spec(tools.shell, ["-c", script, "probe"] + arguments))
     }
 
     /// An unconfined helper (verification and cleanup), never a probe.
@@ -370,12 +383,14 @@ private struct Context {
     func writeGitLink() async throws -> IsolationProbeOutcome {
         let link = fixture.worktree + "/.git"
         let moved = fixture.worktree + "/.git-moved-" + token
+        // The first line proves the script ran; each attempt reports its own error text.
         let script = #"""
-            printf 'gitdir: /tmp/evil\n' >> .git 2>/dev/null && echo APPENDED
-            mv .git "$1" 2>/dev/null && echo MOVED
+            printf 'RAN %s\n' "$1"
+            if e=$( { printf 'gitdir: /tmp/evil\n' >> "$2"; } 2>&1 ); then echo APPENDED; else printf 'ERR append %s\n' "$e"; fi
+            if e=$(mv "$2" "$3" 2>&1); then echo MOVED; else printf 'ERR move %s\n' "$e"; fi
             exit 0
             """#
-        let result = try await shell(script, [moved])
+        let result = try await shell(script, [token, link, moved])
         let fm = FileManager.default
         let changed = (try? String(contentsOfFile: link, encoding: .utf8)) != fixture.gitLinkContent
         let wasMoved = fm.fileExists(atPath: moved)
@@ -385,7 +400,66 @@ private struct Context {
         if changed || wasMoved {
             return .reached([changed ? "rewrote .git" : nil, wasMoved ? "moved .git" : nil].compactMap(\.self).joined(separator: ", "))
         }
-        return result.stdout.text.isEmpty ? .blocked("write refused") : .inconclusive(result.stdout.text)
+        let lines = result.stdout.text.split(separator: "\n").map(String.init)
+        guard lines.first == "RAN \(token)" else { return .inconclusive("probe script did not run: \(Self.text(result))") }
+        // Blocked only when the sandbox refused both attempts, not a missing file or another error.
+        let refused = ["ERR append ", "ERR move "].allSatisfy { prefix in
+            lines.contains { $0.hasPrefix(prefix) && $0.contains(Self.denied) }
+        }
+        return refused ? .blocked(Self.denied) : .inconclusive(lines.joined(separator: "; "))
+    }
+
+    /// The output of a confined attempt with a system tool (`attempt`).
+    struct Attempt {
+        /// The script's first line proved it ran.
+        var ran = false
+        /// The tool was not executable at its path.
+        var missingTool: String?
+        /// The tool's exit status; `nil` when the script ended before reporting it.
+        var status: Int32?
+        /// What the tool printed (stdout and stderr).
+        var output = ""
+        /// Everything the script printed, for the detail of an inconclusive outcome.
+        var raw = ""
+    }
+
+    /// Runs `command` (shell code that starts the tool as `"$t"`, with `arguments` as `$1…`) in
+    /// a confined script that first proves it ran and that the tool exists, then reports the
+    /// tool's exit status. Only such an attempt can show a refusal (ADR 0002 §5).
+    func attempt(_ tool: String, _ command: String, _ arguments: [String]) async throws -> Attempt {
+        let script = #"""
+            printf 'RAN %s\n' "$1"; t=$2; shift 2
+            [ -x "$t" ] || { printf 'MISSING %s\n' "$t"; exit 0; }
+            """# + "\n" + command + " 2>&1\n" + #"printf '\nexit=%s\n' "$?""#
+        let result = try await shell(script, [token, tool] + arguments)
+        var attempt = Attempt(raw: Self.text(result))
+        var lines = result.stdout.text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if lines.last == "" { lines.removeLast() }
+        guard lines.first == "RAN \(token)" else { return attempt }
+        attempt.ran = true
+        lines.removeFirst()
+        if let missing = lines.first, missing.hasPrefix("MISSING ") {
+            attempt.missingTool = String(missing.dropFirst("MISSING ".count))
+            return attempt
+        }
+        if let last = lines.last, last.hasPrefix("exit="), let status = Int32(last.dropFirst("exit=".count)) {
+            attempt.status = status
+            lines.removeLast()
+        }
+        attempt.output = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return attempt
+    }
+
+    /// Why an attempt shows nothing about the sandbox, or `nil` when the tool ran to an exit status.
+    static func unproven(_ attempt: Attempt) -> IsolationProbeOutcome? {
+        if !attempt.ran { return .inconclusive("probe script did not run: \(attempt.raw)") }
+        if let tool = attempt.missingTool { return .inconclusive("tool missing: \(tool)") }
+        if attempt.status == nil { return .inconclusive("probe script ended early: \(attempt.raw)") }
+        return nil
+    }
+
+    static func text(_ result: ProcessResult) -> String {
+        (result.stdout.text + result.stderr.text).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func loopback(_ listener: LoopbackListener) async throws -> IsolationProbeOutcome {
@@ -463,27 +537,30 @@ private struct Context {
         let label = "com.kaiorx.probe." + token
         let marker = fixture.outside + "/launchd-" + token
         // The job writes outside every writable root; it could only do that outside the sandbox.
-        let script = #"""
-            /bin/launchctl submit -l "$1" -- /bin/sh -c 'printf "%s" "$0" > "$1"; exec /bin/sleep 30' "$2" "$3" 2>&1
-            echo "exit=$?"
+        let command = #"""
+            "$t" submit -l "$1" -- /bin/sh -c 'printf "%s" "$0" > "$1"; exec /bin/sleep 30' "$2" "$3"
             """#
         let outcome: IsolationProbeOutcome
         do {
-            let result = try await shell(script, [label, fixture.nonce, marker])
-            let output = result.stdout.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let attempt = try await self.attempt(tools.launchctl, command, [label, fixture.nonce, marker])
             var reached = false
             let deadline = ContinuousClock.now + .seconds(2)
             while !reached, ContinuousClock.now < deadline {
                 reached = (try? String(contentsOfFile: marker, encoding: .utf8)) == fixture.nonce
                 // A refused submit needs no waiting; the listing below still checks launchd.
-                if !reached, !output.hasSuffix("exit=0") { break }
+                if !reached, attempt.status != 0 { break }
                 if !reached { try await Task.sleep(for: .milliseconds(50)) }
             }
             let listed = try await helper(IsolationProbes.launchctl, ["list", label]).termination.isSuccess
             if reached || listed {
                 outcome = .reached(reached ? "launchd ran the job outside the sandbox" : "launchd accepted the job")
+            } else if let unproven = Self.unproven(attempt) {
+                outcome = unproven
+            } else if attempt.status == 1, attempt.output.isEmpty {
+                // launchctl exits with launchd's error code and prints nothing: 1 is EPERM.
+                outcome = .blocked("launchd refused the job (\(Self.denied))")
             } else {
-                outcome = output.hasSuffix("exit=0") ? .inconclusive("submit succeeded, job not found") : .blocked("launchd refused: \(output)")
+                outcome = .inconclusive("submit ended with exit \(attempt.status ?? -1) without a refusal, job not found: \(attempt.output)")
             }
         } catch {
             outcome = .inconclusive("probe failed to run: \(error)")
@@ -511,19 +588,23 @@ private struct Context {
             try Data("#!/bin/sh\nprintf '%s' '\(fixture.nonce)' > '\(marker)'\n".utf8).write(to: URL(filePath: executable))
             try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable)
             // `open` of the bundle's URL; the app writes outside every writable root.
-            let result = try await shell("/usr/bin/open -g -j \"$1\" 2>&1; echo \"exit=$?\"", [app])
+            let attempt = try await self.attempt(tools.open, #""$t" -g -j "$1""#, [app])
             var reached = false
             let deadline = ContinuousClock.now + .seconds(5)
-            let output = result.stdout.text.trimmingCharacters(in: .whitespacesAndNewlines)
             while !reached, ContinuousClock.now < deadline {
                 reached = (try? String(contentsOfFile: marker, encoding: .utf8)) == fixture.nonce
-                if !reached, !output.hasSuffix("exit=0") { break }
+                if !reached, attempt.status != 0 { break }
                 if !reached { try await Task.sleep(for: .milliseconds(50)) }
             }
             if reached {
                 outcome = .reached("LaunchServices started an app outside the sandbox")
+            } else if let unproven = Self.unproven(attempt) {
+                outcome = unproven
+            } else if attempt.status != 0, attempt.output.contains("error -54") {
+                // -54 is permErr: the sandbox's `(deny lsopen)`, not a missing or broken app.
+                outcome = .blocked("LaunchServices refused: \(attempt.output)")
             } else {
-                outcome = output.hasSuffix("exit=0") ? .inconclusive("open succeeded, app did not run") : .blocked("LaunchServices refused: \(output)")
+                outcome = .inconclusive("open ended with exit \(attempt.status ?? -1) without a refusal, app did not run: \(attempt.output)")
             }
         } catch {
             outcome = .inconclusive("probe failed to run: \(error)")
@@ -541,13 +622,17 @@ private struct Context {
         let domain = "com.kaiorx.probe." + token
         let outcome: IsolationProbeOutcome
         do {
-            let result = try await shell("/usr/bin/defaults write \"$1\" probe \"$2\" 2>&1; echo \"exit=$?\"", [domain, fixture.nonce])
+            let attempt = try await self.attempt(tools.defaults, #""$t" write "$1" probe "$2""#, [domain, fixture.nonce])
             let read = try await helper(IsolationProbes.defaults, ["read", domain, "probe"])
-            let output = result.stdout.text.trimmingCharacters(in: .whitespacesAndNewlines)
             if read.stdout.text.trimmingCharacters(in: .whitespacesAndNewlines) == fixture.nonce {
                 outcome = .reached("cfprefsd stored the preference")
+            } else if let unproven = Self.unproven(attempt) {
+                outcome = unproven
+            } else if attempt.status != 0, attempt.output.contains("Could not write domain") {
+                // cfprefsd refused the write (`(deny user-preference-write)`) and defaults said so.
+                outcome = .blocked("not stored: \(attempt.output)")
             } else {
-                outcome = .blocked("not stored: \(output)")
+                outcome = .inconclusive("write ended with exit \(attempt.status ?? -1) without a refusal, not stored: \(attempt.output)")
             }
         } catch {
             outcome = .inconclusive("probe failed to run: \(error)")
