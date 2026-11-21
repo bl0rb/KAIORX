@@ -197,9 +197,7 @@ struct TestProfileConfirmation: View {
             GroupBox("Wenn du ablehnst") { Text(sheet.ifRejected).frame(maxWidth: .infinity, alignment: .leading) }
             HStack {
                 Spacer()
-                Button(sheet.rejectLabel) { decide(false) }
-                    .keyboardShortcut(.cancelAction)
-                    .keyboardShortcut(.defaultAction)
+                SafeChoiceButton(sheet.rejectLabel) { decide(false) }
                     .accessibilityIdentifier("decisionReject")
                 Button(sheet.approveLabel) { decide(true) }
                     .accessibilityIdentifier("decisionApprove")

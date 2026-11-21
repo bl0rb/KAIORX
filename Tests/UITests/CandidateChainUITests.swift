@@ -41,19 +41,16 @@ final class CandidateChainUITests: XCTestCase {
         return XCTWaiter().wait(for: [XCTNSPredicateExpectation(predicate: predicate, object: element)], timeout: timeout) == .completed
     }
 
-    /// Return on an open decision sheet never approves: no outcome appears and the approval stays
-    /// untaken. The sheet is then declined explicitly (Return reaches the safe button only where
-    /// the system routes it there), so the test goes on from a closed sheet either way.
-    func assertReturnDoesNotApprove(file: StaticString = #filePath, line: UInt = #line) {
+    /// Return on an open decision sheet takes the safe choice: the sheet closes, no outcome
+    /// appears and the approval stays untaken (`key` .escape checks Escape the same way).
+    func assertReturnDoesNotApprove(key: XCUIKeyboardKey = .return, file: StaticString = #filePath, line: UInt = #line) {
         let approve = app.buttons["decisionApprove"]
         XCTAssertTrue(approve.waitForExistence(timeout: 10), "no decision sheet", file: file, line: line)
         XCTAssertTrue(text(containing: "Wenn du ablehnst").waitForExistence(timeout: 10), file: file, line: line)
-        app.typeKey(.return, modifierFlags: [])
+        app.typeKey(key, modifierFlags: [])
         let outcome = app.descendants(matching: .any)["sheetResult"]
-        XCTAssertFalse(outcome.waitForExistence(timeout: 2), "Return approved", file: file, line: line)
-        if approve.exists { app.buttons["decisionReject"].click() }
-        XCTAssertTrue(approve.waitForNonExistence(timeout: 5), "the sheet did not close", file: file, line: line)
-        XCTAssertFalse(outcome.exists, file: file, line: line)
+        XCTAssertTrue(approve.waitForNonExistence(timeout: 5), "the key did not close the sheet", file: file, line: line)
+        XCTAssertFalse(outcome.exists, "the key approved", file: file, line: line)
     }
 
     func approveWhenEnabled(file: StaticString = #filePath, line: UInt = #line) {
@@ -230,6 +227,11 @@ final class CandidateChainUITests: XCTestCase {
         XCTAssertTrue(pasted.waitForExistence(timeout: 10))
         XCTAssertTrue(text(containing: "Füge den Text des Reviews ein").waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["decisionApprove"].isEnabled)
+        // Return inside the text is a line break, not the sheet's safe choice.
+        pasted.click()
+        pasted.typeText("Zeile 1\nZeile 2")
+        XCTAssertTrue(app.buttons["decisionApprove"].waitForEnabled(timeout: 5))
+        XCTAssertTrue(pasted.exists, "Return in the text closed the sheet")
         app.buttons["decisionReject"].click()
         XCTAssertTrue(pasted.waitForNonExistence(timeout: 5))
         XCTAssertTrue(waitForLabel(review, containing: "Noch kein Review", timeout: 5))
@@ -268,6 +270,10 @@ final class CandidateChainUITests: XCTestCase {
         discard.click()
         XCTAssertTrue(text(containing: "Die Zählung der Versuche beginnt neu").waitForExistence(timeout: 10))
         assertReturnDoesNotApprove()
+        // Escape takes the same safe choice.
+        discard.click()
+        XCTAssertTrue(text(containing: "Die Zählung der Versuche beginnt neu").waitForExistence(timeout: 10))
+        assertReturnDoesNotApprove(key: .escape)
 
         // The secondary „Ergebnis verwerfen …“ in the build sheet switches, it does not discard.
         app.buttons["decideResult"].click()

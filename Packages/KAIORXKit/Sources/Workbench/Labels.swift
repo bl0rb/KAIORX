@@ -114,7 +114,12 @@ public enum Labels {
             } else {
                 StatusLabel("Wartet auf deinen Start", "play.circle", .waiting)
             }
-        case .userDecision: StatusLabel("Wartet auf deine Entscheidung", "hand.raised", .waiting)
+        case .userDecision:
+            if reason.detail == "rework" {
+                StatusLabel("Wartet auf deine Freigabe zur Nacharbeit", "hand.raised", .waiting)
+            } else {
+                StatusLabel("Wartet auf deine Entscheidung", "hand.raised", .waiting)
+            }
         case .retryLater: StatusLabel("Neuer Versuch später", "arrow.clockwise", .waiting)
         case .capability: StatusLabel("Fähigkeit nicht freigegeben", "lock", .warning)
         }
@@ -239,13 +244,33 @@ public enum Labels {
         case .collectFailed(let detail): "Review konnte nicht übernommen werden: \(detail)"
         case .planTaskMissing: "Die Planaufgabe fehlt in der Planfassung des Laufs; das Ergebnis wird nicht versiegelt."
         case .containedAfterRebuild:
-            "Nach dem Neubau ist das Ergebnis schon im Integrationsstand enthalten. Lehne den Kandidaten ab; die Aufgabe kann dann neu bearbeitet werden."
+            // A known limit (ADR 0011): the task stays in verification, there is no action for it.
+            "Nach dem Neubau ist das Ergebnis schon im Integrationsstand enthalten; es wird kein neuer Kandidat gebaut. Die Aufgabe bleibt in der Prüfung stehen."
         }
+    }
+
+    /// The driver's issue as a status line.
+    public static func chainIssueStatus(_ issue: ChainIssue) -> StatusLabel {
+        StatusLabel(chainIssue(issue), "exclamationmark.triangle", .failure)
+    }
+
+    /// Without the candidate chain (the Git journal could not be repaired at start) nothing is
+    /// sealed, built or collected.
+    public static let chainUnavailable = StatusLabel("Kandidatenkette nicht verfügbar – Git-Arbeit angehalten", "exclamationmark.octagon", .failure)
+
+    /// The status line of a task's result box: the shown result with the driver's issue, an
+    /// issue alone, or „Wird versiegelt …“ while no result is readable yet. Never an active
+    /// status when the chain is not running.
+    public static func resultStatus(_ shown: ShownResult?, issue: ChainIssue?, chainAvailable: Bool) -> StatusLabel {
+        guard chainAvailable else { return chainUnavailable }
+        if let shown { return result(shown.check, issue: issue) }
+        if let issue { return chainIssueStatus(issue) }
+        return StatusLabel("Wird versiegelt …", "lock.rotation", .active)
     }
 
     /// The status line of a task's result, with the driver's current issue first.
     public static func result(_ check: ResultCheck, issue: ChainIssue?) -> StatusLabel {
-        if let issue { return StatusLabel(chainIssue(issue), "exclamationmark.triangle", .failure) }
+        if let issue { return chainIssueStatus(issue) }
         switch check {
         case .notApplicable: return StatusLabel("Kein Ergebnis", "minus.circle", .neutral)
         case .awaitingSeal: return StatusLabel("Wird versiegelt …", "lock.rotation", .active)

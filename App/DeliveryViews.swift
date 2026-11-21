@@ -45,6 +45,32 @@ struct SheetOutcome: View {
     }
 }
 
+/// The safe choice of a sheet (decline, close, „Fertig“): both Return and Escape trigger it, and
+/// it is the only button bound to either key, so Return never approves. SwiftUI applies only one
+/// `keyboardShortcut` per button, so the visible button takes Return (`defaultAction`) and an
+/// invisible twin with the same action takes Escape (`cancelAction`).
+struct SafeChoiceButton: View {
+    let title: String
+    let action: () -> Void
+
+    init(_ title: String, action: @escaping () -> Void) {
+        self.title = title
+        self.action = action
+    }
+
+    var body: some View {
+        Button(title, action: action)
+            .keyboardShortcut(.defaultAction)
+            .background {
+                Button(title, action: action)
+                    .keyboardShortcut(.cancelAction)
+                    .opacity(0)
+                    .frame(width: 0, height: 0)
+                    .accessibilityHidden(true)
+            }
+    }
+}
+
 /// Delivers a job's integration state into a new branch of the user's repository (ADR 0004 §7):
 /// create-only, the name checked as the service checks it, bound to the state the sheet showed.
 /// Return is the safe choice (nothing is created).
@@ -65,9 +91,7 @@ struct DeliverBranchSheet: View {
                 SheetOutcome(text: "Branch „\(created)“ angelegt. Dein Checkout und deine anderen Branches sind unverändert.", failed: false)
                 HStack {
                     Spacer()
-                    Button("Fertig") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-                        .keyboardShortcut(.defaultAction)
+                    SafeChoiceButton("Fertig") { dismiss() }
                         .accessibilityIdentifier("deliveryDone")
                 }
             } else {
@@ -82,9 +106,7 @@ struct DeliverBranchSheet: View {
                 HStack {
                     if working { ProgressView().controlSize(.small) }
                     Spacer()
-                    Button(sheet?.rejectLabel ?? "Nicht liefern") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-                        .keyboardShortcut(.defaultAction)
+                    SafeChoiceButton(sheet?.rejectLabel ?? "Nicht liefern") { dismiss() }
                         .accessibilityIdentifier("decisionReject")
                     Button(sheet?.approveLabel ?? "Branch anlegen") { approve() }
                         .disabled(!(sheet?.canApprove ?? false) || sheet?.delivery?.name != name || working)
@@ -160,9 +182,7 @@ struct RevertSheet: View {
                         }
                         .accessibilityIdentifier("showRevertTask")
                     }
-                    Button("Fertig") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-                        .keyboardShortcut(.defaultAction)
+                    SafeChoiceButton("Fertig") { dismiss() }
                         .accessibilityIdentifier("revertDone")
                 }
             } else {
@@ -171,9 +191,7 @@ struct RevertSheet: View {
                 HStack {
                     if working { ProgressView().controlSize(.small) }
                     Spacer()
-                    Button(sheet?.rejectLabel ?? "Nicht zurücknehmen") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-                        .keyboardShortcut(.defaultAction)
+                    SafeChoiceButton(sheet?.rejectLabel ?? "Nicht zurücknehmen") { dismiss() }
                         .accessibilityIdentifier("decisionReject")
                     Button(sheet?.approveLabel ?? "Revert bauen") { approve() }
                         .disabled(!(sheet?.canApprove ?? false) || working)

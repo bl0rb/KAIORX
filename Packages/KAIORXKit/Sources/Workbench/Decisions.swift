@@ -54,13 +54,25 @@ public enum PendingDecisions {
         }
     }
 
+    /// Whether the driver's issue with a waiting result leaves it to the user: a seal or build
+    /// that keeps failing holds the task's write area until the user retries or discards it.
+    /// Review and rebuild issues belong to a candidate, not to a result decision.
+    public static func needsUser(_ issue: ChainIssue?) -> Bool {
+        switch issue {
+        case .sealFailed?, .buildFailed?, .planTaskMissing?: true
+        case .collectFailed?, .containedAfterRebuild?, nil: false
+        }
+    }
+
     /// Everything in `project` (or every project) that waits for the user, oldest first.
     /// `resultCheck` is the candidate chain's check of a task's result (nil: not known, no
-    /// result decision).
+    /// result decision); `chainIssue` is the driver's current issue with a task. A lookup that
+    /// fails for one candidate or task only drops that entry, never the rest of the list.
     public static func collect(
         _ state: WorkspaceState, project: ProjectID?, gate: @Sendable (CandidateID) async throws -> [GateItem],
         openFindings: @Sendable (CandidateID) async throws -> Bool,
-        resultCheck: @Sendable (TaskID) async throws -> ResultCheck? = { _ in nil }
+        resultCheck: @Sendable (TaskID) async throws -> ResultCheck? = { _ in nil },
+        chainIssue: @Sendable (TaskID) async -> ChainIssue? = { _ in nil }
     ) async throws -> [PendingDecision] {
         func inProject(_ job: JobID) -> Bool {
             guard let project else { return true }
@@ -69,16 +81,17 @@ public enum PendingDecisions {
         var result: [PendingDecision] = []
         for candidate in state.candidates.values.sorted(by: { ($0.createdAt, $0.id.uuidString) < ($1.createdAt, $1.id.uuidString) })
         where inProject(candidate.jobID) {
-            if candidate.state == .accepted, let task = candidate.taskID.flatMap({ state.tasks[$0] }), task.state == .awaitingMerge,
-               try await gate(candidate.id).isEmpty {
+            let task = candidate.taskID.flatMap { state.tasks[$0] }
+            if candidate.state == .accepted, task?.state == .awaitingMerge, (try? await gate(candidate.id))?.isEmpty == true {
                 result.append(.publish(candidate.id))
-            } else if candidate.state == .reviewing, try await openFindings(candidate.id) {
+            } else if candidate.state == .reviewing, (try? await openFindings(candidate.id)) == true {
                 result.append(.findings(candidate.id))
-            } else if candidate.state == .conflicted, let task = candidate.taskID.flatMap({ state.tasks[$0] }), task.state == .conflict {
+            } else if candidate.state == .conflicted, task?.state == .conflict {
                 result.append(.conflicts(candidate.id))
-            } else if candidate.state == .built, let task = candidate.taskID.flatMap({ state.tasks[$0] }), task.state == .verifying {
+            } else if candidate.state == .built, task?.state == .verifying {
                 result.append(.tests(candidate.id))
-            } else if state.needsReview(candidate) {
+            } else if candidate.state == .reviewing, let task,
+                      state.needsReview(candidate, collectFailed: Self.collectFailed(await chainIssue(task.id))) {
                 result.append(.review(candidate.id))
             }
         }
@@ -88,7 +101,11 @@ public enum PendingDecisions {
                 result.append(.task(task.id, reason))
             }
             // A held task is not offered: its result decisions need `resultReady`.
-            if task.state == .resultReady, state.openCandidate(of: task.id) == nil, let check = try await resultCheck(task.id), needsUser(check) {
+            guard task.state == .resultReady, state.openCandidate(of: task.id) == nil else { continue }
+            // A check that fails (for example a moved checkout) leaves only this task out.
+            let check = (try? await resultCheck(task.id)) ?? nil
+            let issue = await chainIssue(task.id)
+            if check.map(needsUser) == true || needsUser(issue) {
                 result.append(.result(task.id))
             }
         }
@@ -97,6 +114,11 @@ public enum PendingDecisions {
             if let task = state.tasks[attempt.taskID], inProject(task.jobID) { result.append(.uncertain(attempt.id)) }
         }
         return result
+    }
+
+    static func collectFailed(_ issue: ChainIssue?) -> Bool {
+        if case .collectFailed? = issue { return true }
+        return false
     }
 }
 
@@ -189,8 +211,10 @@ public struct DecisionSheet: Sendable, Equatable {
     }
 
     /// More attempts for a task that stopped for the user's decision.
+    /// A task waiting for rework after a rejection gets its own sheet (`rework`).
     public static func moreAttempts(_ task: TaskRecord, reason: WaitReason) -> DecisionSheet {
-        DecisionSheet(
+        if reason.detail == "rework" { return rework(task) }
+        return DecisionSheet(
             title: "Weitere Versuche erlauben",
             action: "Für „\(task.title)“ weitere Versuche erlauben; die Zählung beginnt neu.",
             scope: [
@@ -202,11 +226,30 @@ public struct DecisionSheet: Sendable, Equatable {
         )
     }
 
+    /// A task back in `needsChanges` without a counted failure (its candidate was rejected, or
+    /// nothing was left to integrate): it returns to an author only with the user's grant
+    /// (ADR 0011 §6). The approval is the same grant as „Weitere Versuche erlauben“.
+    public static func rework(_ task: TaskRecord) -> DecisionSheet {
+        DecisionSheet(
+            title: "Nacharbeit erlauben",
+            action: "„\(task.title)“ erneut von einem Autor bearbeiten lassen; die Zählung der Versuche beginnt neu.",
+            scope: [
+                "Grund des Halts: \(stopReason("rework"))",
+                "Der Grund der Ablehnung geht nicht an den Autor; er bekommt die Aufgabe wie beim ersten Lauf.",
+                "Jeder Versuch kann beim Anbieter Kontingent und Budget verbrauchen.",
+            ],
+            ifRejected: "Die Aufgabe bleibt bei „Änderungen nötig“ stehen; es startet kein neuer Lauf.",
+            approveLabel: "Nacharbeit erlauben", rejectLabel: "Nicht jetzt", reported: nil, blockers: [], shown: nil
+        )
+    }
+
     static func stopReason(_ detail: String) -> String {
         switch detail {
         case "attemptLimit": "Versuchsgrenze erreicht"
         case "topTierReached": "Höchste Modellstufe erreicht"
-        default: "Wiederholte Startfehler"
+        case "startRetries": "Wiederholte Startfehler"
+        case "rework": "Kandidat abgelehnt oder nichts mehr zu integrieren – die Nacharbeit braucht deine Freigabe"
+        default: "Entscheidung nötig"
         }
     }
 

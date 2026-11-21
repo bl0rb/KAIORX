@@ -76,6 +76,12 @@ final class DeliveryUITests: XCTestCase {
         app.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(approve.waitForNonExistence(timeout: 5))
         XCTAssertFalse(text(containing: "Revert von").exists, "Return built a revert")
+        // Escape takes the same safe choice.
+        app.typeKey("r", modifierFlags: [.command, .shift])
+        XCTAssertTrue(approve.waitForEnabled(timeout: 5))
+        app.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(approve.waitForNonExistence(timeout: 5))
+        XCTAssertFalse(text(containing: "Revert von").exists, "Escape built a revert")
 
         app.buttons["revertCandidate"].click()
         XCTAssertTrue(approve.waitForEnabled(timeout: 5))

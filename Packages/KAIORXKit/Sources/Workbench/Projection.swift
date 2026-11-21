@@ -78,16 +78,47 @@ public struct WorkspaceState: Sendable, Equatable {
     }
 
     /// A candidate in review that waits for the user to start one: no readable review of its
-    /// commit, no open reviewer, and no finished reviewer the driver has yet to collect.
-    public func needsReview(_ candidate: CandidateRecord) -> Bool {
+    /// commit, no open reviewer, and no finished reviewer the driver has yet to collect. With
+    /// `collectFailed` (the driver gave up collecting a finished reviewer, `ChainIssue.collectFailed`)
+    /// that reviewer no longer counts as on its way, so a new start is offered.
+    public func needsReview(_ candidate: CandidateRecord, collectFailed: Bool = false) -> Bool {
         guard candidate.state == .reviewing, let commit = candidate.candidateOID, let taskID = candidate.taskID,
               tasks[taskID]?.state == .verifying else { return false }
         let ofCommit = (reviews[candidate.id] ?? []).filter { $0.candidateOID == commit }
         if ofCommit.contains(where: { $0.status != .invalid }) { return false }
         if openReviewer(of: taskID) != nil { return false }
-        let recorded = Set(ofCommit.compactMap(\.reviewerAttemptID))
-        return !reviewers(of: candidate).contains { $0.state == .succeeded && !recorded.contains($0.id) }
+        if collectFailed { return true }
+        return !uncollectedReviewer(of: candidate)
     }
+
+    /// Whether a reviewer of exactly this commit succeeded but its review is not recorded yet.
+    func uncollectedReviewer(of candidate: CandidateRecord) -> Bool {
+        let recorded = Set((reviews[candidate.id] ?? []).filter { $0.candidateOID == candidate.candidateOID }.compactMap(\.reviewerAttemptID))
+        return reviewers(of: candidate).contains { $0.state == .succeeded && !recorded.contains($0.id) }
+    }
+
+    /// Where the review of a candidate stands. `issue` is the driver's issue with its task: a
+    /// refused collect is shown instead of „Review wird übernommen …“, which would never end.
+    /// Without the chain nothing is collected, so that status is never shown either.
+    public func reviewStatus(of candidate: CandidateRecord, issue: ChainIssue?, chainAvailable: Bool) -> StatusLabel {
+        if let task = candidate.taskID, let open = openReviewer(of: task) {
+            return StatusLabel("Review läuft (\(Labels.provider(open.provider)))", "eye", .active)
+        }
+        let reviews = (reviews[candidate.id] ?? []).filter { $0.candidateOID == candidate.candidateOID }
+        let latest = reviews.max { ($0.at, $0.id.uuidString) < ($1.at, $1.id.uuidString) }
+        if uncollectedReviewer(of: candidate) {
+            if let latest, PendingDecisions.collectFailed(issue) || !chainAvailable { return Labels.review(latest.status) }
+            if PendingDecisions.collectFailed(issue) { return Self.reviewNotCollected }
+            if !chainAvailable { return StatusLabel("Kandidatenkette nicht verfügbar – das Review wird nicht übernommen", "exclamationmark.octagon", .failure) }
+            return StatusLabel("Review wird übernommen …", "tray.and.arrow.down", .active)
+        }
+        if let latest { return Labels.review(latest.status) }
+        if let last = reviewers(of: candidate).last, last.state == .failed || last.state == .cancelled { return Self.reviewerStopped }
+        return StatusLabel("Noch kein Review", "eye.slash", .waiting)
+    }
+
+    public static let reviewNotCollected = StatusLabel("Review nicht übernommen – starte ein neues Review", "exclamationmark.triangle", .failure)
+    public static let reviewerStopped = StatusLabel("Prüfer abgebrochen", "xmark.circle", .warning)
 }
 
 /// What one projection step changed.

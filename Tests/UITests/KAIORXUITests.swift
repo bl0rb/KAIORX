@@ -35,7 +35,8 @@ final class KAIORXUITests: XCTestCase {
         XCTAssertTrue(trust.waitForExistence(timeout: 5))
         // Return triggers the safe default: nothing is opened.
         app.typeKey(.return, modifierFlags: [])
-        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        XCTAssertTrue(trust.waitForNonExistence(timeout: 5), "Return did not close the trust sheet")
+        XCTAssertFalse(app.staticTexts["repo"].exists, "Return opened the project")
         open.click()
         XCTAssertTrue(trust.waitForExistence(timeout: 5))
         trust.click()
@@ -81,7 +82,11 @@ final class KAIORXUITests: XCTestCase {
         launch(seed: "candidate")
         let openProfiles = app.buttons["openTestProfiles"]
         XCTAssertTrue(openProfiles.waitForExistence(timeout: 30), "no candidate without a confirmed profile")
-        XCTAssertFalse(app.buttons["runTests"].exists)
+        // ADR 0010 §6: „Tests ausführen“ stays visible with the reason, but locked.
+        let locked = app.buttons["runTests"]
+        XCTAssertTrue(locked.waitForExistence(timeout: 5))
+        XCTAssertFalse(locked.isEnabled, "tests can run without a confirmed profile")
+        XCTAssertTrue(app.descendants(matching: .any)["testProfileBlocked"].exists)
         openProfiles.click()
 
         let name = app.textFields["profileName"]
@@ -102,7 +107,9 @@ final class KAIORXUITests: XCTestCase {
         XCTAssertEqual(status.label, "Nicht bestätigt")
         confirm.click()
         // The page names the full command; Return is the safe choice and confirms nothing.
-        let command = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Befehl: /bin/sh -c 'test -f LEERWERT.md'")).firstMatch
+        // Plain texts carry their text as value, badges as label.
+        let line = "Befehl: /bin/sh -c 'test -f LEERWERT.md'"
+        let command = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", line, line)).firstMatch
         XCTAssertTrue(command.waitForExistence(timeout: 5))
         app.typeKey(.return, modifierFlags: [])
         XCTAssertTrue(confirm.waitForExistence(timeout: 5))
