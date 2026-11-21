@@ -4,22 +4,25 @@ import Providers
 import Storage
 
 /// Decides whether a provider may run without an explicit user start, and checks access after
-/// a quota block without inference (ADR 0005 §7, §10).
+/// a quota block without inference (ADR 0005 §7, §10). The product gate is `AutomationGate`
+/// (ADR 0009); simple gates (tests, UI tests) only answer `allowsAutomatic`.
 public protocol CapabilityGate: Sendable {
     func allowsAutomatic(_ provider: ProviderKind) async -> Bool
+    /// Why a provider may not run automatically right now; checked before every automatic
+    /// reservation, so a blocked provider never reserves and then fails at its start.
+    func automaticVerdict(_ provider: ProviderKind) async -> AutomaticVerdict
     /// A non-inference access check (probe) after a block expired.
     func accessRestored(_ provider: ProviderKind, account: AccountID) async -> Bool
+    /// Called once at app start with the running adapters, before the scheduler exists.
+    func prepare(_ context: GateContext) async
 }
 
-/// Production gate: automatic runs only for providers with a `liveVerified` version (ADR 0003).
-public struct CompatibilityGate: CapabilityGate {
-    public init() {}
-
-    public func allowsAutomatic(_ provider: ProviderKind) async -> Bool {
-        CompatibilityMatrix.entries.contains { $0.provider == provider && $0.status == .liveVerified }
+extension CapabilityGate {
+    public func automaticVerdict(_ provider: ProviderKind) async -> AutomaticVerdict {
+        await allowsAutomatic(provider) ? .allowed : .blocked(.notPermitted)
     }
 
-    public func accessRestored(_ provider: ProviderKind, account: AccountID) async -> Bool { true }
+    public func prepare(_ context: GateContext) async {}
 }
 
 public struct TickReport: Sendable, Equatable {
@@ -226,8 +229,10 @@ public actor Scheduler {
                 firstWait = firstWait ?? WaitReason(.noIndependentReviewer)
                 continue
             }
-            if actor == "scheduler", !(await gate.allowsAutomatic(profile.provider)) {
-                firstWait = firstWait ?? WaitReason(.awaitingUserStart, profile.provider.rawValue)
+            // Checked before the reservation: a blocked provider waits for the user with the
+            // reason (channel, installed version, confinement, subscription), never reserves.
+            if actor == "scheduler", case .blocked(let block) = await gate.automaticVerdict(profile.provider) {
+                firstWait = firstWait ?? WaitReason(.awaitingUserStart, block.detail(for: profile.provider))
                 continue
             }
             let reviewProfile = ModelProfile.smallest(profiles, provider: reviewer.draft.provider, role: .reviewer, atLeast: .fast)

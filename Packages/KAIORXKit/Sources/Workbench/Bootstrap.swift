@@ -12,13 +12,15 @@ public struct AppConfiguration: Sendable {
     public var databasePath: String
     public var workspaceRoot: String
     public var adapters: @Sendable (ProcessHost) -> [any AgentAdapter]
+    /// Decides automatic starts. The default is the product gate of a distributed build: no
+    /// real provider runs on its own (ADR 0009).
     public var gate: any CapabilityGate
     public var clock: WorkbenchClock
     public var limits: SchedulerLimits
 
     public init(
         databasePath: String, workspaceRoot: String, adapters: @escaping @Sendable (ProcessHost) -> [any AgentAdapter],
-        gate: any CapabilityGate = CompatibilityGate(), limits: SchedulerLimits = SchedulerLimits(),
+        gate: any CapabilityGate = AutomationGate(channel: .distributed), limits: SchedulerLimits = SchedulerLimits(),
         clock: @escaping WorkbenchClock = { Int64(Date().timeIntervalSince1970 * 1000) }
     ) {
         self.databasePath = databasePath
@@ -29,11 +31,17 @@ public struct AppConfiguration: Sendable {
         self.clock = clock
     }
 
-    /// The real app: `~/Library/Application Support/KAIORX`.
-    public static func standard(adapters: @escaping @Sendable (ProcessHost) -> [any AgentAdapter]) throws -> AppConfiguration {
+    /// The real app: `~/Library/Application Support/KAIORX`, gated for the build's channel
+    /// (read from the app's Info.plist; unknown means distributed).
+    public static func standard(
+        adapters: @escaping @Sendable (ProcessHost) -> [any AgentAdapter], channel: DistributionChannel = .current()
+    ) throws -> AppConfiguration {
         let database = try AppPaths.defaultDatabaseURL()
         let folder = try AppPaths.supportFolder()
-        return AppConfiguration(databasePath: database.path(percentEncoded: false), workspaceRoot: workspaceRoot(support: folder), adapters: adapters)
+        return AppConfiguration(
+            databasePath: database.path(percentEncoded: false), workspaceRoot: workspaceRoot(support: folder), adapters: adapters,
+            gate: AutomationGate(channel: channel)
+        )
     }
 
     /// Where the real app keeps worktrees and its other workspace files.
@@ -124,7 +132,12 @@ public enum AppBootstrap {
             }
         }
         let agents = ProcessHost(), terminals = ProcessHost()
-        let coordinator = RunCoordinator(store: store, adapters: configuration.adapters(agents))
+        let adapters = configuration.adapters(agents)
+        let coordinator = RunCoordinator(store: store, adapters: adapters)
+        // The gate binds the running adapters and probes the confinement before any tick.
+        await configuration.gate.prepare(GateContext(
+            adapters: adapters, host: agents, scratch: configuration.workspaceRoot + "/preflight", clock: configuration.clock
+        ))
         let git = try? GitRunner(host: agents, home: configuration.workspaceRoot + "/git-home")
         let recovery: RecoveryReport
         do { recovery = try await coordinator.bootstrap() }

@@ -107,10 +107,37 @@ public enum Labels {
         case .noIndependentReviewer: StatusLabel("Kein unabhängiger Reviewer verfügbar", "person.2.slash", .warning)
         case .predecessorEnded: StatusLabel("Ein Vorgänger endete ohne Ergebnis", "arrow.uturn.left.circle", .warning)
         case .predecessorReverted: StatusLabel("Ein Vorgänger wurde zurückgenommen", "arrow.uturn.backward.circle", .warning)
-        case .awaitingUserStart: StatusLabel("Wartet auf deinen Start", "play.circle", .waiting)
+        case .awaitingUserStart:
+            if let detail = reason.detail, let parsed = AutomationBlock.parse(detail), let why = automation(parsed.1, provider: parsed.0) {
+                StatusLabel("Wartet auf deinen Start: \(why)", "play.circle", .waiting)
+            } else {
+                StatusLabel("Wartet auf deinen Start", "play.circle", .waiting)
+            }
         case .userDecision: StatusLabel("Wartet auf deine Entscheidung", "hand.raised", .waiting)
         case .retryLater: StatusLabel("Neuer Versuch später", "arrow.clockwise", .waiting)
         case .capability: StatusLabel("Fähigkeit nicht freigegeben", "lock", .warning)
+        }
+    }
+
+    /// Why a provider does not start automatically (ADR 0009); nil when there is nothing more
+    /// to say than "waits for your start".
+    public static func automation(_ block: AutomationBlock, provider: ProviderKind) -> String? {
+        let name = self.provider(provider)
+        switch block {
+        case .notPermitted: return nil
+        case .channel: return "\(name) startet in dieser Ausgabe von KAIORX nie automatisch (keine Anbieterfreigabe)"
+        case .notInstalled: return "\(name) ist nicht installiert"
+        case .identityUnknown: return "Das installierte \(name)-Programm ließ sich nicht prüfen"
+        case .versionNotListed(let version), .versionNotLiveVerified(let version):
+            return "Die installierte Version \(name) \(version) ist nicht live abgenommen"
+        case .buildNotVerified(let version): return "Dieser Build von \(name) \(version) ist nicht live abgenommen"
+        case .confinementIneffective: return "Der Schreibschutz für Agenten wirkt nicht"
+        case .notSubscribed(let kind):
+            switch kind {
+            case "signedOut": return "\(name) ist in KAIORX nicht angemeldet"
+            case "otherBilling": return "\(name) rechnet nicht nur über das Abo ab"
+            default: return "Das \(name)-Abo ist nicht bestätigt"
+            }
         }
     }
 
