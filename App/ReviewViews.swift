@@ -192,6 +192,14 @@ struct CandidateReviewView: View {
                 }
                 HStack {
                     Spacer()
+                    if candidate.state == .published {
+                        Button { model.sheet = .revert(candidate.id) } label: { Label("Zurücknehmen …", systemImage: "arrow.uturn.backward") }
+                            .keyboardShortcut("r", modifiers: [.command, .shift])
+                            .help("Baut einen Revert-Kandidaten, der diese Veröffentlichung zurücknimmt (⇧⌘R).")
+                            .accessibilityLabel("Veröffentlichung zurücknehmen")
+                            .accessibilityHint("Baut einen Revert-Kandidaten als eigene Aufgabe; das Ziel ändert sich erst nach deiner Freigabe.")
+                            .accessibilityIdentifier("revertCandidate")
+                    }
                     if candidate.state != .published, candidate.state != .rejected, candidate.state != .superseded, candidate.state != .publishing {
                         Button("Ablehnen …") { model.sheet = .reject(candidate.id) }.accessibilityIdentifier("rejectCandidate")
                     }

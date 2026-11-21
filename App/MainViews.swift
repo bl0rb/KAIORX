@@ -49,6 +49,8 @@ struct RootView: View {
             case .newJob(let project): NewJobSheet(project: project)
             case .decision(let decision): DecisionView(decision: decision)
             case .reject(let candidate): RejectSheet(candidate: candidate)
+            case .deliver(let job): DeliverBranchSheet(job: job)
+            case .revert(let candidate): RevertSheet(candidate: candidate)
             }
         }
         .alert("Hinweis", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
@@ -146,14 +148,32 @@ struct TaskListView: View {
     var body: some View {
         @Bindable var model = model
         let tasks = model.state.tasks(of: job)
-        Table(tasks, selection: $model.selectedTask) {
-            TableColumn("Aufgabe") { task in Text(task.title) }
-            TableColumn("Status") { task in StatusBadge(label: Labels.task(task.state)) }
-            TableColumn("Wartet auf") { task in
-                if let wait = Labels.wait(stored: task.waitReason) { Label(wait.text, systemImage: wait.symbol).foregroundStyle(.secondary) } else { Text("–") }
+        let published = model.state.candidates.values.filter { $0.jobID == job && $0.state == .published }.count
+        VStack(spacing: 0) {
+            HStack {
+                Text(published == 0 ? "Noch nichts veröffentlicht" : "Veröffentlichte Kandidaten: \(published)")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("publishedCount")
+                Spacer()
+                Button { model.sheet = .deliver(job) } label: { Label("In Branch liefern …", systemImage: "arrow.triangle.branch") }
+                    .keyboardShortcut("b", modifiers: [.command, .shift])
+                    .disabled(model.state.jobs[job]?.integrationRef == nil)
+                    .help("Legt einen neuen Branch auf dem Integrationsstand dieses Auftrags an (⇧⌘B).")
+                    .accessibilityLabel("In Branch liefern")
+                    .accessibilityHint("Legt einen neuen Branch auf dem Integrationsstand dieses Auftrags an. Vorhandene Branches und dein Checkout bleiben unverändert.")
+                    .accessibilityIdentifier("deliverJob")
             }
+            .padding(.horizontal)
+            .padding(.top, 8)
+            Table(tasks, selection: $model.selectedTask) {
+                TableColumn("Aufgabe") { task in Text(task.title) }
+                TableColumn("Status") { task in StatusBadge(label: Labels.task(task.state)) }
+                TableColumn("Wartet auf") { task in
+                    if let wait = Labels.wait(stored: task.waitReason) { Label(wait.text, systemImage: wait.symbol).foregroundStyle(.secondary) } else { Text("–") }
+                }
+            }
+            .accessibilityIdentifier("tasks")
         }
-        .accessibilityIdentifier("tasks")
         .navigationTitle("Aufgaben")
     }
 }

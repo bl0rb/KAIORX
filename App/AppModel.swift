@@ -37,6 +37,8 @@ final class AppModel {
         case newJob(ProjectID)
         case decision(PendingDecision)
         case reject(CandidateID)
+        case deliver(JobID)
+        case revert(CandidateID)
 
         var id: String {
             switch self {
@@ -44,6 +46,8 @@ final class AppModel {
             case .newJob(let id): "job:\(id.uuidString)"
             case .decision(let decision): "decision:\(decision.id)"
             case .reject(let id): "reject:\(id.uuidString)"
+            case .deliver(let id): "deliver:\(id.uuidString)"
+            case .revert(let id): "revert:\(id.uuidString)"
             }
         }
     }
@@ -72,9 +76,14 @@ final class AppModel {
         case .ready(let services):
             self.services = services
             if launch.isUITest { await seedForUITests(services.store) }
+            var fixtureJob: JobID?
+            #if DEBUG
+            if launch.isUITest, launch.fixture == "published" { fixtureJob = await seedPublishedJob(services) }
+            #endif
             let projector = Projector(store: services.store)
             if let loaded = try? await projector.load() { state = loaded }
             selectedProject = state.projects.values.sorted { $0.createdAt < $1.createdAt }.first?.id
+            selectedJob = fixtureJob
             phase = .ready
             startPump(projector)
             startTicker()
@@ -270,6 +279,8 @@ struct LaunchMode: Sendable {
     let isUITest: Bool
     let uiTestFolder: String?
     let fakeScript: String
+    /// A prepared state for one UI test (`KAIORX_UITEST_FIXTURE`), for example `published`.
+    var fixture: String?
 
     static let current: LaunchMode = {
         let arguments = ProcessInfo.processInfo.arguments
@@ -282,7 +293,9 @@ struct LaunchMode: Sendable {
         #endif
         guard requested else { return LaunchMode(isUITest: false, uiTestFolder: nil, fakeScript: "success") }
         let folder = environment["KAIORX_UITEST_FOLDER"] ?? NSTemporaryDirectory() + "kaiorx-uitest-\(UUID().uuidString)"
-        return LaunchMode(isUITest: true, uiTestFolder: folder, fakeScript: environment["KAIORX_UITEST_SCRIPT"] ?? "success")
+        return LaunchMode(
+            isUITest: true, uiTestFolder: folder, fakeScript: environment["KAIORX_UITEST_SCRIPT"] ?? "success", fixture: environment["KAIORX_UITEST_FIXTURE"]
+        )
     }()
 
     var uiTestRepository: String? { uiTestFolder.map { $0 + "/repo" } }
