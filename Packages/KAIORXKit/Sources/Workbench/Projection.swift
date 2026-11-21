@@ -14,6 +14,11 @@ public struct WorkspaceState: Sendable, Equatable {
     public var tasks: [TaskID: TaskRecord] = [:]
     public var attempts: [AttemptID: AttemptRecord] = [:]
     public var candidates: [CandidateID: CandidateRecord] = [:]
+    /// Author and reviewer worktrees (seal status, rejected paths, the commit a reviewer reads);
+    /// test and integration worktrees are not shown.
+    public var worktrees: [WorktreeID: WorktreeRecord] = [:]
+    /// Reviews per candidate, oldest first.
+    public var reviews: [CandidateID: [ReviewRecord]] = [:]
     /// Time of the latest event of an attempt (provider output included), for "last activity".
     public var lastActivity: [AttemptID: Int64] = [:]
     /// The replay cursor: everything up to this `seq` is reflected.
@@ -40,6 +45,48 @@ public struct WorkspaceState: Sendable, Equatable {
     /// Open attempts (not terminal), uncertain ones included: they are shown as open.
     public var openAttempts: [AttemptRecord] {
         attempts.values.filter { !$0.state.isTerminal }.sorted { ($0.reservedAt, $0.id.uuidString) < ($1.reservedAt, $1.id.uuidString) }
+    }
+
+    /// Which worktrees the projection keeps: those of authors and reviewers, removed ones
+    /// included (a reviewer's worktree still tells which commit it read).
+    static func shows(_ worktree: WorktreeRecord) -> Bool { worktree.kind == .author || worktree.kind == .reviewer }
+
+    /// The worktree holding the task's current author result.
+    public func resultWorktree(of task: TaskID) -> WorktreeRecord? {
+        guard let attempt = tasks[task]?.currentAttemptID.flatMap({ attempts[$0] }), attempt.role == .author,
+              let tree = attempt.worktreeID else { return nil }
+        return worktrees[tree]
+    }
+
+    /// The reviewer attempts that read exactly this candidate's commit, oldest first.
+    public func reviewers(of candidate: CandidateRecord) -> [AttemptRecord] {
+        guard let task = candidate.taskID, let commit = candidate.candidateOID else { return [] }
+        return attempts(of: task).filter { attempt in
+            attempt.role == .reviewer && attempt.worktreeID.flatMap { worktrees[$0] }?.baseOID == commit
+        }
+    }
+
+    /// The task's open reviewer attempt (uncertain included: it still holds the review).
+    public func openReviewer(of task: TaskID) -> AttemptRecord? {
+        attempts(of: task).first { $0.role == .reviewer && !$0.state.isTerminal }
+    }
+
+    /// The candidate a task has open (not published, rejected or superseded), if any.
+    public func openCandidate(of task: TaskID) -> CandidateRecord? {
+        candidates.values.filter { $0.taskID == task && ![.published, .rejected, .superseded].contains($0.state) }
+            .max { ($0.createdAt, $0.id.uuidString) < ($1.createdAt, $1.id.uuidString) }
+    }
+
+    /// A candidate in review that waits for the user to start one: no readable review of its
+    /// commit, no open reviewer, and no finished reviewer the driver has yet to collect.
+    public func needsReview(_ candidate: CandidateRecord) -> Bool {
+        guard candidate.state == .reviewing, let commit = candidate.candidateOID, let taskID = candidate.taskID,
+              tasks[taskID]?.state == .verifying else { return false }
+        let ofCommit = (reviews[candidate.id] ?? []).filter { $0.candidateOID == commit }
+        if ofCommit.contains(where: { $0.status != .invalid }) { return false }
+        if openReviewer(of: taskID) != nil { return false }
+        let recorded = Set(ofCommit.compactMap(\.reviewerAttemptID))
+        return !reviewers(of: candidate).contains { $0.state == .succeeded && !recorded.contains($0.id) }
     }
 }
 
@@ -73,10 +120,14 @@ public actor Projector {
         for project in try await store.projects() { fresh.projects[project.id] = project }
         for job in try await store.jobs() {
             fresh.jobs[job.id] = job
-            for candidate in try await store.candidates(jobID: job.id) { fresh.candidates[candidate.id] = candidate }
+            for candidate in try await store.candidates(jobID: job.id) {
+                fresh.candidates[candidate.id] = candidate
+                fresh.reviews[candidate.id] = try await store.reviews(candidate: candidate.id)
+            }
         }
         for task in try await store.tasks() { fresh.tasks[task.id] = task }
         for attempt in try await store.attempts() { fresh.attempts[attempt.id] = attempt }
+        for worktree in try await store.worktrees() where WorkspaceState.shows(worktree) { fresh.worktrees[worktree.id] = worktree }
         fresh.cursor = cursor
         state = fresh
         return fresh
@@ -115,12 +166,22 @@ public actor Projector {
             if let task = try await store.task(id) {
                 state.tasks[id] = task
                 jobIDs.insert(task.jobID)
-                for attempt in try await store.attempts(taskID: id) { state.attempts[attempt.id] = attempt }
+                for attempt in try await store.attempts(taskID: id) {
+                    state.attempts[attempt.id] = attempt
+                    // A reviewer worktree is linked to its attempt without an event of its own.
+                    if let tree = attempt.worktreeID, let worktree = try await store.worktree(tree), WorkspaceState.shows(worktree) {
+                        state.worktrees[tree] = worktree
+                    }
+                }
             }
         }
         if !projectIDs.isEmpty {
             for project in try await store.projects() { state.projects[project.id] = project }
             for project in projectIDs {
+                // Worktree events (prepare, seal, removal) carry neither task nor attempt.
+                for worktree in try await store.worktrees(projectID: project) where WorkspaceState.shows(worktree) {
+                    state.worktrees[worktree.id] = worktree
+                }
                 for job in try await store.jobs(projectID: project) {
                     state.jobs[job.id] = job
                     jobIDs.insert(job.id)
@@ -129,7 +190,10 @@ public actor Projector {
         }
         for job in jobIDs {
             if let record = try await store.jobs().first(where: { $0.id == job }) { state.jobs[job] = record }
-            for candidate in try await store.candidates(jobID: job) { state.candidates[candidate.id] = candidate }
+            for candidate in try await store.candidates(jobID: job) {
+                state.candidates[candidate.id] = candidate
+                state.reviews[candidate.id] = try await store.reviews(candidate: candidate.id)
+            }
             // Tasks created without an event of their own (plan acceptance) appear with the job.
             for task in try await store.tasks(jobID: job) where state.tasks[task.id] != task { state.tasks[task.id] = task }
         }

@@ -1,6 +1,7 @@
 import Domain
 import Foundation
 import Orchestration
+import Workspace
 
 /// How a status reads and looks: always text plus symbol, never color alone (Plan/macos-und-git.md).
 public struct StatusLabel: Sendable, Equatable, Hashable {
@@ -173,6 +174,114 @@ public enum Labels {
         case .undecidedFindings: "Offene Befunde ohne Entscheidung"
         case .testProfileNotConfirmed(let name): "Testprofil „\(name)“ ist nicht bestätigt"
         case .noConfirmedTestProfile: "Kein bestätigtes Testprofil im Projekt"
+        }
+    }
+
+    // MARK: Candidate chain (ADR 0011)
+
+    /// How far sealing a result got; nil: not sealed yet.
+    public static func seal(_ status: SealStatus?) -> StatusLabel {
+        switch status {
+        case nil: StatusLabel("Nicht versiegelt", "lock.open", .waiting)
+        case .committed: StatusLabel("Versiegelt", "lock", .success)
+        case .empty: StatusLabel("Leer: der Lauf hat nichts geändert", "tray", .neutral)
+        case .rejectedOnly: StatusLabel("Nur verworfene Änderungen", "xmark.bin", .warning)
+        }
+    }
+
+    /// Why sealing dropped a path, from the stored `RejectionReason` raw value (or
+    /// `recoveredUnknown`, set by recovery); an unknown value is shown as it is.
+    public static func rejectReason(_ raw: String) -> String {
+        switch raw {
+        case RejectionReason.outsideAllowedPaths.rawValue: "außerhalb des Schreibbereichs"
+        case RejectionReason.symlink.rawValue: "symbolischer Link"
+        case RejectionReason.gitMetadata.rawValue: "Git-Verwaltungsdatei"
+        case RejectionReason.submodule.rawValue: "Submodul"
+        case RejectionReason.unmerged.rawValue: "ungelöster Konflikt"
+        case "recoveredUnknown": "nach Neustart ermittelt"
+        default: raw
+        }
+    }
+
+    public static func conflictKind(_ kind: ConflictEntry.Kind) -> String {
+        switch kind {
+        case .bothModified: "Beide geändert"
+        case .bothAdded: "Beide neu angelegt"
+        case .deletedByUs: "Im Integrationsstand gelöscht, im Ergebnis geändert"
+        case .deletedByThem: "Im Ergebnis gelöscht, im Integrationsstand geändert"
+        case .addedByUs: "Nur im Integrationsstand angelegt"
+        case .addedByThem: "Nur im Ergebnis angelegt"
+        }
+    }
+
+    /// The user's choice for a conflicting path; for a revert the incoming side is the reversal.
+    public static func conflictChoice(_ choice: ConflictChoice, revert: Bool) -> String {
+        switch choice {
+        case .target: "Integrationsstand behalten"
+        case .result: revert ? "Rücknahme übernehmen" : "Ergebnis übernehmen"
+        case .delete: "Datei löschen"
+        }
+    }
+
+    public static func review(_ status: ReviewStatus) -> StatusLabel {
+        switch status {
+        case .approved: StatusLabel("Zugestimmt", "checkmark.seal", .success)
+        case .changesRequested: StatusLabel("Änderungen verlangt", "exclamationmark.bubble", .warning)
+        case .invalid: StatusLabel("Unlesbar", "questionmark.square.dashed", .warning)
+        }
+    }
+
+    /// Why the driver could not move a task on, as a sentence.
+    public static func chainIssue(_ issue: ChainIssue) -> String {
+        switch issue {
+        case .sealFailed(let detail): "Versiegeln fehlgeschlagen: \(detail)"
+        case .buildFailed(let detail): "Bauen fehlgeschlagen: \(detail)"
+        case .collectFailed(let detail): "Review konnte nicht übernommen werden: \(detail)"
+        case .planTaskMissing: "Die Planaufgabe fehlt in der Planfassung des Laufs; das Ergebnis wird nicht versiegelt."
+        case .containedAfterRebuild:
+            "Nach dem Neubau ist das Ergebnis schon im Integrationsstand enthalten. Lehne den Kandidaten ab; die Aufgabe kann dann neu bearbeitet werden."
+        }
+    }
+
+    /// The status line of a task's result, with the driver's current issue first.
+    public static func result(_ check: ResultCheck, issue: ChainIssue?) -> StatusLabel {
+        if let issue { return StatusLabel(chainIssue(issue), "exclamationmark.triangle", .failure) }
+        switch check {
+        case .notApplicable: return StatusLabel("Kein Ergebnis", "minus.circle", .neutral)
+        case .awaitingSeal: return StatusLabel("Wird versiegelt …", "lock.rotation", .active)
+        case .planTaskMissing: return StatusLabel("Planaufgabe fehlt", "exclamationmark.triangle", .warning)
+        case .empty: return StatusLabel("Leer: der Lauf hat nichts geändert", "tray", .waiting)
+        case .contained: return StatusLabel("Schon im Integrationsstand enthalten", "checkmark.circle", .waiting)
+        case .rejectedOnly: return StatusLabel("Nur verworfene Änderungen", "xmark.bin", .warning)
+        case .undeclared(_, let rejected):
+            return StatusLabel(rejected.count == 1 ? "1 Pfad verworfen" : "\(rejected.count) Pfade verworfen", "exclamationmark.shield", .waiting)
+        case .buildable(let commit): return StatusLabel("Versiegelt: Commit \(short(commit)) – Kandidat wird gebaut …", "hammer", .active)
+        case .candidate: return StatusLabel("Kandidat gebaut", "shippingbox", .success)
+        }
+    }
+
+    /// The write area a result was sealed against.
+    public static func writeArea(_ area: ResultWriteArea) -> String {
+        switch area {
+        case .wholeProject: "Schreibbereich: ganzes Projekt"
+        case .paths(let paths): "Schreibbereich: \(paths.joined(separator: ", "))"
+        case .planTaskMissing: "Schreibbereich: unbekannt, die Planaufgabe fehlt"
+        }
+    }
+
+    /// Why a review cannot start with `provider` right now.
+    public static func reviewBlocker(_ blocker: ReviewBlocker, provider: ProviderKind) -> String {
+        let name = self.provider(provider)
+        switch blocker {
+        case .noReviewerConsent: return "Für \(name) fehlt die Zustimmung als Prüfer"
+        case .noModelProfile: return "Für \(name) gibt es kein passendes Prüfermodell"
+        case .accountBlocked: return "Das Prüferkonto bei \(name) ist gesperrt"
+        case .slotsFull(let global): return global ? "Alle Plätze sind belegt" : "Alle Plätze des Prüferkontos bei \(name) sind belegt"
+        case .reviewerOpen: return "Für diese Aufgabe läuft schon ein Review"
+        case .contentPurged: return "Die Inhalte des Autors wurden vergessen; dieser Kandidat bekommt kein neues Review"
+        case .adapterMissing: return "\(name) ist in KAIORX nicht verfügbar"
+        case .candidateNotReviewing: return "Der Kandidat wartet nicht auf ein Review"
+        case .sameProviderAsAuthor: return "Der Prüfer muss von einem anderen Anbieter kommen als der Autor"
         }
     }
 

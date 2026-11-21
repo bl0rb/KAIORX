@@ -69,6 +69,9 @@ public struct AppServices: Sendable {
     public let integration: IntegrationService?
     public let memory: MemoryBroker?
     public let scheduler: Scheduler?
+    /// The candidate chain's host-only driver (ADR 0011); built only after the Git journal was
+    /// repaired, like the scheduler.
+    public let chain: CandidateChain?
     public let recovery: RecoveryReport
     public let restored: RestoreReport?
 
@@ -143,6 +146,7 @@ public enum AppBootstrap {
         do { recovery = try await coordinator.bootstrap() }
         catch { return .recovery(.storeFailed(String(describing: error)), backups: BackupRestore.backups(of: database)) }
         var workspace: WorkspaceService?, integration: IntegrationService?, memory: MemoryBroker?, scheduler: Scheduler?
+        var chain: CandidateChain?
         if let git {
             let service = WorkspaceService(store: store, git: git, layout: WorkspaceLayout(root: configuration.workspaceRoot))
             let integrationService = IntegrationService(store: store, workspace: service, git: git, coordinator: coordinator)
@@ -154,12 +158,18 @@ public enum AppBootstrap {
                     store: store, coordinator: coordinator, workspace: service, gate: configuration.gate, limits: configuration.limits, memory: broker
                 )
                 integration = integrationService
+                // The chain seals, builds and collects only after journal repair (ADR 0011).
+                chain = CandidateChain(
+                    store: store, workspace: service, integration: integrationService, git: git, coordinator: coordinator,
+                    limits: configuration.limits, gate: configuration.gate
+                )
             }
             workspace = service
         }
         return .ready(AppServices(
             configuration: configuration, store: store, agents: agents, terminals: terminals, coordinator: coordinator, git: git,
-            workspace: workspace, integration: integration, memory: memory, scheduler: scheduler, recovery: recovery, restored: restored
+            workspace: workspace, integration: integration, memory: memory, scheduler: scheduler, chain: chain, recovery: recovery,
+            restored: restored
         ))
     }
 

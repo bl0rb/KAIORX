@@ -41,6 +41,36 @@ func sh(_ script: String, in directory: String) async throws -> String {
         #expect(Labels.wait(stored: "userDecision:attemptLimit")?.text == "Wartet auf deine Entscheidung")
         #expect(Labels.duration(3_725_000) == "1 h 02 min" && Labels.duration(75_000) == "1 min 15 s" && Labels.duration(4_000) == "4 s")
     }
+
+    /// The candidate chain's values (ADR 0011): every one has its own German text.
+    @Test func everyChainValueHasText() {
+        let seals = ([nil] + SealStatus.allCases.map(Optional.some)).map(Labels.seal) + ReviewStatus.allCases.map(Labels.review)
+        #expect(seals.allSatisfy { !$0.text.isEmpty && !$0.symbol.isEmpty })
+        #expect(Set(seals.map(\.text)).count == seals.count)
+        let kinds: [ConflictEntry.Kind] = [.bothModified, .bothAdded, .deletedByUs, .deletedByThem, .addedByUs, .addedByThem]
+        #expect(Set(kinds.map(Labels.conflictKind)).count == kinds.count)
+        #expect(Set(ConflictChoice.allCases.map { Labels.conflictChoice($0, revert: false) }).count == ConflictChoice.allCases.count)
+        #expect(Labels.conflictChoice(.result, revert: true) == "Rücknahme übernehmen")
+        let reasons = ["outsideAllowedPaths", "symlink", "gitMetadata", "submodule", "unmerged", "recoveredUnknown"]
+        #expect(Set(reasons.map(Labels.rejectReason)).count == reasons.count && reasons.allSatisfy { Labels.rejectReason($0) != $0 })
+        #expect(Labels.rejectReason("neuerGrund") == "neuerGrund")
+        let issues: [ChainIssue] = [.sealFailed("x"), .buildFailed("x"), .collectFailed("x"), .planTaskMissing, .containedAfterRebuild]
+        #expect(Set(issues.map(Labels.chainIssue)).count == issues.count)
+        let checks: [ResultCheck] = [
+            .notApplicable, .awaitingSeal, .planTaskMissing, .empty, .contained(tip: "t"), .rejectedOnly(rejected: ["a": "symlink"]),
+            .undeclared(resultOID: "r", rejected: ["a": "symlink", "b": "symlink"]), .buildable(resultOID: "r"), .candidate(CandidateID()),
+        ]
+        let results = checks.map { Labels.result($0, issue: nil) }
+        #expect(Set(results.map(\.text)).count == checks.count && results.allSatisfy { !$0.symbol.isEmpty })
+        #expect(Labels.result(.undeclared(resultOID: "r", rejected: ["a": "symlink", "b": "symlink"]), issue: nil).text == "2 Pfade verworfen")
+        #expect(Labels.result(.empty, issue: .buildFailed("kaputt")).text == "Bauen fehlgeschlagen: kaputt")
+        let blockers: [ReviewBlocker] = [
+            .noReviewerConsent, .noModelProfile, .accountBlocked, .slotsFull(global: true), .slotsFull(global: false), .reviewerOpen(AttemptID()),
+            .contentPurged, .adapterMissing, .candidateNotReviewing, .sameProviderAsAuthor,
+        ]
+        #expect(Set(blockers.map { Labels.reviewBlocker($0, provider: .codex) }).count == blockers.count)
+        #expect(Labels.writeArea(.wholeProject) == "Schreibbereich: ganzes Projekt" && Labels.writeArea(.paths(["docs/", "src/"])) == "Schreibbereich: docs/, src/")
+    }
 }
 
 @Suite struct ProjectionTests {
@@ -573,6 +603,67 @@ struct FakeGate: CapabilityGate {
         let after = try await services.scheduler!.tick()
         #expect(after.reserved.count == 1, "\(after)")
         await AppBootstrap.shutdown(services)
+    }
+
+    /// The whole path of ADR 0011 without UI: the author writes inside its area, the driver
+    /// seals and builds, the user runs the tests and starts the review, the driver collects it,
+    /// and the user approves the publication. Needs the driver (WP2).
+    @Test(.tags(.chainDriver)) func anAgentRunGoesThroughTheChainToPublication() async throws {
+        let f = try await ChainFixture("flow-chain", writes: ["src/neu.swift": "let neu = 1\n"])
+        let (services, actions, project) = (f.services, f.actions, f.project)
+        let chain = try #require(services.chain)
+        for tier in CapabilityTier.allCases {
+            try await services.store.registerModelProfile(ModelProfile(provider: .fake, role: .author, tier: tier, model: "f-\(tier.rawValue)", typicalTokens: 1_000, verifiedAt: 1))
+        }
+        try await services.store.registerModelProfile(ModelProfile(provider: .codex, role: .reviewer, tier: .fast, model: "r", typicalTokens: 500, verifiedAt: 1))
+        let job = try await actions.createJob(
+            project: project, goal: "Ziel", tasks: [PlanTaskDraft(key: "t1", title: "Aufgabe", criteria: ["fertig"], writePaths: ["src/"])],
+            budget: ([.fake, .codex], 200_000)
+        )
+        for provider in [ProviderKind.fake, .codex] { try await actions.grantConsent(project: project, provider: provider) }
+        try await f.confirmProfile("test -f src/neu.swift")
+        _ = try await services.scheduler!.tick()
+        let task = try #require(try await services.store.tasks(jobID: job).first)
+        let author = try #require(try await services.store.task(task.id)?.currentAttemptID)
+        _ = try await services.coordinator.waitUntilFinished(author)
+
+        // Seal and build are host-only steps of the driver.
+        var candidate: CandidateRecord?
+        for _ in 0..<50 where candidate == nil {
+            let report = await chain.step()
+            #expect(report.issues.isEmpty, "\(report)")
+            candidate = try await services.store.candidates(jobID: job).first { $0.state == .built }
+            if candidate == nil { try await Task.sleep(for: .milliseconds(20)) }
+        }
+        let built = try #require(candidate)
+        #expect(try await f.pending().contains(.tests(built.id)))
+
+        // Tests and the review start stay with the user.
+        let test = try await actions.runTests(built.id)
+        #expect(test.status == .passed && test.candidateOID == built.candidateOID)
+        #expect(try await f.pending().contains(.review(built.id)))
+        let option = try #require(try await actions.reviewOptions(built.id).first { $0.provider == .codex })
+        let current = try #require(try await services.store.candidate(built.id))
+        let sheet = DecisionSheet.startReview(option, candidate: current, task: try await services.store.task(task.id))
+        #expect(sheet.canApprove, "\(sheet.blockers)")
+        let reviewer = try await actions.startReview(option, candidate: built.id)
+        _ = try await services.coordinator.waitUntilFinished(reviewer)
+
+        // The driver collects the finished review; the candidate is accepted.
+        var accepted: CandidateRecord?
+        for _ in 0..<50 where accepted == nil {
+            _ = await chain.step()
+            accepted = try await services.store.candidate(built.id).flatMap { $0.state == .accepted ? $0 : nil }
+            if accepted == nil { try await Task.sleep(for: .milliseconds(20)) }
+        }
+        let ready = try #require(accepted)
+        #expect(try await f.pending().contains(.publish(built.id)))
+        let gate = try await services.integration!.gateItems(built.id)
+        let publish = DecisionSheet.publish(ready, task: try await services.store.task(task.id), gate: gate)
+        try await actions.approveAndPublish(built.id, sheet: publish)
+        #expect(try await services.store.candidate(built.id)?.state == .published)
+        #expect(try await services.store.task(task.id)?.state == .integrated)
+        await f.close()
     }
 }
 
