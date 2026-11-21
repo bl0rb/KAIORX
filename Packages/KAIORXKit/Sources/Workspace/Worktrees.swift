@@ -35,6 +35,12 @@ public enum RejectionReason: String, Sendable, Equatable, Codable {
     /// Set only by recovery: a seal finished after a restart knows that the path was dropped,
     /// not why (ADR 0011 §6).
     case recoveredUnknown
+
+    /// The path key recovery records (with `recoveredUnknown`) when the paths a recovered seal
+    /// dropped cannot be determined, for example because its worktree is gone. Any non-empty
+    /// rejected list makes building wait for the user's confirmation, so this one entry stands
+    /// for "dropped paths unknown" and the result is never built on its own.
+    public static let unknownPathsMarker = "*"
 }
 
 public struct SealOutcome: Sendable, Equatable {
@@ -282,15 +288,28 @@ extension GitRunner {
     }
 
     /// Paths whose state in the worktree differs from `tree` (for a sealed worktree: its saved
-    /// tree), sorted. Built in a temporary index like the seal itself, so the worktree and its own
-    /// index stay untouched; recovery uses it to rebuild the list of dropped paths.
+    /// tree), sorted. Built from the seal's own inventory and in a temporary index like the seal,
+    /// so the worktree and its own index stay untouched; recovery uses it to rebuild the list of
+    /// dropped paths. Changes Git cannot stage (nested repositories, Git metadata, anything below
+    /// a symlink or nested repository) are never part of a sealed tree: they are listed as they
+    /// are instead of staged, so they cannot make the comparison fail.
     public func differences(of location: WorktreeLocation, from tree: String) async throws -> [String] {
-        let current = try await snapshotTree(of: location, base: "HEAD", paths: nil)
-        guard current != tree else { return [] }
+        let changes = try await inventory(of: location)
+        let links = changes.filter { $0.isSymlink || $0.isGitlink }.map(\.path)
+        var listed: Set<String> = []
+        var staged: [String] = []
+        for change in changes {
+            let unstageable = change.isGitlink
+                || change.path.split(separator: "/").contains(where: Self.isGitMetadataComponent)
+                || links.contains { change.path.hasPrefix($0 + "/") }
+            if unstageable { listed.insert(change.path) } else { staged.append(change.path) }
+        }
+        let current = try await snapshotTree(of: location, base: "HEAD", paths: staged)
+        guard current != tree else { return listed.sorted() }
         let fields = nulFields(try await run(
             ["diff-tree", "-r", "-z", "--name-only", "--no-renames", tree, current], at: location
         ).stdout.data)
-        return Array(Set(fields.filter { !$0.isEmpty })).sorted()
+        return listed.union(fields.filter { !$0.isEmpty }).sorted()
     }
 
     /// Paths that are symlinks or gitlinks in `tree` but not identical in `base`.

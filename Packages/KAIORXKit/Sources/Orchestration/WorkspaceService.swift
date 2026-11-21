@@ -346,16 +346,11 @@ public actor WorkspaceService {
         let desired = try require(operation.desiredNew)
         var effects = GitOperationEffects()
         var sealed: WorktreeRecord?
-        if let worktreeID = operation.worktreeID { sealed = try await worktree(worktreeID) }
-        if let record = sealed, record.state == .ready {
-            // The reasons of a seal interrupted here are lost, but not which paths it dropped:
-            // the frozen worktree still holds them, the result's tree does not. They are kept as
-            // `recoveredUnknown`, so building still needs the user's confirmation (ADR 0011 §6).
-            let savedTree = try await git.tree(of: desired, in: repository)
-            effects = GitOperationEffects(
-                worktreeState: .frozen, resultOID: desired, savedTree: savedTree,
-                seal: (.committed, try await droppedPaths(of: record, savedTree: savedTree, in: repository))
-            )
+        if let worktreeID = operation.worktreeID {
+            // Only a seal journals a ref update with a worktree. One still unsealed (ready, or
+            // flagged by an earlier recovery that left the entry open) is finished here.
+            let record = try await worktree(worktreeID)
+            if record.sealStatus == nil, record.state == .ready || record.state == .needsAttention { sealed = record }
         }
         let integrationPrefix = "refs/kaiorx/integrations/"
         let publication = operation.approvalID != nil && ref.hasPrefix(integrationPrefix)
@@ -365,7 +360,11 @@ public actor WorkspaceService {
             effects.jobIntegration = (job, desired, ref)
         }
         let current = try await git.readRef(ref, in: repository)
-        if current == desired { return (.applied, "found after restart", effects) }
+        if current == desired {
+            guard let record = sealed else { return (.applied, "found after restart", effects) }
+            let (seal, note) = try await sealEffects(of: record, result: desired, in: repository)
+            return (.applied, "found after restart" + note, seal)
+        }
         guard current == operation.expectedOld else {
             if publication, let candidate = operation.candidateID {
                 // The target moved elsewhere: the candidate cannot be published any more.
@@ -388,18 +387,45 @@ public actor WorkspaceService {
         // The update never happened: repeat the same compare-and-swap.
         do {
             try await git.updateRef(ref, to: desired, expectedOld: operation.expectedOld, in: repository)
-            return (.applied, "repeated on recovery", effects)
         } catch {
             let release = publication ? operation.candidateID.map { GitOperationEffects(candidateReleased: ($0, .accepted)) } : nil
             return (publication ? .failed : .needsAttention, String(describing: error), release ?? GitOperationEffects())
         }
+        guard let record = sealed else { return (.applied, "repeated on recovery", effects) }
+        let (seal, note) = try await sealEffects(of: record, result: desired, in: repository)
+        return (.applied, "repeated on recovery" + note, seal)
+    }
+
+    /// The effects that finish a seal whose result ref is in place: frozen, committed, with what
+    /// it dropped. The reasons are lost, but not which paths were dropped: the frozen worktree
+    /// still holds them, the result's tree does not. They are kept as `recoveredUnknown`, so
+    /// building still needs the user's confirmation (ADR 0011 §6). When they cannot be determined
+    /// (worktree gone, comparison refused by Git), the seal is finished all the same, with the
+    /// single `RejectionReason.unknownPathsMarker` entry: the journal entry never stays open (a
+    /// re-seal would only collide with the existing result ref), and the result is never built
+    /// without the user's confirmation.
+    private func sealEffects(
+        of record: WorktreeRecord, result: String, in repository: RepositoryInfo
+    ) async throws -> (GitOperationEffects, String) {
+        let savedTree = try await git.tree(of: result, in: repository)
+        let rejected: [String: String]
+        var note = ""
+        do {
+            rejected = try await droppedPaths(of: record, savedTree: savedTree, in: repository)
+        } catch {
+            rejected = [RejectionReason.unknownPathsMarker: RejectionReason.recoveredUnknown.rawValue]
+            note = "; dropped paths unknown: \(error)"
+        }
+        let effects = GitOperationEffects(worktreeState: .frozen, resultOID: result, savedTree: savedTree, seal: (.committed, rejected))
+        return (effects, note)
     }
 
     /// Every path where the worktree differs from the sealed tree, as `recoveredUnknown`. Only a
-    /// worktree that is still in place and registered can be compared; anything else is refused
-    /// (the entry is then skipped and stays prepared) rather than recorded as a clean seal.
+    /// worktree that is still in place and registered can be compared; anything else throws.
     private func droppedPaths(of record: WorktreeRecord, savedTree: String, in repository: RepositoryInfo) async throws -> [String: String] {
-        let location = try git.locate(worktree: path(of: record), in: repository)
+        let path = path(of: record)
+        guard FileManager.default.fileExists(atPath: path) else { throw WorkspaceServiceError.worktreeNotFound(record.id) }
+        let location = try git.locate(worktree: path, in: repository)
         let paths = try await git.differences(of: location, from: savedTree)
         return Dictionary(uniqueKeysWithValues: paths.map { ($0, RejectionReason.recoveredUnknown.rawValue) })
     }
