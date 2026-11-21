@@ -30,33 +30,125 @@ public struct TimelineRow: Sendable, Equatable, Identifiable {
 }
 
 /// An attempt's timeline with bounded memory: at most `maxRows` rows (the oldest drop, with a
-/// gap row saying so), message deltas merged per item up to `maxItemBytes`.
+/// gap row saying so), message deltas merged per item up to `maxItemBytes`. It can open on the
+/// newest page of a run and take older pages in front (`prepend`), so the last view needs no
+/// replay of every delta.
 public struct Timeline: Sendable, Equatable {
     public let maxRows: Int
     public let maxItemBytes: Int
     public private(set) var rows: [TimelineRow] = []
     /// Ordinal of the last event read: the next page starts after it.
     public private(set) var lastOrdinal = 0
+    /// Ordinal of the oldest event read (0 before the first): older pages end before it.
+    public private(set) var firstOrdinal = 0
     public private(set) var droppedRows = 0
     private var nextID = 0
+    /// Rows taken in front get IDs below zero, so every ID stays unique.
+    private var previousID = -1
     private var openMessage: [String: Int] = [:]
+    /// Message rows whose text came from a final message: older deltas never change them.
+    private var finalRows: Set<Int> = []
+    /// Time of the event at `firstOrdinal` (for a gap row in front of it).
+    private var firstAt: Int64 = 0
+    private var reachedStart = false
 
     public init(maxRows: Int = 2_000, maxItemBytes: Int = 256 * 1024) {
         self.maxRows = maxRows
         self.maxItemBytes = maxItemBytes
     }
 
-    /// Appends one page of events (in ordinal order). A missing ordinal becomes a gap row.
+    /// Older events may exist and can still be shown: nothing dropped yet (older rows would
+    /// leave a hole) and no empty older page seen.
+    public var canLoadOlder: Bool { firstOrdinal > 1 && droppedRows == 0 && !reachedStart }
+
+    /// Appends one page of events (in ordinal order). A missing ordinal becomes a gap row. On an
+    /// empty timeline the page may start anywhere: it is then the newest page of the run.
     public mutating func append(_ events: [EventRecord]) {
         for event in events {
             let ordinal = event.ordinal ?? lastOrdinal + 1
             if ordinal <= lastOrdinal { continue }
             if ordinal > lastOrdinal + 1, lastOrdinal > 0 {
-                add(TimelineRow(id: 0, kind: .gap, at: event.at, text: "Anzeige unvollständig: \(ordinal - lastOrdinal - 1) Ereignisse fehlen"))
+                add(TimelineRow(id: 0, kind: .gap, at: event.at, text: Self.gapText(ordinal - lastOrdinal - 1)))
+            }
+            if firstOrdinal == 0 {
+                firstOrdinal = ordinal
+                firstAt = event.at
             }
             lastOrdinal = ordinal
             consume(event)
         }
+    }
+
+    /// Takes one older page (in ordinal order, before `firstOrdinal`) in front, with the same
+    /// rows a replay from the start would show: a message still open at the page's end merges
+    /// with its continuation in the shown rows and moves up to where it began (a final text
+    /// wins, the byte bound holds for the joined text), a missing ordinal between the page and
+    /// the shown rows becomes a gap row, and the oldest rows drop beyond `maxRows`. An empty page
+    /// means nothing older is left. Ignored once rows were dropped.
+    public mutating func prepend(_ events: [EventRecord]) {
+        guard firstOrdinal > 0 else {
+            append(events)
+            return
+        }
+        guard droppedRows == 0 else { return }
+        let page = events.filter { ($0.ordinal ?? .max) < firstOrdinal }.sorted { $0.ordinal! < $1.ordinal! }
+        guard let first = page.first, let firstPageOrdinal = first.ordinal, let lastPageOrdinal = page.last?.ordinal else {
+            reachedStart = true
+            return
+        }
+        var older = Timeline(maxRows: maxRows, maxItemBytes: maxItemBytes)
+        older.lastOrdinal = firstPageOrdinal - 1
+        older.append(page)
+        if lastPageOrdinal + 1 < firstOrdinal {
+            older.add(TimelineRow(id: 0, kind: .gap, at: firstAt, text: Self.gapText(firstOrdinal - lastPageOrdinal - 1)))
+        }
+
+        // Continuations: the first shown message row of an item still open at the page's end.
+        var shown = rows
+        var merged: Set<Int> = []
+        var stillOpen: [String: Int] = [:]
+        // Indices first: merged rows take over newer IDs, which may equal other older IDs.
+        let open = older.openMessage.compactMap { item, id in older.rows.firstIndex { $0.id == id }.map { (item, $0) } }
+        for (item, olderIndex) in open {
+            guard let index = shown.firstIndex(where: { $0.kind == .message && $0.itemID == item }) else {
+                stillOpen[item] = olderIndex
+                continue
+            }
+            let newer = shown.remove(at: index)
+            var row = older.rows[olderIndex]
+            if finalRows.contains(newer.id) {
+                row.text = newer.text
+                row.truncated = newer.truncated
+            } else if !row.truncated {
+                row.text += newer.text
+                row.truncated = newer.truncated
+                if row.text.utf8.count > maxItemBytes {
+                    row.text = String(decoding: Array(row.text.utf8.prefix(maxItemBytes)), as: UTF8.self)
+                    row.truncated = true
+                }
+            }
+            // The newer row's ID stays: an open item keeps pointing at it.
+            row.id = newer.id
+            row.at = newer.at
+            older.rows[olderIndex] = row
+            merged.insert(olderIndex)
+        }
+
+        // Fresh IDs below zero, rising from top to bottom.
+        var renamed: [Int: Int] = [:]
+        for index in older.rows.indices.reversed() where !merged.contains(index) {
+            renamed[older.rows[index].id] = previousID
+            older.rows[index].id = previousID
+            previousID -= 1
+        }
+        finalRows.formUnion(older.finalRows.compactMap { renamed[$0] })
+        for (item, index) in stillOpen { openMessage[item] = older.rows[index].id }
+
+        rows = older.rows + shown
+        droppedRows += older.droppedRows
+        firstOrdinal = firstPageOrdinal
+        firstAt = first.at
+        trim()
     }
 
     private mutating func consume(_ event: EventRecord) {
@@ -106,6 +198,7 @@ public struct Timeline: Sendable, Equatable {
             }
             row.at = at
             rows[index] = row
+            if final { finalRows.insert(row.id) }
         } else {
             var row = TimelineRow(id: 0, kind: .message, at: at, text: text, itemID: item)
             if row.text.utf8.count > maxItemBytes {
@@ -114,6 +207,7 @@ public struct Timeline: Sendable, Equatable {
             }
             let id = add(row)
             openMessage[item] = id
+            if final { finalRows.insert(id) }
         }
         if final { openMessage[item] = nil }
     }
@@ -124,13 +218,20 @@ public struct Timeline: Sendable, Equatable {
         row.id = nextID
         nextID += 1
         rows.append(row)
-        if rows.count > maxRows {
-            let drop = rows.count - maxRows
-            droppedRows += drop
-            rows.removeFirst(drop)
-        }
+        trim()
         return row.id
     }
+
+    /// The oldest rows drop beyond `maxRows`.
+    private mutating func trim() {
+        guard rows.count > maxRows else { return }
+        let drop = rows.count - maxRows
+        droppedRows += drop
+        for row in rows.prefix(drop) { finalRows.remove(row.id) }
+        rows.removeFirst(drop)
+    }
+
+    static func gapText(_ missing: Int) -> String { "Anzeige unvollständig: \(missing) Ereignisse fehlen" }
 
     static func usageText(_ sample: UsageSample) -> String {
         var parts: [String] = []
@@ -149,6 +250,47 @@ public struct Timeline: Sendable, Equatable {
         case .contentPurged: "Inhalt gelöscht"
         default: kind.rawValue
         }
+    }
+}
+
+/// How the monitor reads a selected attempt (App/ToolViews.swift `MonitorView`): opening reads
+/// only the newest pages (`open`), older pages come on request (`Store.latestAttemptEvents`
+/// before `Timeline.firstOrdinal`), new events after `Timeline.lastOrdinal` as before.
+public enum TimelinePaging {
+    public struct Limits: Sendable, Equatable {
+        /// Events per page, for newer and older pages alike.
+        public var pageSize: Int
+        /// Opening stops once the view has this many rows or has read this many events: enough
+        /// to fill the view, far fewer than a long run has (deltas merge, a page can be one row).
+        public var openRows: Int
+        public var openEvents: Int
+
+        public init(pageSize: Int, openRows: Int, openEvents: Int) {
+            self.pageSize = pageSize
+            self.openRows = openRows
+            self.openEvents = openEvents
+        }
+
+        public static let app = Limits(pageSize: 500, openRows: 30, openEvents: 1_000)
+    }
+
+    public static var pageSize: Int { Limits.app.pageSize }
+
+    /// The last view of an attempt and how many events it read.
+    public static func open(_ attempt: AttemptID, store: Store, limits: Limits = .app) async throws -> (timeline: Timeline, eventsRead: Int) {
+        var timeline = Timeline()
+        var page = try await store.latestAttemptEvents(attempt, limit: limits.pageSize)
+        var read = page.count
+        timeline.append(page)
+        while page.count == limits.pageSize, timeline.canLoadOlder, timeline.rows.count < limits.openRows, read < limits.openEvents {
+            try Task.checkCancellation()
+            page = try await store.latestAttemptEvents(attempt, beforeOrdinal: timeline.firstOrdinal, limit: limits.pageSize)
+            read += page.count
+            timeline.prepend(page)
+        }
+        // A short page reached the start of the run.
+        if page.count < limits.pageSize { timeline.prepend([]) }
+        return (timeline, read)
     }
 }
 
