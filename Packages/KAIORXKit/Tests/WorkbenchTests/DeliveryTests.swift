@@ -128,9 +128,12 @@ struct PublishedJobFixture {
         #expect(try await f.git("git status --porcelain=v1; git rev-parse HEAD; git symbolic-ref HEAD; git for-each-ref refs/heads | grep -v kaiorx/lieferung") == user)
 
         // A taken name (case-insensitively) is named in the sheet with the suffix that is used.
-        let taken = DecisionSheet.deliver(try await f.actions.deliveryPreview(job: f.job, name: "KAIORX/Lieferung"), jobTitle: "Liefern")
-        #expect(taken.scope.contains { $0.contains("„KAIORX/Lieferung“ ist schon belegt") && $0.contains("„KAIORX/Lieferung-2“") })
-        #expect(try await f.actions.deliver(sheet: taken) == "KAIORX/Lieferung-2")
+        let taken = DecisionSheet.deliver(try await f.actions.deliveryPreview(job: f.job, name: "kaiorx/Lieferung"), jobTitle: "Liefern")
+        #expect(taken.scope.contains { $0.contains("„kaiorx/Lieferung“ ist schon belegt") && $0.contains("„kaiorx/Lieferung-2“") })
+        #expect(try await f.actions.deliver(sheet: taken) == "kaiorx/Lieferung-2")
+        // A differently spelled folder would land in `kaiorx/` on APFS: refused, not renamed silently.
+        let folder = try await f.actions.deliveryPreview(job: f.job, name: "KAIORX/Lieferung")
+        #expect(folder.problems == [.folderCaseConflict(name: "KAIORX/Lieferung", existing: "kaiorx")])
         await f.close()
     }
 
@@ -161,6 +164,15 @@ struct PublishedJobFixture {
         #expect(try await f.git("git for-each-ref --format='%(refname)' refs/heads") == "refs/heads/main")
         #expect(IntegrationMessages.text(MergeError.invalidBranchName("x")) == DeliveryProblem.invalidName.text)
         #expect(IntegrationMessages.text(MergeError.noFreeBranchName("x")).hasPrefix("Der Name ist belegt"))
+
+        // A folder spelled differently from an existing one (`feature/` next to `Feature/x`) is refused with a reason.
+        try await f.git("git branch Feature/x")
+        let variant = try await f.actions.deliveryPreview(job: f.job, name: "feature/y")
+        #expect(variant.branchName == nil && variant.problems == [.folderCaseConflict(name: "feature/y", existing: "Feature")])
+        let blocked = DecisionSheet.deliver(variant, jobTitle: "Liefern")
+        #expect(!blocked.canApprove && blocked.blockers.count == 1)
+        #expect(blocked.blockers[0].contains("„Feature“") && blocked.blockers[0].contains("„Feature/y“"))
+        #expect(IntegrationMessages.text(MergeError.branchFolderCaseConflict("feature/y", existing: "Feature")) == blocked.blockers[0])
         await f.close()
     }
 

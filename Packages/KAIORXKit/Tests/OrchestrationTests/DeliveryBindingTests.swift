@@ -32,4 +32,28 @@ import Testing
         #expect(GitRunner.freeBranchNames(for: "neu", existing: ["main"]) == ["neu"] + (2...20).map { "neu-\($0)" })
         #expect(GitRunner.freeBranchNames(for: "neu", existing: ["neu"] + (2...20).map { "NEU-\($0)" }).isEmpty)
     }
+
+    /// A folder spelled differently from an existing ref folder would land in that folder on a
+    /// case-insensitive file system (`feature/y` inside `Feature/`): compared by name, not via the disk.
+    @Test func caseVariantFoldersAreFoundByName() {
+        #expect(GitRunner.caseVariantFolder(for: "feature/y", existing: ["main", "Feature/x"]) == "Feature")
+        #expect(GitRunner.caseVariantFolder(for: "a/B/c", existing: ["a/b/x"]) == "a/b")
+        #expect(GitRunner.caseVariantFolder(for: "kaiorx/a\u{0308}/x", existing: ["kaiorx/\u{00E4}/y"]) == "kaiorx/\u{00E4}")
+        #expect(GitRunner.caseVariantFolder(for: "Feature/y", existing: ["Feature/x"]) == nil)
+        #expect(GitRunner.caseVariantFolder(for: "feature", existing: ["Feature/x"]) == nil)
+        #expect(GitRunner.caseVariantFolder(for: "Main", existing: ["main"]) == nil)
+        #expect(GitRunner.caseVariantFolder(for: "other/y", existing: ["Feature/x"]) == nil)
+    }
+
+    /// The service refuses such a name before writing anything, whatever the file system does.
+    @Test func aCaseVariantFolderIsRefused() async throws {
+        let h = try await IntegrationHarness()
+        try await h.base.sh("git branch Feature/x")
+        let before = try await h.base.sh("git for-each-ref --format='%(refname)' refs/heads")
+        await #expect(throws: MergeError.branchFolderCaseConflict("feature/y", existing: "Feature")) {
+            _ = try await h.integration.createDeliveryBranch(job: h.base.job, name: "feature/y")
+        }
+        #expect(try await h.base.sh("git for-each-ref --format='%(refname)' refs/heads") == before)
+        #expect(try await h.integration.createDeliveryBranch(job: h.base.job, name: "Feature/y") == "Feature/y")
+    }
 }

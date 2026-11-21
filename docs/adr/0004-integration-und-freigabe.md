@@ -79,6 +79,7 @@
    - `refs/heads/<name>` im Original-Repository wird nur neu angelegt (create-only), am aktuellen Zielstand. Ist der Name belegt, bekommt er ein Suffix.
    - Namen müssen wörtlich sein: `@`, `@{…}` und Namen, die mit `-` beginnen, werden abgewiesen.
    - „Belegt“ wird ohne Beachtung von Groß- und Kleinschreibung und Unicode-Normalisierung geprüft, auch für Ordner/Datei-Konflikte (`a` neben `a/b`). Auf APFS wäre `Main` sonst ein Alias eines gepackten `main`.
+   - Ein Ordner im Namen, der einem vorhandenen Branch-Ordner nur ohne Beachtung von Groß- und Kleinschreibung oder Normalisierung gleicht (`feature/y` neben `Feature/x`), wird mit Begründung abgewiesen. Auf APFS landete der Ref sonst im vorhandenen Ordner, und Git zeigte ihn als `Feature/y`, während Vorschau und Meldung `feature/y` nennen. Verglichen wird über die Namen, nicht über das Dateisystem.
    - Checkout, Index und vorhandene Branches des Benutzers bleiben unberührt.
    - Der Vorgang ist nicht journalisiert. Er ist idempotent prüfbar, weil der Ref entweder existiert oder nicht.
 

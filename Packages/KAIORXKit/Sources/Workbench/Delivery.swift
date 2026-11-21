@@ -12,6 +12,9 @@ public enum DeliveryProblem: Sendable, Equatable, Hashable {
     /// The name and every suffix up to `-20` are taken, case- and normalisation-insensitively,
     /// or lie below an existing branch (`a/b` next to `a`).
     case noFreeName
+    /// A folder of the name is spelled differently from an existing branch folder (`feature/y`
+    /// next to `Feature/x`); on APFS the branch would appear as `Feature/y`.
+    case folderCaseConflict(name: String, existing: String)
     /// No candidate of this job is published yet: the branch would only repeat the base.
     case nothingPublished
 
@@ -24,8 +27,18 @@ public enum DeliveryProblem: Sendable, Equatable, Hashable {
         case .noFreeName:
             "Der Name ist belegt, und auch die Varianten bis „-20“ sind belegt oder liegen unter einem vorhandenen Branch. "
                 + "Groß- und Kleinschreibung zählen dabei nicht (APFS). Wähle einen anderen Namen."
+        case .folderCaseConflict(let name, let existing):
+            "Es gibt schon den Branch-Ordner „\(existing)“. Groß- und Kleinschreibung zählen dabei nicht (APFS): "
+                + "Der Branch würde als „\(Self.spelled(name, as: existing))“ angelegt. Schreibe den Ordner wie vorhanden oder wähle einen anderen Namen."
         case .nothingPublished: "In diesem Auftrag ist noch kein Kandidat veröffentlicht."
         }
+    }
+
+    /// `name` with its leading folders replaced by the existing spelling `folder`.
+    static func spelled(_ name: String, as folder: String) -> String {
+        let parts = name.split(separator: "/", omittingEmptySubsequences: false)
+        let count = folder.split(separator: "/", omittingEmptySubsequences: false).count
+        return ([folder] + parts.dropFirst(count).map(String.init)).joined(separator: "/")
     }
 }
 
@@ -156,6 +169,7 @@ public enum IntegrationMessages {
         switch error {
         case MergeError.invalidBranchName: DeliveryProblem.invalidName.text
         case MergeError.noFreeBranchName: DeliveryProblem.noFreeName.text
+        case MergeError.branchFolderCaseConflict(let name, let existing): DeliveryProblem.folderCaseConflict(name: name, existing: existing).text
         case IntegrationError.targetMoved:
             "Der Integrationsstand hat sich geändert, seit das Blatt ihn gezeigt hat. Prüfe den neuen Stand und entscheide neu."
         case IntegrationError.jobWithoutIntegration: "Dieser Auftrag hat keinen Integrationsstand."
@@ -193,6 +207,8 @@ extension WorkbenchActions {
                 if branch == nil { problems.append(.noFreeName) }
             } catch MergeError.invalidBranchName {
                 problems.append(.invalidName)
+            } catch MergeError.branchFolderCaseConflict(let name, let existing) {
+                problems.append(.folderCaseConflict(name: name, existing: existing))
             }
         }
         if published == 0 { problems.append(.nothingPublished) }

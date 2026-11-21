@@ -42,6 +42,9 @@ public enum MergeError: Error, Equatable, Sendable {
     case noMergeInProgress
     case invalidBranchName(String)
     case noFreeBranchName(String)
+    /// A folder of the name matches an existing ref folder only case- or normalisation-insensitively
+    /// (`feature/y` next to `Feature/x`): on APFS Git would file it as `Feature/y`.
+    case branchFolderCaseConflict(String, existing: String)
     /// Git reported conflicts at paths that exist on neither side (file/directory, distinct
     /// types, directory renames: `x~HEAD` and the like). They are not offered for resolution;
     /// the merge is aborted.
@@ -295,10 +298,15 @@ extension GitRunner {
 
     /// Refuses a name `createBranch` would refuse: `git check-ref-format --branch`, and literal
     /// only (`--branch` expands `@{-1}` and similar; `@` and a leading `-` are refused too).
+    /// A folder spelled differently from an existing ref folder is refused as well
+    /// (`caseVariantFolder`): Git would list the branch under the existing spelling.
     public func checkBranchName(_ name: String, in repository: RepositoryInfo) async throws {
         guard !name.isEmpty, !name.hasPrefix("-"), !name.contains("@{"), name != "@" else { throw MergeError.invalidBranchName(name) }
         let valid = try await run(["check-ref-format", "--branch", name], in: repository.topLevel, allowedExitCodes: [0, 1, 128])
         guard valid.termination == .exited(0) else { throw MergeError.invalidBranchName(name) }
+        if let existing = Self.caseVariantFolder(for: name, existing: try await branchNames(in: repository)) {
+            throw MergeError.branchFolderCaseConflict(name, existing: existing)
+        }
     }
 
     /// The names of `refs/heads/*` in the repository (read only).
@@ -318,6 +326,25 @@ extension GitRunner {
             return folded.contains { $0 == candidate || $0.hasPrefix(candidate + "/") || candidate.hasPrefix($0 + "/") }
         }
         return ([name] + (2...20).map { "\(name)-\($0)" }).filter { !taken($0) }
+    }
+
+    /// The existing ref folder that a folder of `name` matches case- and normalisation-insensitively
+    /// but not byte for byte (`Feature` for `feature/y` next to `Feature/x`), if any. On a
+    /// case-insensitive file system the new loose ref would land in that folder and Git would list
+    /// it under the existing spelling; compared by name, independent of the file system at hand.
+    public static func caseVariantFolder(for name: String, existing: [String]) -> String? {
+        let folders = existing.flatMap(folderPrefixes(of:))
+        for prefix in folderPrefixes(of: name) {
+            let folded = foldedBranch(prefix)
+            if let other = folders.first(where: { foldedBranch($0) == folded && !$0.utf8.elementsEqual(prefix.utf8) }) { return other }
+        }
+        return nil
+    }
+
+    /// `a`, `a/b` for `a/b/c`: the folders a loose ref of that name lives in.
+    static func folderPrefixes(of name: String) -> [String] {
+        let parts = name.split(separator: "/", omittingEmptySubsequences: false)
+        return parts.count < 2 ? [] : (1..<parts.count).map { parts[..<$0].joined(separator: "/") }
     }
 
     static func foldedBranch(_ name: String) -> String {
