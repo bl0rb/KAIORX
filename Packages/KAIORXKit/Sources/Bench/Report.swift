@@ -75,7 +75,7 @@ public enum BenchPlan {
             results += try await EventLatencyBench.run(.init(deltasPerRun: full ? 750 : 40))
         }
         if scenarios.contains("replay") {
-            for deltas in full ? [10_000, 50_000] : [600] {
+            for deltas in full ? [10_000, 50_000] : [6_000] {
                 log("Replay mit \(deltas) Deltas …")
                 results += try await ReplayBench.run(.init(deltas: deltas, repeats: full ? 5 : 2))
             }

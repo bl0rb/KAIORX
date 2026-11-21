@@ -6,7 +6,8 @@ import Workbench
 
 /// The app's update loop off the main actor (App/AppModel.swift `startPump`, App/ToolViews.swift
 /// `load`): `Projector.step`, the `Coalescer` publish gate, a 50 ms pause, and for the selected
-/// attempt the monitor timeline that pages `attemptEvents` whenever its activity changes.
+/// attempt the monitor timeline that opens on its newest pages (`TimelinePaging.open`) and then
+/// pages `attemptEvents` whenever its activity changes.
 /// Records when each cursor and each timeline ordinal became visible.
 final class AppPump: Sendable {
     struct Published: Sendable { var at: ContinuousClock.Instant; var cursor: Int64 }
@@ -52,11 +53,16 @@ final class AppPump: Sendable {
                 if let attempt = selected.withLock({ $0 }), attempt != timelineAttempt || shown.lastActivity[attempt] != previous.lastActivity[attempt] {
                     if attempt != timelineAttempt { timeline = Timeline(); timelineAttempt = attempt }
                     var read = 0
+                    if timeline.lastOrdinal == 0 {
+                        let opened = try await TimelinePaging.open(attempt, store: store)
+                        timeline = opened.timeline
+                        read = opened.eventsRead
+                    }
                     while true {
-                        let page = try await store.attemptEvents(attempt, afterOrdinal: timeline.lastOrdinal, limit: 500)
+                        let page = try await store.attemptEvents(attempt, afterOrdinal: timeline.lastOrdinal, limit: TimelinePaging.pageSize)
                         read += page.count
                         timeline.append(page)
-                        if page.count < 500 { break }
+                        if page.count < TimelinePaging.pageSize { break }
                     }
                     loads.withLock { $0.append(TimelineLoad(at: .now, attempt: attempt, ordinal: timeline.lastOrdinal, eventsRead: read)) }
                 }

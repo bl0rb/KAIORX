@@ -104,6 +104,130 @@ func sh(_ script: String, in directory: String) async throws -> String {
         #expect(timeline.rows.count == 4 && timeline.lastOrdinal == 7)
     }
 
+    /// A row without its ID: paged and full loads must show the same rows.
+    struct Shape: Equatable, CustomStringConvertible {
+        var kind: TimelineRow.Kind
+        var text: String
+        var itemID: String?
+        var truncated: Bool
+        var at: Int64
+        init(_ row: TimelineRow) { (kind, text, itemID, truncated, at) = (row.kind, row.text, row.itemID, row.truncated, row.at) }
+        var description: String { "\(kind)(\(itemID ?? "-"))@\(at):\(text)\(truncated ? "…" : "")" }
+    }
+
+    /// Opens on the newest page and prepends older pages of `size` until the start.
+    func paged(_ events: [EventRecord], size: Int, maxRows: Int = 1_000, maxItemBytes: Int = 12) -> Timeline {
+        var timeline = Timeline(maxRows: maxRows, maxItemBytes: maxItemBytes)
+        timeline.append(Array(events.suffix(size)))
+        while timeline.canLoadOlder {
+            let before = timeline.firstOrdinal
+            let older = events.filter { ($0.ordinal ?? 0) < before }.suffix(size)
+            timeline.prepend(Array(older))
+            if older.isEmpty { break }
+        }
+        return timeline
+    }
+
+    @Test func aMessageOpenAtThePageBoundaryMergesWithItsContinuation() {
+        let events = [
+            event(1, .started(sessionID: "s")), event(2, .messageDelta(itemID: "m", text: "Hal")), event(3, .messageDelta(itemID: "m", text: "lo ")),
+            event(4, .toolStarted(itemID: "t", toolClass: "read")), event(5, .messageDelta(itemID: "m", text: "Welt")),
+            event(6, .toolEnded(itemID: "t", status: "ok")),
+        ]
+        var timeline = Timeline()
+        timeline.append(Array(events.suffix(3)))
+        #expect(timeline.rows.map(\.text) == ["Werkzeug read gestartet", "Welt", "Werkzeug beendet: ok"])
+        #expect(timeline.firstOrdinal == 4 && timeline.lastOrdinal == 6 && timeline.canLoadOlder)
+        timeline.prepend(Array(events.prefix(3)))
+        // The message moves to where it began, with the older text in front.
+        #expect(timeline.rows.map(\.text) == ["Gestartet", "Hallo Welt", "Werkzeug read gestartet", "Werkzeug beendet: ok"])
+        #expect(timeline.rows[1].at == 5 && !timeline.canLoadOlder && timeline.lastOrdinal == 6)
+        #expect(Set(timeline.rows.map(\.id)).count == 4)
+        // The item is still open: a new delta continues the same row.
+        timeline.append([event(7, .messageDelta(itemID: "m", text: "!"))])
+        #expect(timeline.rows.map(\.text) == ["Gestartet", "Hallo Welt!", "Werkzeug read gestartet", "Werkzeug beendet: ok"])
+    }
+
+    @Test func aFinalTextWinsAndTruncationAndGapsHoldAcrossPages() {
+        // A final in the newer page replaces the older deltas.
+        var final = Timeline()
+        final.append([event(3, .messageFinal(itemID: "m", text: "Ganz"))])
+        final.prepend([event(1, .messageDelta(itemID: "m", text: "Ga")), event(2, .messageDelta(itemID: "m", text: "n"))])
+        #expect(final.rows.map(\.text) == ["Ganz"] && !final.rows[0].truncated)
+        // The byte bound applies to the joined text.
+        var cut = Timeline(maxItemBytes: 6)
+        cut.append([event(3, .messageDelta(itemID: "m", text: "defg"))])
+        cut.prepend([event(1, .messageDelta(itemID: "m", text: "ab")), event(2, .messageDelta(itemID: "m", text: "c"))])
+        #expect(cut.rows.map(\.text) == ["abcdef"] && cut.rows[0].truncated)
+        // A missing ordinal between the pages becomes a gap row; an item open only in the older
+        // page is continued by later appends.
+        var gap = Timeline()
+        gap.append([event(5, .toolStarted(itemID: "t", toolClass: "read"))])
+        gap.prepend([event(2, .messageDelta(itemID: "x", text: "a"))])
+        #expect(gap.rows.map(\.kind) == [.message, .gap, .tool] && gap.rows[1].text.contains("2 Ereignisse fehlen"))
+        #expect(gap.firstOrdinal == 2 && gap.canLoadOlder)
+        gap.append([event(6, .messageDelta(itemID: "x", text: "b"))])
+        #expect(gap.rows.map(\.text).first == "ab" && gap.rows.count == 3)
+        // An empty older page means nothing older is left.
+        gap.prepend([])
+        #expect(!gap.canLoadOlder)
+        // Pages that overlap what is shown are cut to the part before it.
+        var overlap = Timeline()
+        overlap.append([event(2, .messageDelta(itemID: "m", text: "b"))])
+        overlap.prepend([event(1, .messageDelta(itemID: "m", text: "a")), event(2, .messageDelta(itemID: "m", text: "b"))])
+        #expect(overlap.rows.map(\.text) == ["ab"])
+    }
+
+    @Test func prependingKeepsTheRowBoundAndStopsOnceRowsDropped() {
+        var timeline = Timeline(maxRows: 3)
+        timeline.append([event(4, .toolStarted(itemID: "a", toolClass: "x")), event(5, .toolStarted(itemID: "b", toolClass: "x"))])
+        timeline.prepend([event(1, .started(sessionID: "s")), event(2, .toolStarted(itemID: "c", toolClass: "x")), event(3, .toolStarted(itemID: "d", toolClass: "x"))])
+        // The oldest rows drop, as when appending; older pages would now leave a hole.
+        #expect(timeline.rows.count == 3 && timeline.droppedRows == 2 && !timeline.canLoadOlder)
+        #expect(timeline.rows.map(\.text) == ["Werkzeug x gestartet", "Werkzeug x gestartet", "Werkzeug x gestartet"])
+        let before = timeline
+        timeline.prepend([event(0, .started(sessionID: "s"))])
+        #expect(timeline == before)
+    }
+
+    @Test func pagedLoadsShowTheSameRowsAsAFullReplay() {
+        var seed: UInt64 = 0x5EED
+        func next(_ bound: Int) -> Int {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Int((seed >> 33) % UInt64(bound))
+        }
+        for _ in 0..<100 {
+            var events: [EventRecord] = []
+            var ordinal = 0
+            for _ in 0..<(20 + next(60)) {
+                ordinal += !events.isEmpty && next(12) == 0 ? 2 : 1  // now and then a missing ordinal
+                let item = ["a", "b", "c"][next(3)]
+                let text = String(repeating: ["x", "y", "z"][next(3)], count: 1 + next(5))
+                let agent: AgentEvent? = switch next(10) {
+                case 0: .messageFinal(itemID: item, text: text)
+                case 1: .toolStarted(itemID: item, toolClass: "read")
+                case 2: .usage(UsageSample(outputTokens: next(9)))
+                case 3: nil
+                default: .messageDelta(itemID: item, text: text)
+                }
+                events.append(event(ordinal, agent, purged: agent == nil && next(2) == 0))
+            }
+            var full = Timeline(maxItemBytes: 12)
+            full.append(events)
+            for size in [1, 2, 3, 5, 8, 13, 1_000] {
+                var timeline = paged(events, size: size)
+                #expect(timeline.rows.map(Shape.init) == full.rows.map(Shape.init), "page size \(size)")
+                #expect(Set(timeline.rows.map(\.id)).count == timeline.rows.count)
+                // Live appends after a paged open continue exactly as after a full load.
+                let more = [event(ordinal + 1, .messageDelta(itemID: "a", text: "q")), event(ordinal + 2, .messageDelta(itemID: "b", text: "r"))]
+                var fullMore = full
+                fullMore.append(more)
+                timeline.append(more)
+                #expect(timeline.rows.map(Shape.init) == fullMore.rows.map(Shape.init), "page size \(size) after appends")
+            }
+        }
+    }
+
     @Test func copiedLogTextIsRedacted() {
         let text = "Token sk-ant-abcdefghijklmnopqrstuvwxyz0123 und weiter"
         let redacted = LogRedactor.redact(text)

@@ -530,6 +530,39 @@ func moveJob(_ store: Store, _ id: JobID, to state: JobState, reason: String? = 
         #expect(try JSONDecoder().decode(AgentEvent.self, from: #require(completion.payload)) == .completed(.succeeded))
         #expect(all.last?.kind == .taskStateChanged)
     }
+
+    @Test func latestAttemptEventsReadTheNewestPageFirstInOrdinalOrder() async throws {
+        let fixture = try Fixture()
+        let store = try fixture.open()
+        let seed = try await fixture.seed(store)
+        let id = AttemptID(), other = AttemptID()
+        try await store.execute(Command(.reserveAttempt(reservation(seed, attempt: id))))
+        try await store.execute(Command(.reserveAttempt(reservation(seed, task: try await fixture.readyTask(store, job: seed.job), attempt: other))))
+        for attempt in [id, other] {
+            try await transition(store, attempt, to: .starting)
+            _ = try await store.ingest(.started(sessionID: nil), attemptID: attempt)
+        }
+        for index in 0..<10 {
+            _ = try await store.ingest(.messageDelta(itemID: "m", text: "\(index)"), attemptID: id)
+            _ = try await store.ingest(.messageDelta(itemID: "o", text: "\(index)"), attemptID: other)
+        }
+        let all = try await store.attemptEvents(id, limit: 1_000)
+        let last = try #require(all.last?.ordinal)
+        #expect(all.count > 10)
+
+        // The newest page, oldest first, with payloads, only this attempt's events.
+        let newest = try await store.latestAttemptEvents(id, limit: 4)
+        #expect(newest == Array(all.suffix(4)))
+        #expect(newest.compactMap(\.ordinal) == Array((last - 3)...last))
+        #expect(newest.allSatisfy { $0.attemptID == id && $0.payload != nil })
+        // Older pages end right before the given ordinal; the first page may be short.
+        let older = try await store.latestAttemptEvents(id, beforeOrdinal: last - 3, limit: 4)
+        #expect(older.compactMap(\.ordinal) == Array((last - 7)...(last - 4)))
+        #expect(try await store.latestAttemptEvents(id, beforeOrdinal: 3, limit: 4).compactMap(\.ordinal) == [1, 2])
+        #expect(try await store.latestAttemptEvents(id, beforeOrdinal: 1, limit: 4).isEmpty)
+        #expect(try await store.latestAttemptEvents(id, limit: 1_000) == all)
+        #expect(try await store.latestAttemptEvents(AttemptID(), limit: 4).isEmpty)
+    }
 }
 
 @Suite struct RestartTests {
