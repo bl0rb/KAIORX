@@ -22,6 +22,9 @@ public enum IntegrationError: Error, Equatable, Sendable {
     /// The reviewer must come from another provider than the author.
     case reviewerNotIndependent(ProviderKind)
     case reviewAttemptNotFinished(AttemptID)
+    /// The reviewer did not start (the adapter refused before a turn, or a cancel won the race);
+    /// `reason` is the adapter's.
+    case reviewStartFailed(AttemptID, reason: String)
     /// The integration target moved since the candidate was built: build a new candidate.
     case targetMoved(expected: String, actual: String?)
     /// Publication failed while the target still has its expected value (for example a held
@@ -47,6 +50,11 @@ public struct IntegrationRecoveryReport: Sendable, Equatable {
     public var removedWorkWorktrees: [WorktreeID] = []
     /// Worktrees recovery should have removed but could not (left in `needsAttention`).
     public var stuckWorktrees: [WorktreeID] = []
+    /// Open candidates whose commit no pin ref held (a crash between creating and pinning);
+    /// pinned again before their integration worktree was removed.
+    public var repinned: [CandidateID] = []
+    /// Open candidates whose commit was gone before it could be pinned again; rejected.
+    public var lostCandidates: [CandidateID] = []
 }
 
 /// Step 4 to 7 of the Git transaction per task (Plan/macos-und-git.md): build a candidate on the
@@ -313,10 +321,9 @@ public actor IntegrationService {
         var reviewerConsent: ConsentRecord?
         if try await store.plannedTask(task) != nil {
             let now = await store.now()
-            reviewerConsent = try await store.consents(project: candidate.projectID).first {
-                $0.isValid(at: now) && $0.draft.provider == provider && $0.draft.roles.contains(.reviewer)
-                    && ($0.draft.jobID == nil || $0.draft.jobID == candidate.jobID)
-            }
+            reviewerConsent = ReviewerChoice.consent(
+                consents: try await store.consents(project: candidate.projectID), provider: provider, job: candidate.jobID, now: now
+            )
             guard reviewerConsent != nil else { throw PlanningError.noReviewerConsent(provider) }
         }
         let repository = try await workspace.attach(candidate.projectID)
@@ -359,8 +366,10 @@ public actor IntegrationService {
                     throw error
                 }
                 return attempt
-            case .failedToStart(let attempt, _), .cancelledBeforeStart(let attempt):
-                throw IntegrationError.reviewAttemptNotFinished(attempt)
+            case .failedToStart(let attempt, let reason):
+                throw IntegrationError.reviewStartFailed(attempt, reason: reason)
+            case .cancelledBeforeStart(let attempt):
+                throw IntegrationError.reviewStartFailed(attempt, reason: "cancelled before start")
             }
         } catch {
             try? await workspace.remove(reviewTree.id, force: true)
@@ -560,6 +569,10 @@ public actor IntegrationService {
                 report.resetTests.append(candidate.id)
             }
         }
+        // A crash between creating a candidate and pinning its commit leaves the commit only in
+        // the integration worktree removed below: pin it first (or reject a candidate whose
+        // commit is already gone).
+        let unpinned = try await repinOpenCandidates(&report)
         // Nothing runs before recovery: QA and integration worktrees belong to lost test runs and
         // builds, except the integration worktree a conflicted candidate keeps for its resolution.
         var kept = Set<WorktreeID>()
@@ -570,6 +583,11 @@ public actor IntegrationService {
         }
         for tree in try await store.worktrees()
         where (tree.kind == .qa || tree.kind == .integration) && tree.state != .removed && !kept.contains(tree.id) {
+            // One of them may hold a commit that could not be pinned: keep them all.
+            if tree.kind == .integration, unpinned.contains(tree.projectID) {
+                report.stuckWorktrees.append(tree.id)
+                continue
+            }
             do {
                 try await workspace.remove(tree.id, force: true)
                 report.removedWorkWorktrees.append(tree.id)
@@ -590,6 +608,33 @@ public actor IntegrationService {
             }
         }
         return (journal, report)
+    }
+
+    /// Every open candidate with a commit gets its pin ref back. A commit the repository no longer
+    /// has rejects the candidate (its task goes back to the author). Returns the projects where a
+    /// pin could not be checked or set: their integration worktrees must stay.
+    private func repinOpenCandidates(_ report: inout IntegrationRecoveryReport) async throws -> Set<ProjectID> {
+        let open: Set<CandidateState> = [.built, .testing, .reviewing, .accepted, .conflicted]
+        var unpinned = Set<ProjectID>()
+        for job in try await store.jobs() {
+            for candidate in try await store.candidates(jobID: job.id) where open.contains(candidate.state) {
+                guard let commit = candidate.candidateOID else { continue }
+                do {
+                    let repository = try await workspace.attach(candidate.projectID)
+                    if try await git.readRef(Self.pinRef(candidate.id), in: repository) == commit { continue }
+                    if try await git.containsCommit(commit, in: repository) {
+                        try await pin(candidate, commit: commit, repository: repository)
+                        report.repinned.append(candidate.id)
+                    } else {
+                        try await reject(candidate, reason: "commit lost before pin")
+                        report.lostCandidates.append(candidate.id)
+                    }
+                } catch {
+                    unpinned.insert(candidate.projectID)
+                }
+            }
+        }
+        return unpinned
     }
 
     // MARK: Helpers
@@ -685,7 +730,7 @@ public actor IntegrationService {
     /// Pins the candidate commit under `refs/kaiorx/candidates/<id>` so it survives worktrees.
     /// Idempotent: a pin an interrupted earlier call (or recovery) already set is kept.
     private func pin(_ candidate: CandidateRecord, commit: String, repository: RepositoryInfo) async throws {
-        let ref = "refs/kaiorx/candidates/\(candidate.id.uuidString)"
+        let ref = Self.pinRef(candidate.id)
         if try await git.readRef(ref, in: repository) == commit { return }
         let operation = try await store.prepareRefUpdate(
             projectID: candidate.projectID, worktreeID: nil, ref: ref, expectedOld: nil, desiredNew: commit, candidateID: candidate.id
@@ -705,6 +750,8 @@ public actor IntegrationService {
         }
         try await store.completeGitOperation(operation, as: .applied)
     }
+
+    static func pinRef(_ id: CandidateID) -> String { "refs/kaiorx/candidates/\(id.uuidString)" }
 
     private func candidate(_ id: CandidateID, in states: Set<CandidateState>) async throws -> CandidateRecord {
         guard let candidate = try await store.candidate(id) else { throw StoreError.notFound(entity: "candidate", id: id.uuidString) }

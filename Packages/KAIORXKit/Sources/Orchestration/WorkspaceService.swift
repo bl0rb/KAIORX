@@ -345,11 +345,16 @@ public actor WorkspaceService {
         let ref = try require(operation.ref)
         let desired = try require(operation.desiredNew)
         var effects = GitOperationEffects()
-        if let worktreeID = operation.worktreeID, try await worktree(worktreeID).state == .ready {
-            // The rejection list of a seal interrupted here is not recoverable; the result is.
+        var sealed: WorktreeRecord?
+        if let worktreeID = operation.worktreeID { sealed = try await worktree(worktreeID) }
+        if let record = sealed, record.state == .ready {
+            // The reasons of a seal interrupted here are lost, but not which paths it dropped:
+            // the frozen worktree still holds them, the result's tree does not. They are kept as
+            // `recoveredUnknown`, so building still needs the user's confirmation (ADR 0011 §6).
+            let savedTree = try await git.tree(of: desired, in: repository)
             effects = GitOperationEffects(
-                worktreeState: .frozen, resultOID: desired, savedTree: try await git.tree(of: desired, in: repository),
-                seal: (.committed, [:])
+                worktreeState: .frozen, resultOID: desired, savedTree: savedTree,
+                seal: (.committed, try await droppedPaths(of: record, savedTree: savedTree, in: repository))
             )
         }
         let integrationPrefix = "refs/kaiorx/integrations/"
@@ -388,6 +393,15 @@ public actor WorkspaceService {
             let release = publication ? operation.candidateID.map { GitOperationEffects(candidateReleased: ($0, .accepted)) } : nil
             return (publication ? .failed : .needsAttention, String(describing: error), release ?? GitOperationEffects())
         }
+    }
+
+    /// Every path where the worktree differs from the sealed tree, as `recoveredUnknown`. Only a
+    /// worktree that is still in place and registered can be compared; anything else is refused
+    /// (the entry is then skipped and stays prepared) rather than recorded as a clean seal.
+    private func droppedPaths(of record: WorktreeRecord, savedTree: String, in repository: RepositoryInfo) async throws -> [String: String] {
+        let location = try git.locate(worktree: path(of: record), in: repository)
+        let paths = try await git.differences(of: location, from: savedTree)
+        return Dictionary(uniqueKeysWithValues: paths.map { ($0, RejectionReason.recoveredUnknown.rawValue) })
     }
 
     /// Git's entry for this worktree when it is ours: our lock reason, or (after an interrupted

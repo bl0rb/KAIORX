@@ -32,6 +32,9 @@ public struct ChangeEntry: Sendable, Equatable, Hashable, Codable {
 
 public enum RejectionReason: String, Sendable, Equatable, Codable {
     case outsideAllowedPaths, symlink, gitMetadata, submodule, unmerged
+    /// Set only by recovery: a seal finished after a restart knows that the path was dropped,
+    /// not why (ADR 0011 §6).
+    case recoveredUnknown
 }
 
 public struct SealOutcome: Sendable, Equatable {
@@ -276,6 +279,18 @@ extension GitRunner {
             field.hasPrefix("-\t-\t") ? String(field.dropFirst(4)) : nil
         })
         return SealOutcome(accepted: accepted, rejected: rejected, tree: tree, commit: commit, binaryPaths: binary)
+    }
+
+    /// Paths whose state in the worktree differs from `tree` (for a sealed worktree: its saved
+    /// tree), sorted. Built in a temporary index like the seal itself, so the worktree and its own
+    /// index stay untouched; recovery uses it to rebuild the list of dropped paths.
+    public func differences(of location: WorktreeLocation, from tree: String) async throws -> [String] {
+        let current = try await snapshotTree(of: location, base: "HEAD", paths: nil)
+        guard current != tree else { return [] }
+        let fields = nulFields(try await run(
+            ["diff-tree", "-r", "-z", "--name-only", "--no-renames", tree, current], at: location
+        ).stdout.data)
+        return Array(Set(fields.filter { !$0.isEmpty })).sorted()
     }
 
     /// Paths that are symlinks or gitlinks in `tree` but not identical in `base`.

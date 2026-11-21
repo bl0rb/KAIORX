@@ -378,11 +378,15 @@ extension Store {
             }
             try requireTaskInVerification(db, candidate)
             if let reviewerAttemptID {
-                // Only a finished reviewer of this candidate's task, and only once.
+                // Only a finished reviewer of this candidate's task, only once, and only one that
+                // reviewed exactly this commit: its worktree was prepared at the candidate commit.
                 let attempt = try loadAttempt(db, reviewerAttemptID).record
                 let recorded = try db.query("SELECT 1 FROM review WHERE reviewer_attempt_id = ?", [.text(reviewerAttemptID.uuidString)]) { $0.int(0) }
+                let reviewedOID = try attempt.worktreeID.flatMap { tree in
+                    try db.query("SELECT base_oid FROM worktree WHERE id = ?", [.text(tree.uuidString)]) { $0.text(0) }.first ?? nil
+                }
                 guard attempt.role == .reviewer, attempt.state == .succeeded, attempt.taskID == candidate.taskID,
-                      attempt.provider == reviewerProvider, recorded.isEmpty else {
+                      attempt.provider == reviewerProvider, recorded.isEmpty, reviewedOID == oid else {
                     throw IntegrationStoreError.reviewAttemptNotUsable(reviewerAttemptID)
                 }
             }
