@@ -466,13 +466,15 @@ public actor IntegrationService {
 
     /// Creates `refs/heads/<name>` at the job's integration target in the user's repository;
     /// a taken name (also case-insensitively) gets a suffix. The user's checkout, index and
-    /// branches stay untouched.
-    public func createDeliveryBranch(job jobID: JobID, name: String) async throws -> String {
+    /// branches stay untouched. With `expectedTarget` (what the decision sheet showed) a target
+    /// that moved since refuses with `targetMoved`, so the branch points at what the user saw.
+    public func createDeliveryBranch(job jobID: JobID, name: String, expectedTarget: String? = nil) async throws -> String {
         guard let job = try await store.jobs().first(where: { $0.id == jobID }), let ref = job.integrationRef else {
             throw IntegrationError.jobWithoutIntegration(jobID)
         }
         let repository = try await workspace.attach(job.projectID)
         guard let target = try await git.readRef(ref, in: repository) else { throw IntegrationError.jobWithoutIntegration(jobID) }
+        if let expectedTarget, expectedTarget != target { throw IntegrationError.targetMoved(expected: expectedTarget, actual: target) }
         return try await git.createBranch(name, at: target, in: repository)
     }
 
