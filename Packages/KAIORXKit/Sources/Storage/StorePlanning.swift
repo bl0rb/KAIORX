@@ -882,6 +882,12 @@ extension Store {
         }
     }
 
+    /// Active attempts holding a slot (of one account, or all), as the scheduler counts them;
+    /// for the review sheet's slot pre-check (ADR 0011 §8).
+    public func activeAttemptCount(account: AccountID?) throws -> Int {
+        try activeAttemptCount(try connection(), account: account)
+    }
+
     /// Active attempts holding a slot (of one account, or all). An `uncertain` attempt left
     /// from a restart has no process and frees its slot (ADR 0005 §6).
     func activeAttemptCount(_ db: SQLiteConnection, account: AccountID?) throws -> Int {
@@ -918,7 +924,7 @@ extension Store {
             """
             SELECT t.id FROM task t WHERE t.job_id = ? AND (
                 t.state IN ('running', 'resultReady', 'verifying', 'awaitingMerge', 'conflict')
-                OR (t.state = 'blocked' AND t.resume_state IN ('running', 'resultReady', 'verifying', 'awaitingMerge'))
+                OR (t.state = 'blocked' AND t.resume_state IN ('running', 'resultReady', 'verifying', 'awaitingMerge', 'conflict'))
                 OR EXISTS (SELECT 1 FROM attempt a WHERE a.task_id = t.id AND a.role = 'author'
                     AND a.state NOT IN ('succeeded', 'failed', 'cancelled')))
             """,

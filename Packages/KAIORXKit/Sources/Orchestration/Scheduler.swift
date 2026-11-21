@@ -186,7 +186,12 @@ public actor Scheduler {
         }
         if task.state == .needsChanges {
             // A repair, an escalation or a user grant: the scheduler brings the task back to its author.
-            guard !history.isEmpty || (grant != nil && attempts.isEmpty) else { return }
+            guard !history.isEmpty || (grant != nil && attempts.isEmpty) else {
+                // Rejected or discarded without a counted failure: only the user can send it back
+                // (a grant, `allowMoreAttempts`), so say so instead of stalling silently.
+                try await wait(task, WaitReason(.userDecision, "rework"), decision: nil, report: &report)
+                return
+            }
             guard let current = try await store.task(task.id), current.state == .needsChanges else { return }
             do {
                 try await store.execute(Command(.transitionTask(id: task.id, to: .ready, expectedVersion: current.version)))
@@ -225,7 +230,7 @@ public actor Scheduler {
         var firstWait: WaitReason?
         for (consent, profile) in options {
             // An independent reviewer must be possible before the author starts.
-            guard let reviewer = consents.first(where: { $0.draft.roles.contains(.reviewer) && $0.draft.provider != profile.provider }) else {
+            guard let reviewer = ReviewerChoice.reviewer(consents: consents, author: profile.provider, job: c.job.id, now: now) else {
                 firstWait = firstWait ?? WaitReason(.noIndependentReviewer)
                 continue
             }
@@ -235,7 +240,7 @@ public actor Scheduler {
                 firstWait = firstWait ?? WaitReason(.awaitingUserStart, block.detail(for: profile.provider))
                 continue
             }
-            let reviewProfile = ModelProfile.smallest(profiles, provider: reviewer.draft.provider, role: .reviewer, atLeast: .fast)
+            let reviewProfile = ReviewerChoice.profile(profiles, provider: reviewer.draft.provider)
             var spec = makeSpec(c, task: task, profile: profile, decision: decision, failure: counted.last?.1)
             if memory != nil { spec.memoryManifestID = MemoryManifestID() }
             let reservation = ScheduledReservation(

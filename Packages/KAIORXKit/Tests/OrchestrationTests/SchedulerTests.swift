@@ -451,6 +451,35 @@ func planTask(_ key: String, after: [String] = [], writes: [String]? = nil, diff
         #expect(try await h.store.candidate(candidate.id)?.state == .reviewing)
     }
 
+    @Test func aRejectionWithoutACountedFailureWaitsForTheUsersRework() async throws {
+        let h = try await SchedulerHarness()
+        try await h.activate([planTask("A", writes: ["src/A"])])
+        let tree = try await result(h, "A", "mkdir -p src/A && echo x > src/A/f", writes: ["src/A"])
+        guard case .built(let candidate) = try await h.integration.buildCandidate(from: tree.id) else { Issue.record("not built"); return }
+        // A user rejection is no failure on the substance: nothing counts, nothing is granted.
+        try await h.integration.rejectCandidate(candidate.id, reason: "passt nicht")
+        #expect(try await h.task("A").state == .needsChanges)
+
+        let scheduler = h.scheduler()
+        let report = try await scheduler.tick()
+        let a = try await h.task("A")
+        #expect(report.reserved.isEmpty)
+        #expect(report.waiting[a.id] == WaitReason(.userDecision, "rework"))
+        #expect(a.waitReason == "userDecision:rework" && a.state == .needsChanges)
+        #expect(try await h.authorAttempts("A").count == 1)
+        // Waiting again records nothing new.
+        let decisions = try await h.store.decisions(task: a.id).count
+        _ = try await scheduler.tick()
+        #expect(try await h.store.decisions(task: a.id).count == decisions)
+
+        // The user's decision sends it back to its author, with a fresh count.
+        try await scheduler.grant(a.id, actor: "matze")
+        let resumed = try await scheduler.tick()
+        #expect(resumed.reserved.count == 1)
+        #expect(try await h.authorAttempts("A").count == 2)
+        #expect(try await h.task("A").waitReason == nil)
+    }
+
     @Test func onlyEmptyOrContainedResultsAreAcceptedAsDone() async throws {
         let h = try await SchedulerHarness()
         try await h.activate([planTask("A", writes: ["src/A"])])
