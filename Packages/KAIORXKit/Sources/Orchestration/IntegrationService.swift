@@ -204,16 +204,58 @@ public actor IntegrationService {
 
     // MARK: Evidence
 
-    /// Runs a confirmed test profile on exactly the candidate's commit in a fresh QA worktree.
-    /// Changes to the profile's test inputs are recorded for the review.
+    /// Runs a registered, confirmed test profile (ADR 0010) on exactly the candidate's commit in
+    /// a fresh QA worktree. A plan task that names a profile runs only that one. Changes to the
+    /// profile's test inputs are recorded for the review; the result carries the confirmed digest.
     @discardableResult
-    public func runTests(_ id: CandidateID, profile: TestProfile) async throws -> TestResultRecord {
+    public func runTests(_ id: CandidateID, profile profileID: TestProfileID) async throws -> TestResultRecord {
         let candidate = try await candidate(id, in: [.built])
         guard let commit = candidate.candidateOID else { throw IntegrationError.candidateNotIn(id, candidate.state) }
         try await requireTaskInVerification(candidate)
+        guard let record = try await store.testProfile(profileID), record.projectID == candidate.projectID else {
+            throw TestProfileError.unknownProfile(profileID)
+        }
+        guard record.isConfirmed else { throw TestProfileError.notConfirmed(record.spec.name) }
+        if let planned = try await plannedProfileName(candidate), planned != record.spec.name {
+            throw TestProfileError.notThePlannedProfile(requested: record.spec.name, planned: planned)
+        }
+        return try await runTests(candidate, commit: commit, profile: TestProfile(record.spec), digest: record.digest)
+    }
+
+    /// The profile `runTests` would use for the candidate: the plan task's named profile, else
+    /// the requested one, else the project's only confirmed profile.
+    public func testProfile(for id: CandidateID, requested: TestProfileID? = nil) async throws -> TestProfileRecord {
+        guard let candidate = try await store.candidate(id) else { throw StoreError.notFound(entity: "candidate", id: id.uuidString) }
+        let profiles = try await store.testProfiles(project: candidate.projectID)
+        if let planned = try await plannedProfileName(candidate) {
+            guard let named = profiles.first(where: { $0.spec.name == planned }) else { throw TestProfileError.unknownName(planned) }
+            if let requested, requested != named.id {
+                let name = profiles.first { $0.id == requested }?.spec.name ?? requested.uuidString
+                throw TestProfileError.notThePlannedProfile(requested: name, planned: planned)
+            }
+            guard named.isConfirmed else { throw TestProfileError.notConfirmed(planned) }
+            return named
+        }
+        if let requested {
+            guard let profile = profiles.first(where: { $0.id == requested }) else { throw TestProfileError.unknownProfile(requested) }
+            guard profile.isConfirmed else { throw TestProfileError.notConfirmed(profile.spec.name) }
+            return profile
+        }
+        let confirmed = profiles.filter(\.isConfirmed)
+        guard let only = confirmed.first else { throw TestProfileError.noneConfirmed }
+        guard confirmed.count == 1 else { throw TestProfileError.ambiguous(confirmed.map(\.spec.name)) }
+        return only
+    }
+
+    private func plannedProfileName(_ candidate: CandidateRecord) async throws -> String? {
+        guard let task = candidate.taskID else { return nil }
+        return try await store.plannedTask(task)?.testProfile
+    }
+
+    private func runTests(_ candidate: CandidateRecord, commit: String, profile: TestProfile, digest: String) async throws -> TestResultRecord {
+        let id = candidate.id
         let repository = try await workspace.attach(candidate.projectID)
         let changed = try await git.changedPaths(from: candidate.previousTargetOID, to: commit, in: repository).map(\.path)
-        let digest = try Canonical.sha256Hex(Canonical.encode(profile))
         try await store.transitionCandidate(id, to: .testing)
         do {
             let report: TestReport
@@ -351,11 +393,24 @@ public actor IntegrationService {
     public func gateItems(_ id: CandidateID) async throws -> [GateItem] {
         guard let candidate = try await store.candidate(id), let commit = candidate.candidateOID else { return [.noCommit] }
         var missing: [GateItem] = []
-        let tests = try await store.testResults(candidate: id).filter { $0.candidateOID == commit }
-        if tests.last?.status != .passed { missing.append(.noPassingTest(commit)) }
-        let reviews = try await store.reviews(candidate: id).filter { $0.candidateOID == commit && $0.status != .invalid }
         var planned: (risk: PlanTaskRisk, testProfile: String?, writePaths: [String]?)?
         if let taskID = candidate.taskID { planned = try await store.plannedTask(taskID) }
+        // Only a test of a profile confirmed now counts (ADR 0010): the plan task's named profile,
+        // else any confirmed profile of the project. Removing or changing a profile withdraws it.
+        let confirmed = try await store.testProfiles(project: candidate.projectID).filter(\.isConfirmed)
+        var counted = Set(confirmed.map(\.digest))
+        var profileItem: GateItem?
+        if let name = planned?.testProfile {
+            let named = confirmed.first { $0.spec.name == name }
+            counted = Set([named?.digest].compactMap { $0 })
+            if named == nil { profileItem = .testProfileNotConfirmed(name) }
+        } else if confirmed.isEmpty {
+            profileItem = .noConfirmedTestProfile
+        }
+        let tests = try await store.testResults(candidate: id).filter { $0.candidateOID == commit && counted.contains($0.profileDigest) }
+        if tests.last?.status != .passed { missing.append(.noPassingTest(commit)) }
+        if let profileItem { missing.append(profileItem) }
+        let reviews = try await store.reviews(candidate: id).filter { $0.candidateOID == commit && $0.status != .invalid }
         let sensitive = planned?.risk == .sensitive
         // For a sensitive task the human review comes on top: it cannot also be the independent one.
         let independent = reviews.filter { review in
@@ -692,6 +747,10 @@ public enum GateItem: Sendable, Equatable, Hashable, CustomStringConvertible {
     case noHumanReviewForSensitiveTask
     case blockingFindings
     case undecidedFindings
+    /// The plan task names a profile the project's registry has not confirmed (ADR 0010).
+    case testProfileNotConfirmed(String)
+    /// The project has no confirmed test profile at all.
+    case noConfirmedTestProfile
 
     /// The historical English text (logs, tests).
     public var description: String {
@@ -703,6 +762,8 @@ public enum GateItem: Sendable, Equatable, Hashable, CustomStringConvertible {
         case .noHumanReviewForSensitiveTask: "no approving human review for a sensitive task"
         case .blockingFindings: "blocking findings"
         case .undecidedFindings: "undecided findings"
+        case .testProfileNotConfirmed(let name): "test profile \(name) not confirmed"
+        case .noConfirmedTestProfile: "no confirmed test profile"
         }
     }
 }

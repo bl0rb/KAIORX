@@ -270,7 +270,7 @@ import Testing
         try await h.activate([planTask("A", writes: ["src/A"])])
         let tree = try await PlannedIntegrationTests().result(h, "A", "mkdir -p src/A && echo x > src/A/f", writes: ["src/A"])
         guard case .built(let candidate) = try await h.integration.buildCandidate(from: tree.id) else { Issue.record("not built"); return }
-        try await h.integration.runTests(candidate.id, profile: TestProfile(executable: "/bin/sh", arguments: ["-c", "exit 0"]))
+        try await h.integration.runTests(candidate.id, profile: try await h.store.confirmedTestProfile(project: h.project, arguments: ["-c", "exit 0"]))
         let review = try await h.integration.startReview(candidate.id, provider: .fake, model: "r", criteria: "")
         #expect(try await h.store.attempt(review)?.accountID == h.reviewer)
         await #expect(throws: PlanningError.noReviewerConsent(.codex)) {

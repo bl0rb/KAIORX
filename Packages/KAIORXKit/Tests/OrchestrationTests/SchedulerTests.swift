@@ -442,7 +442,7 @@ func planTask(_ key: String, after: [String] = [], writes: [String]? = nil, diff
         try await h.activate([sensitive])
         let tree = try await result(h, "A", "mkdir -p src/A && echo x > src/A/f", writes: ["src/A"])
         guard case .built(let candidate) = try await h.integration.buildCandidate(from: tree.id) else { Issue.record("not built"); return }
-        try await h.integration.runTests(candidate.id, profile: TestProfile(executable: "/bin/sh", arguments: ["-c", "exit 0"]))
+        try await h.integration.runTests(candidate.id, profile: try await h.store.confirmedTestProfile(project: h.project, arguments: ["-c", "exit 0"]))
         let oid = try #require(candidate.candidateOID)
         #expect(try await h.integration.gate(candidate.id).contains("no approving human review for a sensitive task"))
         _ = try await h.integration.importReview(candidate.id, text: #"{"candidateOID": "\#(oid)", "verdict": "approve", "findings": []}"#)
