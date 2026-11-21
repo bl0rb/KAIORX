@@ -30,7 +30,7 @@ Still open before the beta:
 - **End-to-end run in the app** with the real Claude Code and Codex (plan, author, review, approval, publication). So far the providers were checked live only through the acceptance kit.
 - **Owner's beta checks** in `docs/beta-checklist.md`: signing and notarization with a Developer ID, a clean Mac, macOS 15, offline first launch, VoiceOver and keyboard, quitting during a run, the untouched checkout, contrast and Dark Mode, restore.
 - **Optional live checks of package A:** second-account detection, Claude quota signals, login expiry and token refresh, Codex SIWC login.
-- **Performance:** FTS at 10,000 chunks meets its target with little headroom; the reference Mac is still to be chosen.
+- **Performance:** every beta target is met on the M4 measurement; the reference Mac is still to be chosen.
 
 ## Build and test
 
@@ -53,15 +53,15 @@ swift run -c release --package-path Packages/KAIORXKit kaiorx-bench --full --out
 swift run --package-path Packages/KAIORXKit kaiorx-bench                                     # quick harness check
 ```
 
-Baseline on an M4 MacBook Air (16 GB, release build): [docs/performance/2026-11-20-mac16-12.md](docs/performance/2026-11-20-mac16-12.md).
+Measured on an M4 MacBook Air (16 GB, release build) after stage 0: [docs/performance/2026-11-21-mac16-12.md](docs/performance/2026-11-21-mac16-12.md) (the first baseline before stage 0 is [2026-11-20](docs/performance/2026-11-20-mac16-12.md)).
 
 | Target (plan) | Measured p95 | Result |
 |---|---|---|
-| FTS query at 10,000 active chunks < 200 ms | 185 ms (provider path with grants), 111 ms (owner view) | met, little headroom |
-| FTS load test at 50,000 chunks | 1,254 ms (provider path) | no target; grows with the corpus |
-| UI event < 250 ms after local receipt, two runs | 107 ms to the app state, 99 ms to the monitor timeline | met |
-| Replay of the last view without reading every delta | workspace view reads no events; the monitor opens a run on its newest 1,000 of 50,004 events (5 ms, release, 2026-11-21; the full history takes 222 ms for comparison), older pages on request | met |
-| Stop and approval usable with two active runs | Stop shown after 48 ms, approve + publish 122 ms | met (250 ms assumed; the plan names no number) |
+| FTS query at 10,000 active chunks < 200 ms | 38 ms (provider path with grants), 29 ms (owner view); before stage 0: 185 ms | met |
+| FTS load test at 50,000 chunks | 316 ms (provider path); before stage 0: 1,254 ms | no target |
+| UI event < 250 ms after local receipt, two runs | 108 ms to the app state, 99 ms to the monitor timeline | met |
+| Replay of the last view without reading every delta | the monitor opens a run on its newest 1,000 of 50,004 events (5 ms; the full history takes 214 ms), older pages on request | met |
+| Stop and approval usable with two active runs | Stop shown after 48 ms, approve + publish 130 ms | met (250 ms assumed; the plan names no number) |
 
 Not covered: memory pressure, a cold OS file cache, time to the first model token, SwiftUI rendering. The reference Mac for the beta is still to be chosen.
 
