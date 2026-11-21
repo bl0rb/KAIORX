@@ -237,6 +237,14 @@ func isAlive(_ pid: pid_t) -> Bool {
         let profile = Confinement(writableRoots: ["/tmp/a \"b\" \\c"]).profile()
         #expect(profile.contains(#"(subpath "/private/tmp/a \"b\" \\c")"#))
     }
+
+    /// ADR 0002 §5: LaunchServices and preference writes act outside the sandbox; denied by default.
+    @Test func sessionServicesAreDeniedUnlessAllowed() {
+        let denied = Confinement(writableRoots: ["/tmp/a"]).profile()
+        #expect(denied.contains("(deny lsopen)") && denied.contains("(deny user-preference-write)"))
+        let allowed = Confinement(writableRoots: ["/tmp/a"], allowsSessionServices: true).profile()
+        #expect(!allowed.contains("lsopen") && !allowed.contains("user-preference"))
+    }
 }
 
 @Suite struct ProcessReviewFixTests {

@@ -14,16 +14,21 @@ public struct Confinement: Sendable, Equatable {
     /// Paths that stay read-only even inside a writable root (for example a worktree's `.git`
     /// link file); a trailing `/` protects a whole folder.
     public var protectedPaths: [String]
+    /// Session services that act outside the sandbox on the process's behalf: LaunchServices
+    /// (`open` starts an app that is not confined) and preference writes (cfprefsd writes the
+    /// user's real preferences). Denied unless set (ADR 0002 §5); reading preferences stays allowed.
+    public var allowsSessionServices: Bool
 
     public init(
         writableRoots: [String], hiddenRoots: [String] = [], visibleRoots: [String] = [], allowsNetwork: Bool = false,
-        protectedPaths: [String] = []
+        protectedPaths: [String] = [], allowsSessionServices: Bool = false
     ) {
         self.writableRoots = writableRoots
         self.hiddenRoots = hiddenRoots
         self.visibleRoots = visibleRoots
         self.allowsNetwork = allowsNetwork
         self.protectedPaths = protectedPaths
+        self.allowsSessionServices = allowsSessionServices
     }
 
     public static let sandboxExecutable = "/usr/bin/sandbox-exec"
@@ -54,6 +59,11 @@ public struct Confinement: Sendable, Equatable {
         }
         if !allowsNetwork {
             lines.append("(deny network*)")
+        }
+        if !allowsSessionServices {
+            // cfprefsd honours `user-preference-write` only together with the file-write denial above.
+            lines.append("(deny lsopen)")
+            lines.append("(deny user-preference-write)")
         }
         return lines.joined(separator: "\n")
     }

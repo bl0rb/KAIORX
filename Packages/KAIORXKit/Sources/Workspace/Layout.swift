@@ -27,17 +27,21 @@ public struct WorkspaceLayout: Sendable, Equatable {
         Confinement.resolved(path).hasPrefix(worktreesRoot + "/")
     }
 
-    /// Home-relative folders with credentials no confined process may read.
+    /// Home-relative folders with credentials no confined process may read. KAIORX's own support
+    /// folder holds the database and the provider logins (`codex-home/auth.json`); a CLI keeps
+    /// only its own state folder there (a visible root, ADR 0002 §5).
     public static let secretHomePaths = [
         ".ssh", ".aws", ".azure", ".gnupg", ".netrc", "_netrc", ".git-credentials", ".config/git/credentials",
         ".config/gh", ".config/gcloud", ".docker", ".kube", ".npmrc", ".pypirc", ".cargo/credentials",
         ".cargo/credentials.toml", ".gem/credentials", ".claude", ".codex", "Library/Keychains",
+        "Library/Application Support/KAIORX",
     ]
 }
 
 /// What a confined process may touch, by role. All roles: writes only to the listed roots,
 /// KAIORX data (database, other worktrees, other runs) and credential folders hidden, no
-/// network.
+/// network, no LaunchServices and no preference writes (`Confinement.allowsSessionServices`).
+/// `IsolationProbes` checks these rules on the running Mac.
 public enum RoleProfile: Sendable, Equatable {
     /// Writes its own worktree.
     case author
