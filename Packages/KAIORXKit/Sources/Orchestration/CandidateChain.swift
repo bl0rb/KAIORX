@@ -13,13 +13,16 @@ public enum ChainError: Error, Sendable, Equatable {
 
 /// The candidate chain's driver (ADR 0011). `step()` runs the host-only steps automatically:
 /// seal a finished author result, build a clean result, rebuild after the integration target
-/// moved, collect finished reviews and remove the worktrees of failed reviewers. It never starts
-/// a provider and runs no project code; tests and review starts stay with the user.
+/// moved, collect finished reviews and remove the worktrees of reviewers no review comes from any
+/// more. It never starts a provider and runs no project code; tests and review starts stay with
+/// the user.
 ///
 /// The actor is reentrant at every `await`. `inFlight` is the per-task lock: it is checked and
 /// taken before the first `await` of every step and user call, so the driver and the user never
 /// work on one task at the same time. `buildLocks` allows one merge per repository at a time
-/// (Plan/macos-und-git.md). Backoff and refused collects live in memory only.
+/// (Plan/macos-und-git.md). Backoff, refused collects and refused removals live in memory only.
+/// A pass reports an issue only when it is new for the task, so an unchanged issue never makes
+/// the app refresh; `issue(_:)` returns the current one in every task state.
 public actor CandidateChain {
     let store: Store
     let workspace: WorkspaceService
@@ -46,8 +49,10 @@ public actor CandidateChain {
     private var backoff: [TaskID: Backoff] = [:]
     /// Issues without a retry (a missing plan task): shown until the task moves on.
     private var standing: [TaskID: ChainIssue] = [:]
-    /// Reviewer attempts whose collection failed for good; retried only after a restart.
-    private var given: Set<AttemptID> = []
+    /// Reviewer attempts whose collection failed, per task; retried after `retryBuild` or a restart.
+    private var given: [TaskID: Set<AttemptID>] = [:]
+    /// Reviewer worktrees whose removal Git refused; left to recovery or the user until a restart.
+    private var refusedRemovals: Set<WorktreeID> = []
 
     static let backoffBase: Int64 = 5_000
     static let backoffCap: Int64 = 300_000
@@ -95,9 +100,12 @@ public actor CandidateChain {
             defer { release(task.id) }
             let area = await writeArea(task, attempt: attempt)
             guard case .known(let prefixes) = area else {
-                // Never fall back to the whole project.
+                // Never fall back to the whole project. The check repeats on every pass (a read
+                // error clears by itself), but the issue is reported only when it is new.
+                let previous = issue(task.id)
+                backoff[task.id] = nil
                 standing[task.id] = .planTaskMissing
-                report.issues[task.id] = .planTaskMissing
+                raise(.planTaskMissing, for: task.id, since: previous, in: &report)
                 continue
             }
             do {
@@ -108,9 +116,7 @@ public actor CandidateChain {
                 report.sealed.append(tree.id)
                 clearIssue(task.id)
             } catch {
-                let issue = ChainIssue.sealFailed(Self.describe(error))
-                await fail(task.id, issue)
-                report.issues[task.id] = issue
+                await fail(task.id, .sealFailed(Self.describe(error)), report: &report)
             }
         }
     }
@@ -179,31 +185,66 @@ public actor CandidateChain {
                         // The user holds the task: collected once it is released.
                     } catch {
                         // The store refused it (already recorded, not usable) or reading failed:
-                        // not retried until a restart.
-                        given.insert(reviewer.id)
+                        // not retried until `retryBuild` or a restart. The issue stays visible in
+                        // every task state until it is resolved (`forgetSettledTasks`).
+                        given[taskID, default: []].insert(reviewer.id)
                         if case IntegrationStoreError.reviewAttemptNotUsable = error { continue }
+                        let previous = issue(taskID)
                         let issue = ChainIssue.collectFailed(Self.describe(error))
                         standing[taskID] = issue
-                        report.issues[taskID] = issue
+                        raise(issue, for: taskID, since: previous, in: &report)
                     }
                 }
             }
         }
     }
 
-    /// (e) Removes the worktrees of failed or cancelled reviewers; a new review can be started.
+    /// (e) Removes the read-only worktrees of reviewers no review comes from any more, once their
+    /// stream ended: failed or cancelled ones (a new review can be started), and succeeded ones
+    /// whose commit no reviewing or accepted candidate of their task has any more (it was
+    /// rejected, superseded or published before the review was collected). Only trees in `ready`
+    /// or `frozen`: a tree in `needsAttention`, or one whose removal Git refused in this session,
+    /// stays for recovery or the user, so a lasting refusal never loops.
     private func cleanupPass(_ report: inout ChainReport) async {
         guard let trees = try? await store.worktrees() else { return }
-        for tree in trees where tree.kind == .reviewer && tree.state != .removed {
-            guard let attemptID = tree.attemptID, let attempt = try? await store.attempt(attemptID),
-                  attempt.state == .failed || attempt.state == .cancelled else { continue }
+        for tree in trees where tree.kind == .reviewer && Self.removableStates.contains(tree.state) && !refusedRemovals.contains(tree.id) {
+            guard let attempt = await finishedReviewer(of: tree) else { continue }
+            guard claim(attempt.taskID) else { continue }
+            defer { release(attempt.taskID) }
+            // Read again under the lock: a collect or another pass may have moved it meanwhile.
+            guard let current = try? await store.worktree(tree.id), Self.removableStates.contains(current.state),
+                  await finishedReviewer(of: current) != nil else { continue }
             do {
                 try await workspace.remove(tree.id, force: true)
                 report.removedReviewerTrees.append(tree.id)
             } catch {
-                // Left in `needsAttention`; recovery or the user takes over.
+                refusedRemovals.insert(tree.id)
             }
         }
+    }
+
+    private static let removableStates: Set<WorktreeState> = [.ready, .frozen]
+
+    /// The attempt of a reviewer worktree no review needs any more, with its stream ended; nil
+    /// while the reviewer runs or streams, or while a candidate still waits for its review.
+    private func finishedReviewer(of tree: WorktreeRecord) async -> AttemptRecord? {
+        guard let id = tree.attemptID, let attempt = try? await store.attempt(id), attempt.role == .reviewer else { return nil }
+        switch attempt.state {
+        case .failed, .cancelled:
+            break
+        case .succeeded:
+            guard let task = try? await store.task(attempt.taskID), let candidates = try? await store.candidates(jobID: task.jobID) else { return nil }
+            let collectable = candidates.contains {
+                $0.taskID == attempt.taskID && ($0.state == .reviewing || $0.state == .accepted) && $0.candidateOID != nil
+                    && $0.candidateOID == tree.baseOID
+            }
+            if collectable { return nil }
+        default:
+            return nil
+        }
+        // The store can show the end before the process exited: never remove under a live reviewer.
+        guard await !isStreaming(id) else { return nil }
+        return attempt
     }
 
     /// Merges and classifies the outcome (ADR 0011, build outcomes). The caller holds the task.
@@ -223,21 +264,16 @@ public actor CandidateChain {
             case .alreadyContained:
                 // The tip moved meanwhile: the next `check` says `.contained`. A rebuild cannot
                 // be accepted as empty (`acceptEmptyResult` needs `resultReady`): a known limit.
-                if rebuild {
-                    await fail(taskID, .containedAfterRebuild)
-                    report.issues[taskID] = .containedAfterRebuild
-                }
+                if rebuild { await fail(taskID, .containedAfterRebuild, report: &report) }
             }
         } catch IntegrationError.taskNotInVerification, IntegrationStoreError.openCandidateExists {
             // Lost a race with the user or another step: retried on the next pass.
         } catch IntegrationStoreError.taskCannotFollow {
             // The task could not take the candidate after the merge (held meanwhile): retried
             // quietly, but not on every pass, so a lasting refusal never loops merges.
-            await fail(taskID, nil)
+            await fail(taskID, nil, report: &report)
         } catch {
-            let issue = ChainIssue.buildFailed(Self.describe(error))
-            await fail(taskID, issue)
-            report.issues[taskID] = issue
+            await fail(taskID, .buildFailed(Self.describe(error)), report: &report)
         }
     }
 
@@ -268,7 +304,8 @@ public actor CandidateChain {
         }
     }
 
-    /// The task's current issue (for example a build failure in backoff), if any.
+    /// The task's current issue (for example a build failure in backoff, or a refused collect of
+    /// a task in verification), in any task state; nil once it is resolved.
     public func issue(_ task: TaskID) -> ChainIssue? {
         backoff[task]?.issue ?? standing[task]
     }
@@ -304,19 +341,112 @@ public actor CandidateChain {
         clearIssue(shown.task)
     }
 
-    /// Clears the task's build backoff, so the next pass tries again.
+    /// Clears the task's backoff and its refused collects, so the next pass tries again.
     public func retryBuild(_ task: TaskID) {
         backoff[task] = nil
+        given[task] = nil
         if let issue = standing[task], issue != .planTaskMissing { standing[task] = nil }
     }
 
-    /// The conflicting paths of a conflicted candidate, read in its integration worktree.
+    /// The conflicting paths of a conflicted candidate: the paths the candidate recorded, each
+    /// with its kind as its integration worktree shows it. A resolution decides every recorded
+    /// path. After an interrupted resolution Git lists fewer paths (some already staged) or none
+    /// (the commit was made, but the candidate did not move on); `resolveConflicts` then starts
+    /// the merge over or reuses that commit, so a path Git no longer lists is still shown, with
+    /// its kind read from the three sides. Read-only.
     public func conflictDetails(_ id: CandidateID) async throws -> [ConflictEntry] {
         let candidate = try await candidate(id)
         guard candidate.state == .conflicted, let treeID = candidate.worktreeID else {
             throw IntegrationError.candidateNotIn(id, candidate.state)
         }
-        return try await git.conflicts(at: try await workspace.location(of: try await workspace.worktree(treeID)))
+        let live = try await git.conflicts(at: try await workspace.location(of: try await workspace.worktree(treeID)))
+        var entries: [ConflictEntry] = []
+        for path in candidate.conflicts {
+            if let entry = live.first(where: { $0.path == path }) {
+                entries.append(entry)
+            } else {
+                entries.append(try Self.conflictEntry(path, kind: try await recordedKind(path, of: candidate)))
+            }
+        }
+        return entries
+    }
+
+    /// The kind of a recorded conflict Git no longer lists, from which of the three sides (base,
+    /// integration state, incoming) have the path, as Git's index stages would show it.
+    private func recordedKind(_ path: String, of candidate: CandidateRecord) async throws -> ConflictEntry.Kind {
+        var base: String?
+        var incoming: String?
+        switch candidate.kind {
+        case .implementation:
+            if let attempt = candidate.authorAttemptID, let tree = try await store.attempt(attempt)?.worktreeID {
+                base = try await store.worktree(tree)?.baseOID
+            }
+            incoming = candidate.resultOID
+        case .revert:
+            // A revert applies the reverted merge backwards: its base is the merge, the incoming
+            // side the state before it.
+            if let reverted = candidate.revertsCandidateID, let original = try await store.candidate(reverted) {
+                base = original.candidateOID
+                incoming = original.previousTargetOID
+            }
+        }
+        guard let base, let incoming else { return .bothModified }
+        let repository = try await workspace.attach(candidate.projectID)
+        func has(_ commit: String) async throws -> Bool { try await git.treeEntry(path, in: commit, repository: repository) != nil }
+        return switch (try await has(base), try await has(candidate.previousTargetOID), try await has(incoming)) {
+        case (false, true, true): .bothAdded
+        case (true, false, true): .deletedByUs
+        case (true, true, false): .deletedByThem
+        case (false, false, true): .addedByThem
+        case (false, true, false): .addedByUs
+        default: .bothModified
+        }
+    }
+
+    /// `ConflictEntry` has no public initializer outside `Workspace`; it is `Codable`.
+    private static func conflictEntry(_ path: String, kind: ConflictEntry.Kind) throws -> ConflictEntry {
+        try JSONDecoder().decode(ConflictEntry.self, from: JSONEncoder().encode(["path": path, "kind": kind.rawValue]))
+    }
+
+    /// Discards the result the sheet showed (ADR 0011 §7) under the task's lock, so no build of
+    /// the driver runs meanwhile: checks that the task is still exactly where the sheet saw it,
+    /// lets `grant` restart the attempt count, then moves the task to `needsChanges`. The grant
+    /// comes first (after a crash in between the task still waits with its result, and the user
+    /// repeats the discard); if the grant or the move fails, the grant is voided, so the grant
+    /// before it counts again.
+    public func discard(_ shown: ShownResult, grant: @Sendable (TaskID) async throws -> Void) async throws {
+        guard claim(shown.task) else { throw ChainError.busy(shown.task) }
+        defer { release(shown.task) }
+        switch shown.check {
+        case .notApplicable, .candidate: throw ChainError.shownStateChanged
+        default: break
+        }
+        _ = try await requireShown(shown)
+        guard let task = try await store.task(shown.task), task.state == .resultReady else { throw ChainError.shownStateChanged }
+        let before = try await store.decisions(task: task.id).last { $0.rule == Self.grantRule }
+        do {
+            try await grant(task.id)
+            try await store.execute(Command(.transitionTask(id: task.id, to: .needsChanges, expectedVersion: shown.taskVersion)))
+        } catch {
+            try? await voidGrant(task.id, since: before)
+            if (try? await store.task(task.id))?.version != shown.taskVersion { throw ChainError.shownStateChanged }
+            throw error
+        }
+        clearIssue(task.id)
+    }
+
+    /// The scheduler's grant rule; the latest such decision is the one that counts.
+    private static let grantRule = "userGrant"
+
+    /// Records the grant that counted before `since` again, if a newer one was recorded: the
+    /// scheduler reads only the latest grant. No grant before means counting from the start.
+    private func voidGrant(_ task: TaskID, since before: DecisionRecord?) async throws {
+        guard let latest = try await store.decisions(task: task).last(where: { $0.rule == Self.grantRule }), latest.id != before?.id else { return }
+        var evidence = before?.evidence ?? ["afterOrdinal": "0"]
+        evidence["voids"] = latest.id.uuidString
+        try await store.recordDecision(
+            task: task, rule: Self.grantRule, evidence: evidence, outcome: "voided", actor: latest.actor, remaining: before?.remainingAttempts
+        )
     }
 
     /// Resolves the conflicts the sheet showed with the user's choices.
@@ -487,7 +617,7 @@ public actor CandidateChain {
         let recorded = Set(try await store.reviews(candidate: candidate.id).compactMap(\.reviewerAttemptID))
         var result: [AttemptRecord] = []
         for attempt in try await store.attempts(taskID: taskID)
-        where attempt.role == .reviewer && attempt.state == .succeeded && !recorded.contains(attempt.id) && !given.contains(attempt.id) {
+        where attempt.role == .reviewer && attempt.state == .succeeded && !recorded.contains(attempt.id) && given[taskID]?.contains(attempt.id) != true {
             guard let treeID = attempt.worktreeID, let tree = try await store.worktree(treeID), tree.baseOID == oid else { continue }
             result.append(attempt)
         }
@@ -522,11 +652,19 @@ public actor CandidateChain {
         return entry.until > now
     }
 
-    /// Records a failure with a retry after 5 s × 2ⁿ, at most 5 min.
-    private func fail(_ task: TaskID, _ issue: ChainIssue?) async {
+    /// Records a failure with a retry after 5 s × 2ⁿ, at most 5 min; reports the issue if it is new.
+    private func fail(_ task: TaskID, _ issue: ChainIssue?, report: inout ChainReport) async {
+        let previous = self.issue(task)
         let count = (backoff[task]?.count ?? 0) + 1
         let delay = min(Self.backoffBase << Int64(min(count - 1, 16)), Self.backoffCap)
         backoff[task] = Backoff(count: count, until: await store.now() + delay, issue: issue)
+        if let issue { raise(issue, for: task, since: previous, in: &report) }
+    }
+
+    /// Puts the issue into the pass's report only when it differs from the one the task showed
+    /// before: a report is a change, and the app refreshes on every non-empty one.
+    private func raise(_ issue: ChainIssue, for task: TaskID, since previous: ChainIssue?, in report: inout ChainReport) {
+        if issue != previous { report.issues[task] = issue }
     }
 
     private func clearIssue(_ task: TaskID) {
@@ -534,17 +672,43 @@ public actor CandidateChain {
         standing[task] = nil
     }
 
-    /// Drops backoff and issues of tasks that ended or went back to an author.
+    /// Drops backoff, issues and refused collects of tasks that ended or went back to an author,
+    /// and issues that are resolved while the task stays: a refused collect once no candidate
+    /// waits for that reviewer any more, a seal or build issue once the task has an open
+    /// candidate (built by the user, or a conflict that was resolved).
     private func forgetSettledTasks() async {
-        let known = Set(backoff.keys).union(standing.keys)
+        let known = Set(backoff.keys).union(standing.keys).union(given.keys)
         for id in known {
             guard let task = try? await store.task(id) else {
                 clearIssue(id)
+                given[id] = nil
                 continue
             }
             let backToAuthor: Set<TaskState> = [.pending, .ready, .running, .needsChanges]
-            if task.state.isTerminal || backToAuthor.contains(task.state) { clearIssue(id) }
+            if task.state.isTerminal || backToAuthor.contains(task.state) {
+                clearIssue(id)
+                given[id] = nil
+                continue
+            }
+            if case .collectFailed? = standing[id], let waiting = try? await refusedReviewerWaits(task), !waiting { standing[id] = nil }
+            if backoff[id] != nil, let _ = try? await openCandidate(of: task) { backoff[id] = nil }
         }
+    }
+
+    /// Whether a reviewer whose collect was refused still belongs to a reviewing or accepted
+    /// candidate of the task: prepared at its commit, no review of it recorded.
+    private func refusedReviewerWaits(_ task: TaskRecord) async throws -> Bool {
+        guard let refused = given[task.id], !refused.isEmpty else { return false }
+        for candidate in try await store.candidates(jobID: task.jobID)
+        where candidate.taskID == task.id && (candidate.state == .reviewing || candidate.state == .accepted) {
+            guard let oid = candidate.candidateOID else { continue }
+            let recorded = Set(try await store.reviews(candidate: candidate.id).compactMap(\.reviewerAttemptID))
+            for id in refused where !recorded.contains(id) {
+                guard let treeID = try await store.attempt(id)?.worktreeID, let tree = try await store.worktree(treeID) else { continue }
+                if tree.baseOID == oid { return true }
+            }
+        }
+        return false
     }
 
     /// The error a blocked start reports; the sheet should not have offered it.
