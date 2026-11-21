@@ -1,0 +1,171 @@
+{
+  "build" : "b1bd2bd + item 0.3 (set-based read set)",
+  "configuration" : "release",
+  "date" : "2026-11-21T12:00:22Z",
+  "machine" : {
+    "cores" : 10,
+    "cpu" : "Apple M4",
+    "macOS" : "Version 27.2.1 (Build 26B131)",
+    "memoryGB" : 16,
+    "model" : "Mac16,12"
+  },
+  "results" : [
+    {
+      "metric" : "seed",
+      "notes" : [
+        "addMemories in batches of 1,000"
+      ],
+      "scenario" : "fts-10000",
+      "unit" : "ms",
+      "value" : 3734.2899589999997,
+      "verdict" : "info"
+    },
+    {
+      "metric" : "query (owner view, warm)",
+      "notes" : [
+        "10000 active chunks, 30 queries × 3 passes, retriever v2"
+      ],
+      "scenario" : "fts-10000",
+      "stats" : {
+        "count" : 90,
+        "max" : 30.448167,
+        "p50" : 7.408292,
+        "p95" : 28.719542
+      },
+      "target" : "p95 < 200 ms",
+      "unit" : "ms",
+      "verdict" : "met"
+    },
+    {
+      "metric" : "query (provider with grants, warm)",
+      "notes" : [
+        "10000 active chunks, 30 queries × 3 passes, retriever v2",
+        "the path an attempt's memory handover takes"
+      ],
+      "scenario" : "fts-10000",
+      "stats" : {
+        "count" : 90,
+        "max" : 39.029125,
+        "p50" : 9.954625,
+        "p95" : 37.819417
+      },
+      "target" : "p95 < 200 ms",
+      "unit" : "ms",
+      "verdict" : "met"
+    },
+    {
+      "metric" : "query (provider, cold page cache)",
+      "notes" : [
+        "store reopened before each query; OS file cache stays warm"
+      ],
+      "scenario" : "fts-10000",
+      "stats" : {
+        "count" : 20,
+        "max" : 10.997416,
+        "p50" : 1.147333,
+        "p95" : 10.765167
+      },
+      "target" : "p95 < 200 ms",
+      "unit" : "ms",
+      "verdict" : "met"
+    },
+    {
+      "metric" : "retrievals without a hit",
+      "notes" : [
+        "owner, provider and cold; every query matches the corpus, so an empty result means a broken path"
+      ],
+      "scenario" : "fts-10000",
+      "target" : "0",
+      "unit" : "count",
+      "value" : 0,
+      "verdict" : "met"
+    },
+    {
+      "metric" : "FTS hits of a rare-token query",
+      "notes" : [
+        "10 of the 30 queries name one note's rare token; the other 20 match many or all notes"
+      ],
+      "scenario" : "fts-10000",
+      "unit" : "count",
+      "value" : 1,
+      "verdict" : "info"
+    },
+    {
+      "metric" : "seed",
+      "notes" : [
+        "addMemories in batches of 1,000"
+      ],
+      "scenario" : "fts-50000",
+      "unit" : "ms",
+      "value" : 20599.651,
+      "verdict" : "info"
+    },
+    {
+      "metric" : "query (owner view, warm)",
+      "notes" : [
+        "50000 active chunks, 30 queries × 3 passes, retriever v2"
+      ],
+      "scenario" : "fts-50000",
+      "stats" : {
+        "count" : 90,
+        "max" : 202.841458,
+        "p50" : 40.984125,
+        "p95" : 191.319875
+      },
+      "unit" : "ms",
+      "verdict" : "info"
+    },
+    {
+      "metric" : "query (provider with grants, warm)",
+      "notes" : [
+        "50000 active chunks, 30 queries × 3 passes, retriever v2",
+        "the path an attempt's memory handover takes"
+      ],
+      "scenario" : "fts-50000",
+      "stats" : {
+        "count" : 90,
+        "max" : 286.872208,
+        "p50" : 56.643417,
+        "p95" : 280.196792
+      },
+      "unit" : "ms",
+      "verdict" : "info"
+    },
+    {
+      "metric" : "query (provider, cold page cache)",
+      "notes" : [
+        "store reopened before each query; OS file cache stays warm"
+      ],
+      "scenario" : "fts-50000",
+      "stats" : {
+        "count" : 20,
+        "max" : 56.71425,
+        "p50" : 4.676083,
+        "p95" : 56.5095
+      },
+      "unit" : "ms",
+      "verdict" : "info"
+    },
+    {
+      "metric" : "retrievals without a hit",
+      "notes" : [
+        "owner, provider and cold; every query matches the corpus, so an empty result means a broken path"
+      ],
+      "scenario" : "fts-50000",
+      "target" : "0",
+      "unit" : "count",
+      "value" : 0,
+      "verdict" : "met"
+    },
+    {
+      "metric" : "FTS hits of a rare-token query",
+      "notes" : [
+        "10 of the 30 queries name one note's rare token; the other 20 match many or all notes"
+      ],
+      "scenario" : "fts-50000",
+      "unit" : "count",
+      "value" : 1,
+      "verdict" : "info"
+    }
+  ]
+}
