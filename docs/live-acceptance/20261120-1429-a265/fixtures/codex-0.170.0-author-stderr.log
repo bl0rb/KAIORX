@@ -1,0 +1,13 @@
+[2m2026-11-20T13:38:03.124213Z[0m [31mERROR[0m [2mcodex_app_server[0m[2m:[0m Project-local config, hooks, and exec policies are disabled in the following folders until the project is trusted, but skills still load.
+    1. <repo-a>/.codex
+       To load project-local config, hooks, and exec policies, add <repo-a> as a trusted project in <config>/config.toml.
+
+[2m2026-11-20T13:38:03.125423Z[0m [31mERROR[0m [2mcodex_skills_extension::host_service[0m[2m:[0m failed to install system skills: io error while remove existing system skills dir: Operation not permitted (os error 1)
+[2m2026-11-20T13:38:03.129662Z[0m [31mERROR[0m [2mcodex_skills_extension::host_service[0m[2m:[0m failed to install system skills: io error while remove existing system skills dir: Operation not permitted (os error 1)
+[2m2026-11-20T13:38:03.130072Z[0m [31mERROR[0m [2mcodex_skills_extension::loader::host[0m[2m:[0m failed to walk skills root file://<home>/.agents/skills: Operation not permitted (os error 1)
+[2m2026-11-20T13:38:03.162203Z[0m [31mERROR[0m [2mcodex_skills_extension::host_service[0m[2m:[0m failed to install system skills: io error while remove existing system skills dir: Operation not permitted (os error 1)
+[2m2026-11-20T13:38:03.162296Z[0m [31mERROR[0m [2mcodex_skills_extension::host_service[0m[2m:[0m failed to install system skills: io error while remove existing system skills dir: Operation not permitted (os error 1)
+[2m2026-11-20T13:38:03.165538Z[0m [31mERROR[0m [2mcodex_skills_extension::host_service[0m[2m:[0m failed to install system skills: io error while remove existing system skills dir: Operation not permitted (os error 1)
+[2m2026-11-20T13:38:03.165665Z[0m [31mERROR[0m [2mcodex_skills_extension::loader::host[0m[2m:[0m failed to walk skills root file://<home>/.agents/skills: Operation not permitted (os error 1)
+[2m2026-11-20T13:38:07.748273Z[0m [31mERROR[0m [2mcodex_core::tools::router[0m[2m:[0m [3merror[0m[2m=[0mexec_command failed: CreateProcess { message: "Rejected(\"rejected by user\")" }
+[2m2026-11-20T13:38:12.132476Z[0m [31mERROR[0m [2mcodex_core::tools::router[0m[2m:[0m [3merror[0m[2m=[0mpatch rejected by user

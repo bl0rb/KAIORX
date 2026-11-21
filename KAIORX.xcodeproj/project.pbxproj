@@ -1,0 +1,380 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A1B2C3D40000000000000001 /* KAIORXKit in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D40000000000000002 /* KAIORXKit */; };
+		A1B2C3D40000000000000003 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D40000000000000004 /* SwiftTerm */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A1B2C3D40000000000000005 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A1B2C3D40000000000000006 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A1B2C3D40000000000000007;
+			remoteInfo = KAIORX;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		A1B2C3D40000000000000008 /* KAIORX.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = KAIORX.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1B2C3D40000000000000009 /* KAIORXUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = KAIORXUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1B2C3D4000000000000000A /* KAIORX.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = KAIORX.entitlements; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		A1B2C3D4000000000000000B /* App */ = {isa = PBXFileSystemSynchronizedRootGroup; path = App; sourceTree = "<group>"; };
+		A1B2C3D4000000000000000C /* UITests */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Tests/UITests; sourceTree = "<group>"; };
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A1B2C3D4000000000000000D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1B2C3D40000000000000001 /* KAIORXKit in Frameworks */,
+				A1B2C3D40000000000000003 /* SwiftTerm in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1B2C3D4000000000000000E /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A1B2C3D4000000000000000F = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D4000000000000000B /* App */,
+				A1B2C3D4000000000000000C /* UITests */,
+				A1B2C3D40000000000000010 /* Signing */,
+				A1B2C3D40000000000000011 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A1B2C3D40000000000000010 /* Signing */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D4000000000000000A /* KAIORX.entitlements */,
+			);
+			path = Signing;
+			sourceTree = "<group>";
+		};
+		A1B2C3D40000000000000011 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D40000000000000008 /* KAIORX.app */,
+				A1B2C3D40000000000000009 /* KAIORXUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A1B2C3D40000000000000007 /* KAIORX */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1B2C3D40000000000000012 /* Build configuration list for PBXNativeTarget "KAIORX" */;
+			buildPhases = (
+				A1B2C3D40000000000000013 /* Sources */,
+				A1B2C3D4000000000000000D /* Frameworks */,
+				A1B2C3D40000000000000014 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				A1B2C3D4000000000000000B /* App */,
+			);
+			name = KAIORX;
+			packageProductDependencies = (
+				A1B2C3D40000000000000002 /* KAIORXKit */,
+				A1B2C3D40000000000000004 /* SwiftTerm */,
+			);
+			productName = KAIORX;
+			productReference = A1B2C3D40000000000000008 /* KAIORX.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A1B2C3D40000000000000015 /* KAIORXUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1B2C3D40000000000000016 /* Build configuration list for PBXNativeTarget "KAIORXUITests" */;
+			buildPhases = (
+				A1B2C3D40000000000000017 /* Sources */,
+				A1B2C3D4000000000000000E /* Frameworks */,
+				A1B2C3D40000000000000018 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A1B2C3D40000000000000019 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				A1B2C3D4000000000000000C /* UITests */,
+			);
+			name = KAIORXUITests;
+			productName = KAIORXUITests;
+			productReference = A1B2C3D40000000000000009 /* KAIORXUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A1B2C3D40000000000000006 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2720;
+				LastUpgradeCheck = 2720;
+				TargetAttributes = {
+					A1B2C3D40000000000000007 = {
+						CreatedOnToolsVersion = 27.2;
+					};
+					A1B2C3D40000000000000015 = {
+						CreatedOnToolsVersion = 27.2;
+						TestTargetID = A1B2C3D40000000000000007;
+					};
+				};
+			};
+			buildConfigurationList = A1B2C3D4000000000000001A /* Build configuration list for PBXProject "KAIORX" */;
+			developmentRegion = de;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				de,
+				Base,
+			);
+			mainGroup = A1B2C3D4000000000000000F;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				A1B2C3D4000000000000001B /* XCLocalSwiftPackageReference "Packages/KAIORXKit" */,
+				A1B2C3D4000000000000001C /* XCRemoteSwiftPackageReference "SwiftTerm" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = A1B2C3D40000000000000011 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A1B2C3D40000000000000007 /* KAIORX */,
+				A1B2C3D40000000000000015 /* KAIORXUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A1B2C3D40000000000000014 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1B2C3D40000000000000018 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A1B2C3D40000000000000013 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1B2C3D40000000000000017 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A1B2C3D40000000000000019 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A1B2C3D40000000000000007 /* KAIORX */;
+			targetProxy = A1B2C3D40000000000000005 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		A1B2C3D4000000000000001D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_IDENTITY = "-";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_TESTABILITY = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				DEBUG_INFORMATION_FORMAT = dwarf;
+			};
+			name = Debug;
+		};
+		A1B2C3D4000000000000001E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_IDENTITY = "-";
+				DEVELOPMENT_TEAM = "";
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		A1B2C3D4000000000000001F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_NAME = KAIORX;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.kaiorx.KAIORX;
+				MARKETING_VERSION = 0.8.0;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = KAIORX;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_APP_SANDBOX = NO;
+				CODE_SIGN_ENTITLEMENTS = Signing/KAIORX.entitlements;
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				COMBINE_HIDPI_IMAGES = YES;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+			};
+			name = Debug;
+		};
+		A1B2C3D40000000000000020 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_NAME = KAIORX;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.kaiorx.KAIORX;
+				MARKETING_VERSION = 0.8.0;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = KAIORX;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_APP_SANDBOX = NO;
+				CODE_SIGN_ENTITLEMENTS = Signing/KAIORX.entitlements;
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				COMBINE_HIDPI_IMAGES = YES;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+			};
+			name = Release;
+		};
+		A1B2C3D40000000000000021 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_NAME = KAIORXUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.kaiorx.KAIORXUITests;
+				GENERATE_INFOPLIST_FILE = YES;
+				TEST_TARGET_NAME = KAIORX;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @loader_path/../Frameworks";
+			};
+			name = Debug;
+		};
+		A1B2C3D40000000000000022 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_NAME = KAIORXUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.kaiorx.KAIORXUITests;
+				GENERATE_INFOPLIST_FILE = YES;
+				TEST_TARGET_NAME = KAIORX;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @loader_path/../Frameworks";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A1B2C3D4000000000000001A /* Build configuration list for PBXProject "KAIORX" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1B2C3D4000000000000001D /* Debug */,
+				A1B2C3D4000000000000001E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A1B2C3D40000000000000012 /* Build configuration list for PBXNativeTarget "KAIORX" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1B2C3D4000000000000001F /* Debug */,
+				A1B2C3D40000000000000020 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A1B2C3D40000000000000016 /* Build configuration list for PBXNativeTarget "KAIORXUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1B2C3D40000000000000021 /* Debug */,
+				A1B2C3D40000000000000022 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A1B2C3D4000000000000001B /* XCLocalSwiftPackageReference "Packages/KAIORXKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/KAIORXKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A1B2C3D4000000000000001C /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git";
+			requirement = {
+				kind = exactVersion;
+				version = 1.99.3;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A1B2C3D40000000000000002 /* KAIORXKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = KAIORXKit;
+		};
+		A1B2C3D40000000000000004 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1B2C3D4000000000000001C /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			productName = SwiftTerm;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A1B2C3D40000000000000006 /* Project object */;
+}

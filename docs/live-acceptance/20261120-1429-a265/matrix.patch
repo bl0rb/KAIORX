@@ -1,0 +1,32 @@
+--- a/Packages/KAIORXKit/Sources/Providers/Compatibility.swift
++++ b/Packages/KAIORXKit/Sources/Providers/Compatibility.swift
+@@ -106,21 +106,25 @@
+             schemaDigest: nil
+         ),
+         CompatibilityEntry(
+-            provider: .claude, version: "2.1.329", status: .offlineVerified,
++            provider: .claude, version: "2.1.329", status: .liveVerified,
+             notes: """
+                 Self-updated from 2.1.328 on 2026-11-20 during the owner's first live run; all 15 flags of the \
+                 automatic profile exist in `claude --help` of this version. `claude auth status --json` fields \
+                 recorded (loggedIn, authMethod, apiProvider, loginExpiresAt). Open: a passed live acceptance.
+                 """,
+-            schemaDigest: nil
++            schemaDigest: nil,
++            builds: ["8c1729568b19cdadedd0a978bf692f9f279ef554c8a333c4e132b94fd8725550"],
++            evidence: LiveEvidence(reportPath: "docs/live-acceptance/20261120-1429-a265/report.json", reportSHA256: "0c7cac88969f6b5cdffe1381811f839c4afad47940ec21973b1ea8d7f946e4f0", mode: "claudeSubscription")
+         ),
+         CompatibilityEntry(
+-            provider: .codex, version: "0.170.0", status: .offlineVerified,
++            provider: .codex, version: "0.170.0", status: .liveVerified,
+             notes: """
+                 Requests sent and fixture messages validated against `app-server generate-json-schema` of this \
+                 binary. Open: SIWC login and token refresh, live turn with approvals, `account/rateLimits/read`.
+                 """,
+-            schemaDigest: "22b6df4324c33a4945cab3ba72870108aca2745fe617552ccb85e46966091bf0"
++            schemaDigest: "22b6df4324c33a4945cab3ba72870108aca2745fe617552ccb85e46966091bf0",
++            builds: ["9248cfeebec9b4cc3034d5114caab10fbf426cbfa79dba410c5fa1b72762abd6"],
++            evidence: LiveEvidence(reportPath: "docs/live-acceptance/20261120-1429-a265/report.json", reportSHA256: "0c7cac88969f6b5cdffe1381811f839c4afad47940ec21973b1ea8d7f946e4f0", mode: "codexCliManaged")
+         ),
+     ]
+ 
