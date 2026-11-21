@@ -258,6 +258,8 @@
 				MARKETING_VERSION = 0.8.0;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Signing/KAIORX-Info.plist";
+				KAIORX_DISTRIBUTION_CHANNEL = personal;
 				INFOPLIST_KEY_CFBundleDisplayName = KAIORX;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
@@ -279,6 +281,8 @@
 				MARKETING_VERSION = 0.8.0;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Signing/KAIORX-Info.plist";
+				KAIORX_DISTRIBUTION_CHANNEL = distributed;
 				INFOPLIST_KEY_CFBundleDisplayName = KAIORX;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";

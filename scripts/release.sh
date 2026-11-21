@@ -16,11 +16,20 @@ OUT="$ROOT/build/release"
 rm -rf "$OUT"
 mkdir -p "$OUT"
 
+# Every release build is the distributed channel (ADR 0009), also the owner's own copy: no real
+# provider runs automatically without a provider clearance. Personal builds come only from a
+# local Debug build and are never signed or notarized here.
 xcodebuild -project "$ROOT/KAIORX.xcodeproj" -scheme KAIORX -configuration Release \
     -derivedDataPath "$OUT/dd" -skipPackagePluginValidation \
     CODE_SIGN_IDENTITY="$IDENTITY" CODE_SIGN_STYLE=Manual OTHER_CODE_SIGN_FLAGS="--timestamp" \
+    KAIORX_DISTRIBUTION_CHANNEL=distributed \
     build
 APP="$OUT/dd/Build/Products/Release/KAIORX.app"
+CHANNEL="$(/usr/libexec/PlistBuddy -c 'Print :KAIORXDistributionChannel' "$APP/Contents/Info.plist")"
+if [ "$CHANNEL" != "distributed" ]; then
+    echo "Refusing to sign: distribution channel is '$CHANNEL', expected 'distributed' (ADR 0009)." >&2
+    exit 1
+fi
 
 # Inside out: nested code first, then the app, all with the hardened runtime and a timestamp.
 find "$APP/Contents" \( -name "*.dylib" -o -name "*.framework" -o -perm -111 -type f \) ! -path "*/MacOS/KAIORX" -print0 |

@@ -110,6 +110,10 @@ final class AppModel {
         let results = launch.isUITest
             ? ProbeResults(gitPath: GitRunner.locate())
             : await Onboarding.probe(host: services.agents, scratch: scratch, projects: state.projects.count)
+        // A fresh sandbox check is the automatic gate's latest probe result too (ADR 0009).
+        if let gate = services.configuration.gate as? AutomationGate, let confinement = results.confinement {
+            await gate.record(confinement: confinement)
+        }
         var adjusted = results
         adjusted.projects = state.projects.count
         let support = (try? AppPaths.supportFolder()) ?? ""
@@ -301,7 +305,9 @@ struct LaunchMode: Sendable {
                 gate: UITestGate()
             )
         }
-        return try AppConfiguration.standard(adapters: { host in RealAdapters.make(host: host) })
+        // The build's channel (Info.plist, per build configuration; unknown means distributed)
+        // decides whether any real provider may run without the user's start (ADR 0009).
+        return try AppConfiguration.standard(adapters: { host in RealAdapters.make(host: host) }, channel: .current())
     }
 }
 
@@ -312,8 +318,8 @@ struct UITestGate: CapabilityGate {
 }
 
 /// The real adapters for CLIs that are installed, each under the product confinement
-/// (`ProviderAdapters`). They only run when the user starts a task; automatic runs stay locked
-/// by the compatibility gate until a live acceptance (ADR 0003).
+/// (`ProviderAdapters`). Automatic runs pass the `AutomationGate` first: channel, live-verified
+/// installed build, effective confinement and a subscription verdict (ADR 0003, ADR 0009).
 enum RealAdapters {
     static func make(host: ProcessHost) -> [any AgentAdapter] {
         guard let support = try? AppPaths.supportFolder() else { return [] }
