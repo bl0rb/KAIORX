@@ -68,6 +68,12 @@ public final class CodexAppServerAdapter: AgentAdapter {
         self.host = host
     }
 
+    /// The installed binary as the next start would see it (version and SHA-256, cached per
+    /// resolved path and file signature). Runs at most `--version`; no inference.
+    public func installedIdentity() async throws -> BinaryIdentity {
+        try await identity.current(configuration.executable, host: host)
+    }
+
     public func probe(_ request: ProbeRequest) async throws -> CapabilitySnapshot {
         let identity = try await identity.current(configuration.executable, host: host)
         let entry = CompatibilityMatrix.entry(for: .codex, version: identity.version)

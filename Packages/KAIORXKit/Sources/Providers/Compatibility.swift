@@ -138,6 +138,24 @@ public enum CompatibilityMatrix {
     public static func entry(for provider: ProviderKind, version: String) -> CompatibilityEntry? {
         entries.first { $0.provider == provider && $0.version == version }
     }
+
+    /// Whether exactly this installed binary passed a live acceptance: a `liveVerified` entry for
+    /// its version that names its build. The product's start check and the scheduler's gate
+    /// before a reservation both use it (ADR 0009).
+    public static func liveVerification(_ provider: ProviderKind, identity: BinaryIdentity) -> LiveVerification {
+        guard let entry = entry(for: provider, version: identity.version) else { return .versionNotListed }
+        guard entry.status == .liveVerified else { return .versionNotLiveVerified }
+        // A live acceptance binds the build that passed; another build of the same version waits.
+        guard entry.builds.contains(identity.sha256) else { return .buildNotVerified }
+        return .verified
+    }
+}
+
+public enum LiveVerification: Sendable, Equatable {
+    case verified
+    case versionNotListed
+    case versionNotLiveVerified
+    case buildNotVerified
 }
 
 /// Whether an adapter may start automatic runs.
@@ -190,15 +208,10 @@ public struct AdapterPolicy: Sendable, Equatable {
             }
             guard identity.sha256 == sha else { throw ProviderError.binaryChanged(identity.resolvedPath) }
         case .liveVerified:
-            guard let entry = CompatibilityMatrix.entry(for: provider, version: identity.version) else {
-                throw ProviderError.versionNotInMatrix(provider: provider, version: identity.version)
-            }
-            guard entry.status == .liveVerified else {
-                throw ProviderError.notLiveVerified(provider: provider, version: identity.version)
-            }
-            // A live acceptance binds the build that passed; another build of the same version waits.
-            if !entry.builds.isEmpty, !entry.builds.contains(identity.sha256) {
-                throw ProviderError.notLiveVerified(provider: provider, version: identity.version)
+            switch CompatibilityMatrix.liveVerification(provider, identity: identity) {
+            case .verified: return
+            case .versionNotListed: throw ProviderError.versionNotInMatrix(provider: provider, version: identity.version)
+            case .versionNotLiveVerified, .buildNotVerified: throw ProviderError.notLiveVerified(provider: provider, version: identity.version)
             }
         }
     }
