@@ -168,6 +168,14 @@ public actor RunCoordinator {
         try await store.activeAttempts()
     }
 
+    /// Whether the attempt's event stream is still being consumed. The store may already call
+    /// the attempt `succeeded` while the provider process has not exited: the stream ends only
+    /// after it did. After a restart nothing streams.
+    public func isStreaming(_ id: AttemptID) -> Bool { consumers[id] != nil }
+
+    /// The providers this coordinator has an adapter for.
+    public var providers: Set<ProviderKind> { Set(adapters.keys) }
+
     private func consume(_ id: AttemptID, _ handle: any RunHandle) async {
         do {
             for try await event in handle.events {
