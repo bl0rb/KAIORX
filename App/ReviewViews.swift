@@ -35,9 +35,7 @@ struct DecisionView: View {
                 }
                 HStack {
                     Spacer()
-                    Button(sheet.rejectLabel) { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-                        .keyboardShortcut(.defaultAction)
+                    SafeChoiceButton(sheet.rejectLabel) { dismiss() }
                         .accessibilityIdentifier("decisionReject")
                     Button(sheet.approveLabel) { approve(sheet) }
                         .disabled(!sheet.canApprove)
@@ -133,7 +131,7 @@ struct RejectSheet: View {
             TextField("Begründung", text: $reason, axis: .vertical).lineLimit(3...6).accessibilityIdentifier("rejectReason")
             HStack {
                 Spacer()
-                Button("Abbrechen") { dismiss() }.keyboardShortcut(.cancelAction).keyboardShortcut(.defaultAction)
+                SafeChoiceButton("Abbrechen") { dismiss() }
                 Button("Ablehnen", role: .destructive) {
                     let reason = reason
                     model.perform { try await $0.reject(candidate, reason: reason) }

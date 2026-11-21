@@ -243,15 +243,18 @@ final class AppModel {
         let generation = decisionGeneration
         let integration = services.integration
         let chain = services.chain
-        let collected = (try? await PendingDecisions.collect(
+        // A lookup that fails for one task or candidate drops only that entry (`collect`); should
+        // the whole collection fail, the last list stays instead of an empty one.
+        guard let collected = try? await PendingDecisions.collect(
             state, project: nil,
             gate: { id in try await integration?.gateItems(id) ?? [.noCommit] },
             openFindings: { id in
                 let findings = try await services.store.findings(candidate: id)
                 return findings.contains { $0.severity.needsDecision && $0.disposition == .open }
             },
-            resultCheck: { id in try await chain?.check(id) }
-        )) ?? []
+            resultCheck: { id in try await chain?.check(id) },
+            chainIssue: { id in await chain?.issue(id) }
+        ) else { return }
         if generation == decisionGeneration { pending = collected }
     }
 

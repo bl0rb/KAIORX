@@ -29,11 +29,13 @@ struct ResultBox: View {
 
     private var held: Bool { task.state == .blocked }
 
+    /// Without the chain nothing seals or builds: never show an active status then.
+    private var chainAvailable: Bool { model.services?.chain != nil }
+
     var body: some View {
         GroupBox("Ergebnis") {
             VStack(alignment: .leading, spacing: 6) {
-                let status = shown.map { Labels.result($0.check, issue: issue) } ?? StatusLabel("Wird versiegelt …", "lock.rotation", .active)
-                StatusBadge(label: status).accessibilityIdentifier("resultStatus")
+                StatusBadge(label: Labels.resultStatus(shown, issue: issue, chainAvailable: chainAvailable)).accessibilityIdentifier("resultStatus")
                 if let area {
                     Text(Labels.writeArea(area)).foregroundStyle(.secondary).accessibilityIdentifier("writeArea")
                 }
@@ -105,10 +107,13 @@ struct ResultBox: View {
 
     private var needsDecision: Bool { shown.map { PendingDecisions.needsUser($0.check) } ?? false }
 
+    /// A retry clears the seal or build backoff. A refused review collect is not retried this
+    /// way; it is shown with the review, where a new review can be started.
     private var canRetry: Bool {
+        guard chainAvailable else { return false }
         switch issue {
-        case .sealFailed?, .buildFailed?, .collectFailed?: true
-        default: false
+        case .sealFailed?, .buildFailed?: return true
+        default: return false
         }
     }
 
@@ -139,9 +144,11 @@ struct ResultBox: View {
             area = try? await actions.writeArea(of: task.id)
             loadError = nil
         } catch ActionError.unavailable {
-            // No result worktree yet (the run's record is still arriving).
+            // No result worktree yet (the run's record is still arriving), or no chain at all;
+            // the status tells the two apart (`Labels.resultStatus`).
             shown = nil
-            issue = nil
+            issue = await model.services?.chain?.issue(task.id)
+            loadError = nil
         } catch {
             loadError = ChainMessages.text(error)
         }
@@ -153,6 +160,43 @@ struct ResultBox: View {
         Task {
             do { try await actions.retryBuild(id) } catch { model.errorMessage = ChainMessages.text(error) }
             await load()
+        }
+    }
+}
+
+// MARK: Chain issue outside the result box
+
+/// The driver's issue with a task whose result box is not shown (ADR 0011): a rebuild that found
+/// the result already contained, or a failure while the task is past `resultReady`. A refused
+/// review collect is shown in the review box instead, when that box is visible.
+struct ChainIssueNote: View {
+    @Environment(AppModel.self) private var model
+    let task: TaskRecord
+    @State private var issue: ChainIssue?
+
+    private var shown: ChainIssue? {
+        guard let issue else { return nil }
+        if case .collectFailed = issue, let candidate = model.candidate(for: task.id), [.reviewing, .accepted].contains(candidate.state) {
+            return nil
+        }
+        return issue
+    }
+
+    var body: some View {
+        // A stack, not a Group: the load task must run while nothing is shown yet.
+        VStack(alignment: .leading, spacing: 0) {
+            if let shown {
+                Label(Labels.chainIssue(shown), systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Kandidatenkette: \(Labels.chainIssue(shown))")
+                    .accessibilityIdentifier("chainIssue")
+            }
+        }
+        .task(id: "\(task.id.uuidString)|\(task.version)|\(model.chainRevision)") {
+            issue = await model.services?.chain?.issue(task.id)
         }
     }
 }
@@ -210,9 +254,7 @@ struct ResultSheet: View {
                             .accessibilityHint("Öffnet die Auflösung des Konflikts.")
                             .accessibilityIdentifier("showConflicts")
                     }
-                    Button("Fertig") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-                        .keyboardShortcut(.defaultAction)
+                    SafeChoiceButton("Fertig") { dismiss() }
                         .accessibilityIdentifier("resultDone")
                 }
             } else {
@@ -230,9 +272,7 @@ struct ResultSheet: View {
                         .accessibilityIdentifier("sheetDiscardResult")
                     }
                     Spacer()
-                    Button(sheet?.rejectLabel ?? "Nicht jetzt") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-                        .keyboardShortcut(.defaultAction)
+                    SafeChoiceButton(sheet?.rejectLabel ?? "Nicht jetzt") { dismiss() }
                         .accessibilityIdentifier("decisionReject")
                     Button(sheet?.approveLabel ?? "Entscheiden") { approve() }
                         .disabled(!(sheet?.canApprove ?? false) || sheet?.result == nil || working)
@@ -376,9 +416,7 @@ struct ResolveConflictsSheet: View {
                 SheetOutcome(text: outcome.text, failed: outcome.failed)
                 HStack {
                     Spacer()
-                    Button("Fertig") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-                        .keyboardShortcut(.defaultAction)
+                    SafeChoiceButton("Fertig") { dismiss() }
                         .accessibilityIdentifier("conflictsDone")
                 }
             } else {
@@ -388,9 +426,7 @@ struct ResolveConflictsSheet: View {
                 HStack {
                     if working { ProgressView().controlSize(.small) }
                     Spacer()
-                    Button(sheet?.rejectLabel ?? "Nicht jetzt") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-                        .keyboardShortcut(.defaultAction)
+                    SafeChoiceButton(sheet?.rejectLabel ?? "Nicht jetzt") { dismiss() }
                         .accessibilityIdentifier("decisionReject")
                     Button(sheet?.approveLabel ?? "Auflösen und Kandidat bauen") { approve() }
                         .disabled(!(sheet?.canApprove ?? false) || working)
@@ -533,25 +569,23 @@ struct CandidateReviewStatusView: View {
     private var held: Bool { task?.state == .blocked }
     private var openReviewer: AttemptRecord? { candidate.taskID.flatMap { model.state.openReviewer(of: $0) } }
 
+    /// The driver's issue with the task (a refused collect), reloaded with the chain's passes.
+    @State private var issue: ChainIssue?
+
     var status: StatusLabel {
-        if let open = openReviewer { return StatusLabel("Review läuft (\(Labels.provider(open.provider)))", "eye", .active) }
-        let reviews = (model.state.reviews[candidate.id] ?? []).filter { $0.candidateOID == candidate.candidateOID }
-        let recorded = Set(reviews.compactMap(\.reviewerAttemptID))
-        let reviewers = model.state.reviewers(of: candidate)
-        if reviewers.contains(where: { $0.state == .succeeded && !recorded.contains($0.id) }) {
-            return StatusLabel("Review wird übernommen …", "tray.and.arrow.down", .active)
-        }
-        if let latest = reviews.max(by: { ($0.at, $0.id.uuidString) < ($1.at, $1.id.uuidString) }) { return Labels.review(latest.status) }
-        if let last = reviewers.last, last.state == .failed || last.state == .cancelled {
-            return StatusLabel("Prüfer abgebrochen", "xmark.circle", .warning)
-        }
-        return StatusLabel("Noch kein Review", "eye.slash", .waiting)
+        model.state.reviewStatus(of: candidate, issue: issue, chainAvailable: model.services?.chain != nil)
     }
 
     var body: some View {
         GroupBox("Review") {
             VStack(alignment: .leading, spacing: 6) {
                 StatusBadge(label: status).accessibilityIdentifier("reviewStatus")
+                if case .collectFailed(let detail)? = issue {
+                    Label(Labels.chainIssue(.collectFailed(detail)), systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("reviewIssue")
+                }
                 if candidate.state == .reviewing {
                     HStack {
                         Spacer()
@@ -574,10 +608,14 @@ struct CandidateReviewStatusView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .accessibilityElement(children: .contain)
+        .task(id: "\(candidate.id.uuidString)|\(candidate.version)|\(model.chainRevision)") {
+            guard let task = candidate.taskID else { return }
+            issue = await model.services?.chain?.issue(task)
+        }
     }
 
     private var retryLabel: String {
-        status.text == "Prüfer abgebrochen" ? "Review erneut starten …" : "Review starten …"
+        [WorkspaceState.reviewerStopped, WorkspaceState.reviewNotCollected].contains(status) ? "Review erneut starten …" : "Review starten …"
     }
 
     private var startHelp: String {
@@ -614,9 +652,7 @@ struct StartReviewSheet: View {
                 SheetOutcome(text: started, failed: false)
                 HStack {
                     Spacer()
-                    Button("Fertig") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-                        .keyboardShortcut(.defaultAction)
+                    SafeChoiceButton("Fertig") { dismiss() }
                         .accessibilityIdentifier("reviewDone")
                 }
             } else {
@@ -635,9 +671,7 @@ struct StartReviewSheet: View {
                 HStack {
                     if working { ProgressView().controlSize(.small) }
                     Spacer()
-                    Button(sheet?.rejectLabel ?? "Nicht jetzt") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-                        .keyboardShortcut(.defaultAction)
+                    SafeChoiceButton(sheet?.rejectLabel ?? "Nicht jetzt") { dismiss() }
                         .accessibilityIdentifier("decisionReject")
                     Button(sheet?.approveLabel ?? "Review starten") { approve() }
                         .disabled(!(sheet?.canApprove ?? false) || sheet?.review == nil || working)
@@ -727,9 +761,7 @@ struct ImportReviewSheet: View {
                 SheetOutcome(text: "Review übernommen: \(Labels.review(imported.status).text).", failed: imported.status == .invalid)
                 HStack {
                     Spacer()
-                    Button("Fertig") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-                        .keyboardShortcut(.defaultAction)
+                    SafeChoiceButton("Fertig") { dismiss() }
                         .accessibilityIdentifier("importDone")
                 }
             } else {
@@ -746,9 +778,7 @@ struct ImportReviewSheet: View {
                 HStack {
                     if working { ProgressView().controlSize(.small) }
                     Spacer()
-                    Button(sheet?.rejectLabel ?? "Nicht übernehmen") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-                        .keyboardShortcut(.defaultAction)
+                    SafeChoiceButton(sheet?.rejectLabel ?? "Nicht übernehmen") { dismiss() }
                         .accessibilityIdentifier("decisionReject")
                     Button(sheet?.approveLabel ?? "Review übernehmen") { approve() }
                         .disabled(!(sheet?.canApprove ?? false) || working)

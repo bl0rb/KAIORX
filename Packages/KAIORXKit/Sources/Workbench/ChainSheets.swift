@@ -80,7 +80,7 @@ extension DecisionSheet {
         if let issue { scope.append(Labels.chainIssue(issue)) }
         scope += ["Die Zählung der Versuche beginnt neu.", "Ein neuer Lauf kann Kontingent verbrauchen."]
         var blockers = heldBlockers(task)
-        if let task, task.planKey == nil { blockers.append("Nur Aufgaben aus einem Plan lassen sich neu bearbeiten lassen.") }
+        if let task, task.planKey == nil { blockers.append("Nur Aufgaben aus einem Plan lassen sich neu bearbeiten.") }
         switch shown.check {
         case .notApplicable, .candidate: blockers.append("Für dieses Ergebnis ist gerade nichts zu entscheiden.")
         default: break

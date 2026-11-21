@@ -80,7 +80,7 @@ public enum ChainMessages {
         case ChainError.busy: "Die Aufgabe wird gerade bearbeitet. Versuche es gleich noch einmal."
         case ChainError.notImplemented: "Die Kandidatenkette ist noch nicht verfügbar."
         case IntegrationError.undeclaredChanges:
-            "Das Ergebnis hat Änderungen außerhalb des Schreibbereichs verworfen. Bestätige zuerst, dass ohne sie gebaut wird."
+            "Beim Versiegeln wurden Änderungen außerhalb des Schreibbereichs verworfen. Bestätige zuerst, dass ohne sie gebaut wird."
         case IntegrationError.resultNotEmpty: "Das Ergebnis ist weder leer noch im Integrationsstand enthalten."
         case IntegrationError.resultNotSealed: "Das Ergebnis ist noch nicht versiegelt."
         case IntegrationError.taskNotInVerification, IntegrationStoreError.taskNotInVerification:
@@ -97,7 +97,7 @@ public enum ChainMessages {
         case PlanningError.accountBlocked: "Das Prüferkonto ist gesperrt."
         case MemoryError.candidateContentPurged: "Die Inhalte des Autors wurden vergessen; dieser Kandidat bekommt kein neues Review."
         case ChainActionError.notAPlanTask:
-            "Nur Aufgaben aus einem Plan lassen sich neu bearbeiten lassen. Lehne den Kandidaten sonst ab oder versuche es erneut."
+            "Nur Aufgaben aus einem Plan lassen sich neu bearbeiten."
         case ChainActionError.nothingToDecide: "Für dieses Ergebnis ist gerade nichts zu entscheiden."
         case ChainActionError.reviewBlocked(let reasons): "Das Review kann nicht starten: \(reasons.joined(separator: "; "))."
         case ChainActionError.emptyReview: "Füge zuerst den Text des Reviews ein."

@@ -243,7 +243,7 @@ struct ChainFixture {
         await #expect(throws: ChainActionError.nothingToDecide(task)) { try await f.actions.discardResult(candidate) }
         #expect(try await f.store.task(task)?.state == .resultReady)
         let sheet = DecisionSheet.discardResult(shown, task: record, issue: .buildFailed("kaputt"))
-        #expect(sheet.blockers == ["Nur Aufgaben aus einem Plan lassen sich neu bearbeiten lassen."] && !sheet.canApprove)
+        #expect(sheet.blockers == ["Nur Aufgaben aus einem Plan lassen sich neu bearbeiten."] && !sheet.canApprove)
         #expect(sheet.scope.contains("Bauen fehlgeschlagen: kaputt"))
         await f.close()
     }

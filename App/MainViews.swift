@@ -230,6 +230,9 @@ struct TaskDetailView: View {
                 }
                 if ResultBox.applies(to: task), model.state.openCandidate(of: task.id) == nil {
                     ResultBox(task: task)
+                } else {
+                    // The result box shows the chain's issue itself; past it, this note does.
+                    ChainIssueNote(task: task)
                 }
                 if let candidate = model.candidate(for: task.id) {
                     CandidateReviewView(candidate: candidate)
@@ -288,9 +291,7 @@ struct TrustProjectSheet: View {
             Text("Wenn du ablehnst, wird nichts geöffnet.").foregroundStyle(.secondary)
             HStack {
                 Spacer()
-                Button("Nicht öffnen") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                    .keyboardShortcut(.defaultAction)
+                SafeChoiceButton("Nicht öffnen") { dismiss() }
                 Button("Vertrauen und öffnen") {
                     model.openTrusted(path)
                     dismiss()
