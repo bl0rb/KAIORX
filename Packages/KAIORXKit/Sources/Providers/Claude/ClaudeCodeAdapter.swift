@@ -49,6 +49,12 @@ public final class ClaudeCodeAdapter: AgentAdapter {
         self.host = host
     }
 
+    /// The installed binary as the next start would see it (version and SHA-256, cached per
+    /// resolved path and file signature). Runs at most `--version`; no inference.
+    public func installedIdentity() async throws -> BinaryIdentity {
+        try await identity.current(configuration.executable, host: host)
+    }
+
     /// `claude auth status --json` in KAIORX's own config folder, with the run environment and
     /// confinement of a reviewer attempt. Reads the login state; no inference, no login. Only the
     /// owner's acceptance kit and the product preflight call it, never tests (CLAUDE.md).
