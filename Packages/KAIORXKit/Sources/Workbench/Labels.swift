@@ -208,6 +208,21 @@ public enum Labels {
         }
     }
 
+    /// One dropped path with its reason, as the result box and the decision sheet show it.
+    /// Recovery's `RejectionReason.unknownPathsMarker` is not a path: it says the dropped paths
+    /// could not be determined after a restart, so the result needs the user's confirmation.
+    public static func rejectedLine(_ path: String, reason raw: String?) -> String {
+        if path == RejectionReason.unknownPathsMarker, raw == RejectionReason.recoveredUnknown.rawValue {
+            return "Verworfene Pfade nicht ermittelbar (nach Neustart) – prüfe das Ergebnis, bevor du baust"
+        }
+        return "Verworfen: \(path) – \(raw.map(rejectReason) ?? "verworfen")"
+    }
+
+    /// Whether the dropped paths are recovery's single unknown-paths marker.
+    static func onlyUnknownPaths(_ rejected: [String: String]) -> Bool {
+        rejected == [RejectionReason.unknownPathsMarker: RejectionReason.recoveredUnknown.rawValue]
+    }
+
     public static func conflictKind(_ kind: ConflictEntry.Kind) -> String {
         switch kind {
         case .bothModified: "Beide geändert"
@@ -278,6 +293,8 @@ public enum Labels {
         case .empty: return StatusLabel("Leer: der Lauf hat nichts geändert", "tray", .waiting)
         case .contained: return StatusLabel("Schon im Integrationsstand enthalten", "checkmark.circle", .waiting)
         case .rejectedOnly: return StatusLabel("Nur verworfene Änderungen", "xmark.bin", .warning)
+        case .undeclared(_, let rejected) where onlyUnknownPaths(rejected):
+            return StatusLabel("Verworfene Pfade unbekannt – Bestätigung nötig", "exclamationmark.shield", .waiting)
         case .undeclared(_, let rejected):
             return StatusLabel(rejected.count == 1 ? "1 Pfad verworfen" : "\(rejected.count) Pfade verworfen", "exclamationmark.shield", .waiting)
         case .buildable(let commit): return StatusLabel("Versiegelt: Commit \(short(commit)) – Kandidat wird gebaut …", "hammer", .active)

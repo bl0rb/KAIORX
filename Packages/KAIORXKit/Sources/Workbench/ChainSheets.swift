@@ -196,9 +196,7 @@ extension DecisionSheet {
         case .undeclared(_, let rejected), .rejectedOnly(let rejected): rejected
         default: [:]
         }
-        return shown.rejected.sorted().map { path in
-            "Verworfen: \(path) – \(reasons[path].map(Labels.rejectReason) ?? "verworfen")"
-        }
+        return shown.rejected.sorted().map { Labels.rejectedLine($0, reason: reasons[$0]) }
     }
 
     /// A held task decides nothing until it is released.

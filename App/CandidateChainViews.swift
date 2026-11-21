@@ -41,11 +41,11 @@ struct ResultBox: View {
                 }
                 if let shown {
                     ForEach(shown.rejected, id: \.self) { path in
-                        Label("Verworfen: \(path) – \(reason(path, in: shown.check))", systemImage: "xmark.bin")
+                        Label(Labels.rejectedLine(path, reason: reason(path, in: shown.check)), systemImage: "xmark.bin")
                             .font(.callout)
                             .textSelection(.enabled)
                             .accessibilityElement(children: .ignore)
-                            .accessibilityLabel("Verworfen: \(path), \(reason(path, in: shown.check))")
+                            .accessibilityLabel(Labels.rejectedLine(path, reason: reason(path, in: shown.check)))
                             .accessibilityIdentifier("rejectedPath-\(path)")
                     }
                 }
@@ -107,8 +107,9 @@ struct ResultBox: View {
 
     private var needsDecision: Bool { shown.map { PendingDecisions.needsUser($0.check) } ?? false }
 
-    /// A retry clears the seal or build backoff. A refused review collect is not retried this
-    /// way; it is shown with the review, where a new review can be started.
+    /// A retry clears the seal or build backoff. A refused review collect belongs to a task in
+    /// verification, not to this box: it is shown with the review, where a new review can be
+    /// started (the driver's `retryBuild` would also collect it again).
     private var canRetry: Bool {
         guard chainAvailable else { return false }
         switch issue {
@@ -128,10 +129,11 @@ struct ResultBox: View {
         }
     }
 
-    private func reason(_ path: String, in check: ResultCheck) -> String {
+    /// The stored reason (raw value) for a dropped path, if the check carries one.
+    private func reason(_ path: String, in check: ResultCheck) -> String? {
         switch check {
-        case .undeclared(_, let rejected), .rejectedOnly(let rejected): rejected[path].map(Labels.rejectReason) ?? "verworfen"
-        default: "verworfen"
+        case .undeclared(_, let rejected), .rejectedOnly(let rejected): rejected[path]
+        default: nil
         }
     }
 

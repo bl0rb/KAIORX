@@ -331,6 +331,23 @@ struct ChainFixture {
         )
     }
 
+    /// Recovery could not determine a seal's dropped paths and recorded its marker: the result
+    /// is a confirmation (the undeclared-paths sheet, never an automatic build), explained in
+    /// words instead of a path named "*".
+    @Test func recoveredUnknownDropsAskForConfirmationInWords() {
+        let marker = [RejectionReason.unknownPathsMarker: RejectionReason.recoveredUnknown.rawValue]
+        let check = ResultCheck.undeclared(resultOID: "abc123", rejected: marker)
+        let result = shown(check, rejected: [RejectionReason.unknownPathsMarker])
+        let sheet = DecisionSheet.resultDecision(result, task: task, writeArea: .paths(["docs/"]), issue: nil)
+        #expect(sheet.title == "Abweichende Änderungen" && sheet.approveLabel == "Ohne diese Pfade bauen" && sheet.canApprove)
+        #expect(sheet.scope.contains("Verworfene Pfade nicht ermittelbar (nach Neustart) – prüfe das Ergebnis, bevor du baust"))
+        #expect(!sheet.scope.contains { $0.contains("Verworfen: *") })
+        #expect(Labels.result(check, issue: nil).text == "Verworfene Pfade unbekannt – Bestätigung nötig")
+        #expect(PendingDecisions.needsUser(check))
+        // A real path named "*" with a real reason is still listed as a path.
+        #expect(Labels.rejectedLine("*", reason: "symlink") == "Verworfen: * – symbolischer Link")
+    }
+
     @Test func undeclaredPathsNameEachPathItsReasonAndTheWriteArea() {
         let check = ResultCheck.undeclared(resultOID: "abc123", rejected: ["NOTIZ.md": "outsideAllowedPaths", "link": "symlink", "x": "recoveredUnknown"])
         let result = shown(check, rejected: ["x", "NOTIZ.md", "link"])
