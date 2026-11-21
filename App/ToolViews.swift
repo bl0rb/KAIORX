@@ -13,6 +13,7 @@ struct MonitorView: View {
     @State private var selected: AttemptID?
     @State private var timeline = Timeline()
     @State private var loadedAttempt: AttemptID?
+    @State private var loadingOlder = false
 
     var body: some View {
         @Bindable var model = model
@@ -51,7 +52,7 @@ struct MonitorView: View {
                         }
                     }
                     .frame(minWidth: 420)
-                    TimelineView(timeline: timeline)
+                    TimelineView(timeline: timeline, loadingOlder: loadingOlder) { Task { await loadOlder() } }
                         .frame(minWidth: 260)
                 }
             }
@@ -77,18 +78,38 @@ struct MonitorView: View {
             timeline = Timeline()
             loadedAttempt = attempt
         }
-        // Every page to the end (the timeline itself stays bounded).
+        // Opening reads only the newest pages; older ones come with "Ältere Einträge laden".
+        if timeline.lastOrdinal == 0 {
+            guard let opened = try? await TimelinePaging.open(attempt, store: store) else { return }
+            guard !Task.isCancelled, selected == attempt, loadedAttempt == attempt, timeline.lastOrdinal == 0 else { return }
+            timeline = opened.timeline
+        }
+        // Newer pages to the end (the timeline itself stays bounded).
         while !Task.isCancelled {
-            let page = (try? await store.attemptEvents(attempt, afterOrdinal: timeline.lastOrdinal, limit: 500)) ?? []
+            let page = (try? await store.attemptEvents(attempt, afterOrdinal: timeline.lastOrdinal, limit: TimelinePaging.pageSize)) ?? []
             guard !Task.isCancelled, selected == attempt, loadedAttempt == attempt else { return }
             timeline.append(page)
-            if page.count < 500 { return }
+            if page.count < TimelinePaging.pageSize { return }
         }
+    }
+
+    /// One older page in front of the shown rows.
+    func loadOlder() async {
+        guard let attempt = loadedAttempt, selected == attempt, timeline.canLoadOlder, !loadingOlder,
+              let store = model.services?.store else { return }
+        loadingOlder = true
+        defer { loadingOlder = false }
+        // A failed read keeps the control (an empty page would mean nothing older is left).
+        guard let page = try? await store.latestAttemptEvents(attempt, beforeOrdinal: timeline.firstOrdinal, limit: TimelinePaging.pageSize),
+              selected == attempt, loadedAttempt == attempt else { return }
+        timeline.prepend(page)
     }
 }
 
 struct TimelineView: View {
     let timeline: Timeline
+    var loadingOlder = false
+    var loadOlder: () -> Void = {}
     @State private var copied = false
 
     var body: some View {
@@ -105,9 +126,18 @@ struct TimelineView: View {
                 }
             }
             .padding(6)
-            List(timeline.rows) { row in
-                VStack(alignment: .leading) {
-                    Text(verbatim: row.text + (row.truncated ? " …" : "")).font(.callout.monospaced()).textSelection(.enabled)
+            List {
+                // Only the newest pages are read on selection; older ones on request.
+                if timeline.canLoadOlder {
+                    Button(loadingOlder ? "Lädt …" : "Ältere Einträge laden", action: loadOlder)
+                        .disabled(loadingOlder)
+                        .accessibilityIdentifier("loadOlderEvents")
+                        .accessibilityHint("Zeigt die vorherigen \(TimelinePaging.pageSize) Ereignisse dieses Laufs über den bisherigen Einträgen.")
+                }
+                ForEach(timeline.rows) { row in
+                    VStack(alignment: .leading) {
+                        Text(verbatim: row.text + (row.truncated ? " …" : "")).font(.callout.monospaced()).textSelection(.enabled)
+                    }
                 }
             }
         }
