@@ -88,6 +88,33 @@ import Testing
         await AppBootstrap.shutdown(services)
     }
 
+    /// The candidate's „Tests ausführen“ offers what the gate counts: the plan task's named
+    /// profile only (or why it cannot run), else the only confirmed one, else a choice.
+    @Test func theRunChoiceFollowsThePlanTasksNamedProfile() {
+        func record(_ name: String, confirmed: Bool) -> TestProfileRecord {
+            let spec = TestProfileSpec(name: name, executable: "/usr/bin/true")
+            return TestProfileRecord(
+                id: TestProfileID(), projectID: ProjectID(), spec: spec, digest: spec.digest, confirmedDigest: confirmed ? spec.digest : nil,
+                confirmedAt: confirmed ? 1 : nil, confirmedBy: confirmed ? "user" : nil, createdAt: 1, updatedAt: 1
+            )
+        }
+        let unit = record("unit", confirmed: true), lint = record("lint", confirmed: true), draft = record("entwurf", confirmed: false)
+
+        // A named profile is the only one offered, even with others confirmed.
+        #expect(TestRunChoice.resolve(plannedName: "unit", profiles: [lint, unit]) == .run(unit, planned: true))
+        #expect(TestRunChoice.resolve(plannedName: "fehlt", profiles: [unit]) == .plannedMissing("fehlt"))
+        #expect(TestRunChoice.resolve(plannedName: "entwurf", profiles: [unit, draft]) == .plannedNotConfirmed("entwurf"))
+        #expect(TestRunChoice.plannedMissing("fehlt").reason == "Die Aufgabe verlangt das Testprofil „fehlt“, das im Projekt fehlt.")
+        #expect(TestRunChoice.plannedNotConfirmed("entwurf").reason == "Das Testprofil „entwurf“ ist nicht bestätigt.")
+        #expect(TestRunChoice.plannedNotConfirmed("entwurf").profile == nil && TestRunChoice.run(unit, planned: true).reason == nil)
+
+        // Without a named profile: the only confirmed one, a choice, or none.
+        #expect(TestRunChoice.resolve(plannedName: nil, profiles: [unit, draft]) == .run(unit, planned: false))
+        #expect(TestRunChoice.resolve(plannedName: nil, profiles: [lint, unit, draft]) == .choose([lint, unit]))
+        #expect(TestRunChoice.resolve(plannedName: nil, profiles: [draft]) == .noneConfirmed)
+        #expect(TestRunChoice.noneConfirmed.reason == "Kein bestätigtes Testprofil im Projekt.")
+    }
+
     @Test func theFormAndTheCommandLineReadAsTheyRun() {
         var form = TestProfileForm()
         form.name = " Unit "

@@ -38,6 +38,50 @@ extension WorkbenchActions {
     }
 }
 
+/// Which profile „Tests ausführen“ offers for a candidate, resolved like
+/// `IntegrationService.testProfile(for:)` and the gate (ADR 0010 §4, §5): a plan task that names
+/// a profile runs only that one; otherwise the project's only confirmed profile, or a choice.
+public enum TestRunChoice: Sendable, Equatable {
+    /// Runs exactly this profile; `planned` when the plan task names it.
+    case run(TestProfileRecord, planned: Bool)
+    /// Several confirmed profiles and the task names none: the user chooses.
+    case choose([TestProfileRecord])
+    /// The plan task names a profile the project's registry does not have.
+    case plannedMissing(String)
+    /// The plan task names a profile whose current content is not confirmed.
+    case plannedNotConfirmed(String)
+    /// The project has no confirmed profile.
+    case noneConfirmed
+
+    public static func resolve(plannedName: String?, profiles: [TestProfileRecord]) -> TestRunChoice {
+        if let plannedName {
+            guard let named = profiles.first(where: { $0.spec.name == plannedName }) else { return .plannedMissing(plannedName) }
+            return named.isConfirmed ? .run(named, planned: true) : .plannedNotConfirmed(plannedName)
+        }
+        let confirmed = profiles.filter(\.isConfirmed)
+        switch confirmed.count {
+        case 0: return .noneConfirmed
+        case 1: return .run(confirmed[0], planned: false)
+        default: return .choose(confirmed)
+        }
+    }
+
+    /// The profile that runs without a choice.
+    public var profile: TestProfileRecord? {
+        if case .run(let profile, _) = self { profile } else { nil }
+    }
+
+    /// Why nothing can run, as a sentence; nil when a profile runs or the user chooses.
+    public var reason: String? {
+        switch self {
+        case .run, .choose: nil
+        case .plannedMissing(let name): Labels.testProfileError(.unknownName(name))
+        case .plannedNotConfirmed(let name): Labels.testProfileError(.notConfirmed(name))
+        case .noneConfirmed: Labels.testProfileError(.noneConfirmed)
+        }
+    }
+}
+
 /// What the profile form holds as text, and how it becomes a profile: one argument and one
 /// test input prefix per line, so arguments with spaces stay whole and nothing is split by a
 /// shell.

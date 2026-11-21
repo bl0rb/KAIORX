@@ -76,6 +76,55 @@ import Testing
         #expect(try await h.integration.gateItems(other.id) == [.noPassingTest(try #require(other.candidateOID)), .noConfirmedTestProfile])
     }
 
+    /// A withdrawn test is not the end: the candidate is tested again with the (re)confirmed
+    /// profile on the same commit and goes on to acceptance and publication.
+    @Test func aCandidateWhoseTestWasWithdrawnIsTestedAgain() async throws {
+        let h = try await IntegrationHarness()
+        let store = h.base.store
+        let (task, tree) = try await h.authorResult("echo eins > a.txt")
+        let accepted = try await h.accepted(tree)
+        let commit = try #require(accepted.candidateOID)
+        #expect(accepted.state == .accepted)
+        // With its test counting, an accepted candidate is not tested again.
+        await #expect(throws: IntegrationError.candidateNotIn(accepted.id, .accepted)) {
+            try await h.integration.runTests(accepted.id, profile: h.passing)
+        }
+
+        let profile = try #require(try await store.testProfile(h.passing))
+        var changed = profile.spec
+        changed.arguments = ["-c", "true"]
+        let replaced = try await store.proposeTestProfile(project: h.base.project, changed)
+        // Not confirmed yet: refused before anything runs.
+        await #expect(throws: TestProfileError.notConfirmed("passing")) { try await h.integration.runTests(accepted.id, profile: replaced.id) }
+        await #expect(throws: IntegrationError.self) { _ = try await h.integration.approve(accepted.id, actor: "user") }
+        #expect(try await store.candidate(accepted.id)?.state == .reviewing)
+        try await store.confirmTestProfile(replaced.id, digest: replaced.digest, actor: "user")
+
+        let retest = try await h.integration.runTests(accepted.id, profile: replaced.id)
+        #expect(retest.status == .passed && retest.candidateOID == commit && retest.profileDigest == replaced.digest)
+        #expect(try await store.candidate(accepted.id)?.state == .accepted)
+        #expect(try await h.integration.gate(accepted.id) == [])
+        let approval = try await h.integration.approve(accepted.id, actor: "user")
+        try await h.integration.publish(accepted.id, approval: approval.id)
+        #expect(try await h.target() == commit)
+        #expect(try await store.candidate(accepted.id)?.state == .published)
+        #expect(try await store.task(task)?.state == .integrated)
+
+        // Still accepted in the store when the profile changed (not evaluated yet): the run
+        // evaluates first, and a red re-test rejects.
+        let (_, second) = try await h.authorResult("echo zwei > b.txt")
+        let other = try await h.accepted(second)
+        #expect(other.state == .accepted)
+        var red = changed
+        red.arguments = ["-c", "exit 4"]
+        let redProfile = try await store.proposeTestProfile(project: h.base.project, red)
+        try await store.confirmTestProfile(redProfile.id, digest: redProfile.digest, actor: "user")
+        #expect(try await store.candidate(other.id)?.state == .accepted)
+        let failed = try await h.integration.runTests(other.id, profile: redProfile.id)
+        #expect(failed.status == .failed)
+        #expect(try await store.candidate(other.id)?.state == .rejected)
+    }
+
     @Test func theProfileIsResolvedForTheCandidate() async throws {
         let h = try await IntegrationHarness()
         let candidate = try await built(h)

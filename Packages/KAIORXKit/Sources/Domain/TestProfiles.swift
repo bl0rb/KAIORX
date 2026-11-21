@@ -51,7 +51,8 @@ public struct TestProfileSpec: Sendable, Equatable, Hashable, Codable {
     public var issues: [TestProfileIssue] {
         var issues: [TestProfileIssue] = []
         if name.isEmpty { issues.append(.emptyName) }
-        if name.count > Self.maxNameLength { issues.append(.nameTooLong) }
+        // Counted in code points like the schema's `length(name)`, not in grapheme clusters.
+        if name.unicodeScalars.count > Self.maxNameLength { issues.append(.nameTooLong) }
         if Self.hasControlCharacters(name) { issues.append(.controlCharacters("name")) }
         if !executable.hasPrefix("/") || executable.split(separator: "/").contains("..") { issues.append(.executableNotAbsolute) }
         if Self.hasControlCharacters(executable) { issues.append(.controlCharacters("executable")) }

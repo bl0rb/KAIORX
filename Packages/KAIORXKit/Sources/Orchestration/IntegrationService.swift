@@ -210,11 +210,19 @@ public actor IntegrationService {
     /// Runs a registered, confirmed test profile (ADR 0010) on exactly the candidate's commit in
     /// a fresh QA worktree. A plan task that names a profile runs only that one. Changes to the
     /// profile's test inputs are recorded for the review; the result carries the confirmed digest.
+    /// A reviewing or accepted candidate is tested again only while no test of a profile confirmed
+    /// now counts for it (a changed or removed profile withdrew it).
     @discardableResult
     public func runTests(_ id: CandidateID, profile profileID: TestProfileID) async throws -> TestResultRecord {
-        let candidate = try await candidate(id, in: [.built])
+        var candidate = try await candidate(id, in: [.built, .reviewing, .accepted])
         guard let commit = candidate.candidateOID else { throw IntegrationError.candidateNotIn(id, candidate.state) }
         try await requireTaskInVerification(candidate)
+        if candidate.state != .built {
+            // An accepted candidate whose test was withdrawn goes back to reviewing first.
+            try await evaluate(id)
+            candidate = try await self.candidate(id, in: [.reviewing])
+            guard try await gateItems(id).contains(.noPassingTest(commit)) else { throw IntegrationError.candidateNotIn(id, .reviewing) }
+        }
         guard let record = try await store.testProfile(profileID), record.projectID == candidate.projectID else {
             throw TestProfileError.unknownProfile(profileID)
         }
@@ -259,7 +267,9 @@ public actor IntegrationService {
         let id = candidate.id
         let repository = try await workspace.attach(candidate.projectID)
         let changed = try await git.changedPaths(from: candidate.previousTargetOID, to: commit, in: repository).map(\.path)
-        try await store.transitionCandidate(id, to: .testing)
+        // A re-test of a reviewing candidate (its test was withdrawn) stays in `reviewing`.
+        let retest = candidate.state == .reviewing
+        if !retest { try await store.transitionCandidate(id, to: .testing) }
         do {
             let report: TestReport
             do {
@@ -274,12 +284,12 @@ public actor IntegrationService {
             )
             switch status {
             case .passed:
-                try await store.transitionCandidate(id, to: .reviewing)
+                if !retest { try await store.transitionCandidate(id, to: .reviewing) }
                 // A review may already be there (imported while testing).
                 try await evaluate(id)
             case .infrastructureError, .timedOut:
                 // Not a verdict on the change: the candidate can be tested again.
-                try await store.transitionCandidate(id, to: .built, reason: summary)
+                if !retest { try await store.transitionCandidate(id, to: .built, reason: summary) }
             case .failed, .crashed, .inputsModified:
                 try await reject(candidate, reason: "tests: \(summary)")
             }

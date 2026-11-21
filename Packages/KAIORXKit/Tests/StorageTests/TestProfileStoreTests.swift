@@ -119,4 +119,26 @@ extension Store {
         #expect(try await store.testProfiles(project: seed.project).isEmpty)
         #expect(try await store.events(limit: 10_000).filter { $0.kind == .policyDecided }.count == before + 1)
     }
+
+    /// SQLite's `length(name)` counts code points, not grapheme clusters: the length check counts
+    /// the same, so a long name is refused with a reason and never hits the schema CHECK.
+    @Test func theNameLengthCountsCodePointsLikeTheSchema() async throws {
+        let fixture = try Fixture()
+        let store = try fixture.open()
+        let seed = try await fixture.seed(store)
+        // 80 visible characters, 160 code points (e + combining acute accent).
+        let combining = String(repeating: "e\u{301}", count: 80)
+        #expect(combining.count == 80 && combining.unicodeScalars.count == 160)
+        await #expect(throws: TestProfileStoreError.invalid([.nameTooLong])) {
+            try await store.proposeTestProfile(project: seed.project, TestProfileSpec(name: combining, executable: "/bin/sh"))
+        }
+        // A family emoji is one character of five code points.
+        let family = String(repeating: "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", count: 17)
+        #expect(family.count == 17 && family.unicodeScalars.count == 85)
+        #expect(TestProfileSpec(name: family, executable: "/bin/sh").issues == [.nameTooLong])
+        // Exactly 80 code points are stored.
+        let longest = String(repeating: "e\u{301}", count: 40)
+        let stored = try await store.proposeTestProfile(project: seed.project, TestProfileSpec(name: longest, executable: "/bin/sh"))
+        #expect(stored.spec.name == longest)
+    }
 }

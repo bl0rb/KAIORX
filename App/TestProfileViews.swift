@@ -62,6 +62,7 @@ struct TestProfilesSheet: View {
                 StatusBadge(label: Labels.testProfile(profile)).accessibilityIdentifier("testProfileStatus-\(profile.spec.name)")
                 if !profile.isConfirmed {
                     Button("Bestätigen …") { confirming = profile }
+                        .accessibilityLabel("\(profile.spec.name) bestätigen …")
                         .accessibilityIdentifier("confirmTestProfile-\(profile.spec.name)")
                         .accessibilityHint("Zeigt den vollständigen Befehl vor der Bestätigung")
                 }
@@ -208,12 +209,15 @@ struct TestProfileConfirmation: View {
 }
 
 /// Tests of a candidate: the latest results for its commit, and „Tests ausführen“ with the
-/// confirmed profile while the candidate is built.
+/// profile the gate counts (the plan task's named one, else the confirmed one) while the
+/// candidate is built, or again once its test was withdrawn by a profile change.
 struct CandidateTestsView: View {
     @Environment(AppModel.self) private var model
     let candidate: CandidateRecord
     @State private var results: [TestResultRecord] = []
     @State private var profiles: [TestProfileRecord] = []
+    @State private var plannedName: String?
+    @State private var testWithdrawn = false
     @State private var chosen: TestProfileID?
     @State private var running = false
 
@@ -235,7 +239,7 @@ struct CandidateTestsView: View {
                 if results.isEmpty { Text("Noch kein Testlauf für diesen Commit").foregroundStyle(.secondary) }
                 if candidate.state == .testing || running {
                     ProgressView("Tests laufen …").controlSize(.small).accessibilityIdentifier("testsRunning")
-                } else if candidate.state == .built {
+                } else if candidate.state == .built || (testWithdrawn && [.reviewing, .accepted].contains(candidate.state)) {
                     runControls
                 }
             }
@@ -244,36 +248,41 @@ struct CandidateTestsView: View {
         .task(id: "\(candidate.id.uuidString)|\(candidate.version)|\(model.testProfileRevision)") { await load() }
     }
 
-    private var confirmed: [TestProfileRecord] { profiles.filter(\.isConfirmed) }
+    /// The same resolution as the gate: a named profile is the only one offered.
+    private var choice: TestRunChoice { TestRunChoice.resolve(plannedName: plannedName, profiles: profiles) }
 
     @ViewBuilder private var runControls: some View {
-        if confirmed.isEmpty {
-            HStack {
-                Label("Kein bestätigtes Testprofil", systemImage: "exclamationmark.shield").foregroundStyle(.orange)
+        let choice = choice
+        HStack {
+            switch choice {
+            case .choose(let confirmed):
+                Picker("Profil", selection: $chosen) {
+                    Text("Bitte wählen").tag(TestProfileID?.none)
+                    ForEach(confirmed) { Text($0.spec.name).tag(TestProfileID?.some($0.id)) }
+                }
+                .frame(maxWidth: 260)
+                .accessibilityIdentifier("testProfilePicker")
+            case .run(let profile, let planned):
+                Text(planned ? "Profil der Aufgabe: \(profile.spec.name)" : "Profil: \(profile.spec.name)").foregroundStyle(.secondary)
+                Text(Labels.commandLine(profile.spec)).font(.callout.monospaced()).lineLimit(1).truncationMode(.middle)
+            case .plannedMissing, .plannedNotConfirmed, .noneConfirmed:
+                Label(choice.reason ?? "", systemImage: "exclamationmark.shield").foregroundStyle(.orange)
+                    .accessibilityIdentifier("testProfileBlocked")
                 Button("Testprofile …") { model.sheet = .testProfiles(candidate.projectID) }
                     .accessibilityIdentifier("openTestProfiles")
             }
-        } else {
-            HStack {
-                if confirmed.count > 1 {
-                    Picker("Profil", selection: $chosen) {
-                        Text("Bitte wählen").tag(TestProfileID?.none)
-                        ForEach(confirmed) { Text($0.spec.name).tag(TestProfileID?.some($0.id)) }
-                    }
-                    .frame(maxWidth: 260)
-                    .accessibilityIdentifier("testProfilePicker")
-                } else if let only = confirmed.first {
-                    Text("Profil: \(only.spec.name)").foregroundStyle(.secondary)
-                    Text(Labels.commandLine(only.spec)).font(.callout.monospaced()).lineLimit(1).truncationMode(.middle)
-                }
-                Spacer()
-                Button("Tests ausführen") { run() }
-                    .keyboardShortcut("t", modifiers: [.command, .shift])
-                    .disabled(confirmed.count > 1 && chosen == nil)
-                    .accessibilityIdentifier("runTests")
-                    .accessibilityHint("Führt das bestätigte Testprofil auf genau diesem Kandidatencommit aus")
-            }
+            Spacer()
+            Button("Tests ausführen") { run(choice) }
+                .keyboardShortcut("t", modifiers: [.command, .shift])
+                .disabled(Self.profileToRun(choice, chosen: chosen) == nil)
+                .accessibilityIdentifier("runTests")
+                .accessibilityHint("Führt das bestätigte Testprofil auf genau diesem Kandidatencommit aus")
         }
+    }
+
+    private static func profileToRun(_ choice: TestRunChoice, chosen: TestProfileID?) -> TestProfileID? {
+        if case .choose(let confirmed) = choice { return confirmed.first { $0.id == chosen }?.id }
+        return choice.profile?.id
     }
 
     private func profileName(_ digest: String) -> String {
@@ -288,12 +297,15 @@ struct CandidateTestsView: View {
         let commit = candidate.candidateOID
         results = ((try? await services.store.testResults(candidate: candidate.id)) ?? []).filter { $0.candidateOID == commit }
         profiles = (try? await services.store.testProfiles(project: candidate.projectID)) ?? []
-        if let chosen, !confirmed.contains(where: { $0.id == chosen }) { self.chosen = nil }
+        plannedName = if let task = candidate.taskID { (try? await services.store.plannedTask(task))??.testProfile } else { nil }
+        let gate = (try? await services.integration?.gateItems(candidate.id)) ?? []
+        testWithdrawn = commit.map { gate.contains(.noPassingTest($0)) } ?? false
+        if let chosen, Self.profileToRun(choice, chosen: chosen) == nil { self.chosen = nil }
     }
 
-    private func run() {
-        guard let actions = model.actions else { return }
-        let id = candidate.id, profile = confirmed.count > 1 ? chosen : nil
+    private func run(_ choice: TestRunChoice) {
+        guard let actions = model.actions, let profile = Self.profileToRun(choice, chosen: chosen) else { return }
+        let id = candidate.id
         running = true
         Task {
             do {
