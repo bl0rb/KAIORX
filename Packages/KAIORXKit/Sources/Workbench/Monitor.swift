@@ -292,6 +292,47 @@ public enum TimelinePaging {
         if page.count < limits.pageSize { timeline.prepend([]) }
         return (timeline, read)
     }
+
+    /// What an older page is read for: the attempt and the timeline's `firstOrdinal` then.
+    public struct OlderPageRequest: Sendable, Equatable {
+        public let attempt: AttemptID
+        public let beforeOrdinal: Int
+    }
+
+    /// The request for the page in front of `timeline`, or nil if nothing older can be shown.
+    public static func olderPageRequest(_ timeline: Timeline, attempt: AttemptID) -> OlderPageRequest? {
+        timeline.canLoadOlder ? OlderPageRequest(attempt: attempt, beforeOrdinal: timeline.firstOrdinal) : nil
+    }
+
+    /// Takes an older page in front only if it still fits: the same attempt is shown and the
+    /// timeline still starts where the request was made (it may have been rebuilt or already
+    /// taken a page meanwhile). Returns false for a stale page, which is discarded.
+    @discardableResult
+    public static func prepend(_ page: [EventRecord], for request: OlderPageRequest, to timeline: inout Timeline, attempt: AttemptID?) -> Bool {
+        guard attempt == request.attempt, timeline.canLoadOlder, timeline.firstOrdinal == request.beforeOrdinal else { return false }
+        timeline.prepend(page)
+        return true
+    }
+
+    /// The whole bounded history behind `timeline`: older pages in front until the start of the
+    /// run or until rows drop beyond `maxRows` (the newest rows stay, as in a full replay).
+    public static func history(_ timeline: Timeline, attempt: AttemptID, store: Store, limits: Limits = .app) async throws -> Timeline {
+        var history = timeline
+        while history.canLoadOlder {
+            try Task.checkCancellation()
+            let before = history.firstOrdinal
+            let page = try await store.latestAttemptEvents(attempt, beforeOrdinal: before, limit: limits.pageSize)
+            history.prepend(page)
+            // A short page reached the start of the run; a page that moved nothing ends it too.
+            if page.count < limits.pageSize || history.firstOrdinal >= before { history.prepend([]) }
+        }
+        return history
+    }
+
+    /// The text "Redigiert kopieren" puts on the pasteboard: every row, through the secret check.
+    public static func copyText(_ timeline: Timeline) -> String {
+        LogRedactor.redact(timeline.rows.map(\.text).joined(separator: "\n"))
+    }
 }
 
 /// Copying log text: always through the secret check, matches replaced (Plan/macos-und-git.md).

@@ -52,7 +52,7 @@ struct MonitorView: View {
                         }
                     }
                     .frame(minWidth: 420)
-                    TimelineView(timeline: timeline, loadingOlder: loadingOlder) { Task { await loadOlder() } }
+                    TimelineView(timeline: timeline, loadingOlder: loadingOlder, loadOlder: { Task { await loadOlder() } }, copyText: copyText)
                         .frame(minWidth: 260)
                 }
             }
@@ -95,14 +95,21 @@ struct MonitorView: View {
 
     /// One older page in front of the shown rows.
     func loadOlder() async {
-        guard let attempt = loadedAttempt, selected == attempt, timeline.canLoadOlder, !loadingOlder,
-              let store = model.services?.store else { return }
+        guard let attempt = loadedAttempt, selected == attempt, !loadingOlder, let store = model.services?.store else { return }
+        guard let request = TimelinePaging.olderPageRequest(timeline, attempt: attempt) else { return }
         loadingOlder = true
         defer { loadingOlder = false }
         // A failed read keeps the control (an empty page would mean nothing older is left).
-        guard let page = try? await store.latestAttemptEvents(attempt, beforeOrdinal: timeline.firstOrdinal, limit: TimelinePaging.pageSize),
-              selected == attempt, loadedAttempt == attempt else { return }
-        timeline.prepend(page)
+        guard let page = try? await store.latestAttemptEvents(attempt, beforeOrdinal: request.beforeOrdinal, limit: TimelinePaging.pageSize) else { return }
+        // A page read for an earlier timeline (another selection, rebuilt meanwhile) is discarded.
+        TimelinePaging.prepend(page, for: request, to: &timeline, attempt: selected == loadedAttempt ? loadedAttempt : nil)
+    }
+
+    /// The whole bounded history of the shown attempt, redacted, for "Redigiert kopieren".
+    func copyText() async -> String? {
+        guard let attempt = loadedAttempt, selected == attempt, let store = model.services?.store else { return nil }
+        guard let history = try? await TimelinePaging.history(timeline, attempt: attempt, store: store) else { return nil }
+        return TimelinePaging.copyText(history)
     }
 }
 
@@ -110,7 +117,10 @@ struct TimelineView: View {
     let timeline: Timeline
     var loadingOlder = false
     var loadOlder: () -> Void = {}
-    @State private var copied = false
+    /// The whole bounded history, redacted (nil if it cannot be read).
+    var copyText: () async -> String? = { nil }
+    @State private var copyResult: String?
+    @State private var copying = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -118,12 +128,22 @@ struct TimelineView: View {
                 Text("Verlauf").font(.headline)
                 if timeline.droppedRows > 0 { Text("(\(timeline.droppedRows) ältere ausgeblendet)").foregroundStyle(.secondary) }
                 Spacer()
-                Button(copied ? "Kopiert" : "Redigiert kopieren") {
-                    let text = timeline.rows.map(\.text).joined(separator: "\n")
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(LogRedactor.redact(text), forType: .string)
-                    copied = true
+                Button(copying ? "Lädt …" : copyResult ?? "Redigiert kopieren") {
+                    // Older pages are read first, so the copy holds the whole bounded history;
+                    // if they cannot be read, nothing is copied (a part would look like all).
+                    copying = true
+                    Task {
+                        if let text = await copyText() {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(text, forType: .string)
+                            copyResult = "Kopiert"
+                        } else {
+                            copyResult = "Nicht kopiert"
+                        }
+                        copying = false
+                    }
                 }
+                .disabled(copying)
             }
             .padding(6)
             List {

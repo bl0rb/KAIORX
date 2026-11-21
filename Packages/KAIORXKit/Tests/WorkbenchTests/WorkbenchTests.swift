@@ -233,6 +233,80 @@ func sh(_ script: String, in directory: String) async throws -> String {
         let redacted = LogRedactor.redact(text)
         #expect(!redacted.contains("sk-ant-abc") && redacted.contains("[entfernt: anthropicKey]") && redacted.hasSuffix("und weiter"))
     }
+
+    @Test func anOlderPageOnlyFitsTheTimelineItWasReadFor() throws {
+        let attempt = AttemptID(), other = AttemptID()
+        let events = (1...9).map { event($0, .toolStarted(itemID: "t\($0)", toolClass: "x")) }
+        var timeline = Timeline()
+        timeline.append(Array(events.suffix(3)))
+        let request = try #require(TimelinePaging.olderPageRequest(timeline, attempt: attempt))
+        #expect(request.beforeOrdinal == 7)
+        let page = Array(events[3..<6])
+
+        // The timeline was rebuilt for the same attempt meanwhile (now starting elsewhere): discarded.
+        var rebuilt = Timeline()
+        rebuilt.append(Array(events.suffix(2)))
+        let before = rebuilt
+        #expect(!TimelinePaging.prepend(page, for: request, to: &rebuilt, attempt: attempt))
+        #expect(rebuilt == before)
+        // Another attempt is selected: discarded.
+        var current = timeline
+        #expect(!TimelinePaging.prepend(page, for: request, to: &current, attempt: other))
+        #expect(!TimelinePaging.prepend(page, for: request, to: &current, attempt: nil))
+        #expect(current == timeline)
+        // The timeline it was read for takes it, once.
+        #expect(TimelinePaging.prepend(page, for: request, to: &current, attempt: attempt))
+        #expect(current.firstOrdinal == 4 && current.rows.count == 6)
+        let taken = current
+        #expect(!TimelinePaging.prepend(page, for: request, to: &current, attempt: attempt))
+        #expect(current == taken)
+        // Nothing older to load: no request.
+        current.prepend([])
+        #expect(TimelinePaging.olderPageRequest(current, attempt: attempt) == nil)
+    }
+
+    @Test func copyingReadsTheWholeBoundedHistoryAndRedacts() async throws {
+        let store = try Store(path: try temporaryFolder("history") + "/db.sqlite", clock: { 1_000 })
+        let project = ProjectID(), job = JobID(), task = TaskID(), attempt = AttemptID()
+        try await store.execute(Command(.openProject(id: project, name: "P", rootLocator: "/tmp")))
+        try await store.execute(Command(.createJob(id: job, projectID: project, goal: "Ziel")))
+        try await store.execute(Command(.transitionJob(id: job, to: .planned, expectedVersion: 1, reason: nil)))
+        try await store.execute(Command(.transitionJob(id: job, to: .active, expectedVersion: 2, reason: nil)))
+        try await store.execute(Command(.createTask(id: task, jobID: job, title: "Aufgabe")))
+        try await store.execute(Command(.transitionTask(id: task, to: .ready, expectedVersion: 1)))
+        try await store.execute(Command(.reserveAttempt(AttemptReservation(
+            attemptID: attempt, taskID: task, projectID: project, role: .author, provider: .fake, mode: .automatic, model: "m", specDigest: "d"
+        ))))
+        let version = try #require(try await store.attempt(attempt)).version
+        try await store.execute(Command(.transitionAttempt(id: attempt, to: .starting, expectedVersion: version, errorClass: nil)))
+        _ = try await store.ingest(.started(sessionID: "s"), attemptID: attempt)
+        _ = try await store.ingest(.messageFinal(itemID: "k", text: "Token sk-ant-abcdefghijklmnopqrstuvwxyz0123 am Anfang"), attemptID: attempt)
+        for index in 0..<40 {
+            _ = try await store.ingest(.toolStarted(itemID: "t\(index)", toolClass: "w\(index)"), attemptID: attempt)
+        }
+        _ = try await store.ingest(.completed(.succeeded), attemptID: attempt)
+
+        var full = Timeline()
+        full.append(try await store.attemptEvents(attempt, limit: 10_000))
+        let limits = TimelinePaging.Limits(pageSize: 7, openRows: 5, openEvents: 10)
+
+        // The opening window shows only the newest rows; the copy holds the whole run.
+        let opened = try await TimelinePaging.open(attempt, store: store, limits: limits).timeline
+        #expect(opened.rows.count < full.rows.count && opened.canLoadOlder)
+        let history = try await TimelinePaging.history(opened, attempt: attempt, store: store, limits: limits)
+        #expect(history.rows.map(\.text) == full.rows.map(\.text) && !history.canLoadOlder)
+        let text = TimelinePaging.copyText(history)
+        #expect(text == LogRedactor.redact(full.rows.map(\.text).joined(separator: "\n")))
+        #expect(text.contains("Gestartet\n") && text.contains("[entfernt: anthropicKey] am Anfang") && !text.contains("sk-ant-abc"))
+
+        // The row bound holds as for a full replay: the newest rows, the oldest dropped.
+        var bounded = Timeline(maxRows: 10)
+        bounded.append(try await store.latestAttemptEvents(attempt, limit: limits.pageSize))
+        var boundedFull = Timeline(maxRows: 10)
+        boundedFull.append(try await store.attemptEvents(attempt, limit: 10_000))
+        let boundedHistory = try await TimelinePaging.history(bounded, attempt: attempt, store: store, limits: limits)
+        #expect(boundedHistory.rows.map(\.text) == boundedFull.rows.map(\.text) && boundedHistory.rows.count == 10)
+    }
 }
 
 @Suite struct EditorTests {
