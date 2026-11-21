@@ -173,7 +173,8 @@ struct PublishedJobFixture {
 
         guard case .built(let revert) = try await f.actions.revert(original.id, sheet: sheet) else { Issue.record("no revert"); return }
         #expect(revert.kind == .revert && revert.revertsCandidateID == original.id && revert.state == .built)
-        #expect(try await f.services.store.task(try #require(revert.taskID))?.state == .verifying)
+        let revertTask = try await f.services.store.task(try #require(revert.taskID))
+        #expect(revertTask?.state == .verifying && revertTask?.title == "Revert von „Datei a.txt“")
         // The integration target is unchanged until the revert is approved and published.
         #expect(try await f.git("git rev-parse \(f.integrationRef)") == original.candidateOID)
 

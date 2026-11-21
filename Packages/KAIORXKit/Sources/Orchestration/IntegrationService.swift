@@ -171,6 +171,9 @@ public actor IntegrationService {
         guard let target = try await git.readRef(original.targetRef, in: repository) else {
             throw IntegrationError.jobWithoutIntegration(original.jobID)
         }
+        // Shown in the app's task list, named after the original task.
+        var taskTitle = "Revert von \(merge.prefix(12))"
+        if let taskID = original.taskID, let title = try await store.task(taskID)?.title { taskTitle = "Revert von „\(title)“" }
         let integration = try await workspace.prepareWorktree(projectID: original.projectID, attemptID: nil, kind: .integration, base: target)
         do {
             let outcome = try await git.revertMerge(merge, at: try await workspace.location(of: integration))
@@ -186,13 +189,13 @@ public actor IntegrationService {
                 try await workspace.remove(integration.id, force: true)
                 return .alreadyContained
             case .merged(let commit):
-                let candidate = try await store.createRevertCandidate(draft(oid: commit, conflicts: [], worktree: nil), taskTitle: "Revert of \(original.id)")
+                let candidate = try await store.createRevertCandidate(draft(oid: commit, conflicts: [], worktree: nil), taskTitle: taskTitle)
                 try await pin(candidate, commit: commit, repository: repository)
                 try await workspace.remove(integration.id, force: true)
                 return .built(candidate)
             case .conflicted(let entries):
                 let candidate = try await store.createRevertCandidate(
-                    draft(oid: nil, conflicts: entries.map(\.path), worktree: integration.id), taskTitle: "Revert of \(original.id)"
+                    draft(oid: nil, conflicts: entries.map(\.path), worktree: integration.id), taskTitle: taskTitle
                 )
                 return .conflicted(candidate, entries)
             }
