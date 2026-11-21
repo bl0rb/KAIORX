@@ -40,6 +40,8 @@ final class AppModel {
         case decision(PendingDecision)
         case reject(CandidateID)
         case testProfiles(ProjectID)
+        case deliver(JobID)
+        case revert(CandidateID)
 
         var id: String {
             switch self {
@@ -48,6 +50,8 @@ final class AppModel {
             case .decision(let decision): "decision:\(decision.id)"
             case .reject(let id): "reject:\(id.uuidString)"
             case .testProfiles(let id): "testProfiles:\(id.uuidString)"
+            case .deliver(let id): "deliver:\(id.uuidString)"
+            case .revert(let id): "revert:\(id.uuidString)"
             }
         }
     }
@@ -77,12 +81,18 @@ final class AppModel {
             self.services = services
             if launch.isUITest { await seedForUITests(services.store) }
             let seeded = launch.seed == "candidate" ? await seedCandidateForUITests(services) : nil
+            var fixtureJob: JobID?
+            #if DEBUG
+            if launch.isUITest, launch.fixture == "published" { fixtureJob = await seedPublishedJob(services) }
+            #endif
             let projector = Projector(store: services.store)
             if let loaded = try? await projector.load() { state = loaded }
             selectedProject = state.projects.values.sorted { $0.createdAt < $1.createdAt }.first?.id
             if let seeded {
                 selectedJob = seeded.job
                 selectedTask = seeded.task
+            } else if let fixtureJob {
+                selectedJob = fixtureJob
             }
             phase = .ready
             startPump(projector)
@@ -298,6 +308,8 @@ struct LaunchMode: Sendable {
     let fakeScript: String
     /// What a UI test starts with besides the fixture repository (`candidate`: a built candidate).
     var seed: String? = nil
+    /// A prepared state for one UI test (`KAIORX_UITEST_FIXTURE`), for example `published`.
+    var fixture: String? = nil
 
     static let current: LaunchMode = {
         let arguments = ProcessInfo.processInfo.arguments
@@ -311,7 +323,8 @@ struct LaunchMode: Sendable {
         guard requested else { return LaunchMode(isUITest: false, uiTestFolder: nil, fakeScript: "success") }
         let folder = environment["KAIORX_UITEST_FOLDER"] ?? NSTemporaryDirectory() + "kaiorx-uitest-\(UUID().uuidString)"
         return LaunchMode(
-            isUITest: true, uiTestFolder: folder, fakeScript: environment["KAIORX_UITEST_SCRIPT"] ?? "success", seed: environment["KAIORX_UITEST_SEED"]
+            isUITest: true, uiTestFolder: folder, fakeScript: environment["KAIORX_UITEST_SCRIPT"] ?? "success", seed: environment["KAIORX_UITEST_SEED"],
+            fixture: environment["KAIORX_UITEST_FIXTURE"]
         )
     }()
 

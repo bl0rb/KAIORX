@@ -281,20 +281,8 @@ extension GitRunner {
     /// Creates `refs/heads/<name>` at `commit` without touching any checkout, index or existing
     /// branch. A taken name gets a numbered suffix; returns the name used.
     public func createBranch(_ name: String, at commit: String, in repository: RepositoryInfo) async throws -> String {
-        let valid = try await run(["check-ref-format", "--branch", name], in: repository.topLevel, allowedExitCodes: [0, 1, 128])
-        // `--branch` expands `@{-1}` and similar; the name must be literal.
-        guard valid.termination == .exited(0), !name.hasPrefix("-"), !name.contains("@{"), name != "@" else {
-            throw MergeError.invalidBranchName(name)
-        }
-        // On a case-insensitive file system `Main` would alias a packed `main`: compare names
-        // case- and normalisation-insensitively, including folder/file clashes (`a` vs `a/b`).
-        let existing = Set(try await run(["for-each-ref", "--format=%(refname)", "refs/heads/"], in: repository.topLevel)
-            .stdout.text.split(separator: "\n").map { Self.foldedBranch(String($0.dropFirst("refs/heads/".count))) })
-        func taken(_ candidate: String) -> Bool {
-            let folded = Self.foldedBranch(candidate)
-            return existing.contains { $0 == folded || $0.hasPrefix(folded + "/") || folded.hasPrefix($0 + "/") }
-        }
-        for candidate in [name] + (2...20).map({ "\(name)-\($0)" }) where !taken(candidate) {
+        try await checkBranchName(name, in: repository)
+        for candidate in Self.freeBranchNames(for: name, existing: try await branchNames(in: repository)) {
             do {
                 try await updateRef("refs/heads/\(candidate)", to: commit, expectedOld: nil, in: repository)
                 return candidate
@@ -303,6 +291,33 @@ extension GitRunner {
             }
         }
         throw MergeError.noFreeBranchName(name)
+    }
+
+    /// Refuses a name `createBranch` would refuse: `git check-ref-format --branch`, and literal
+    /// only (`--branch` expands `@{-1}` and similar; `@` and a leading `-` are refused too).
+    public func checkBranchName(_ name: String, in repository: RepositoryInfo) async throws {
+        guard !name.isEmpty, !name.hasPrefix("-"), !name.contains("@{"), name != "@" else { throw MergeError.invalidBranchName(name) }
+        let valid = try await run(["check-ref-format", "--branch", name], in: repository.topLevel, allowedExitCodes: [0, 1, 128])
+        guard valid.termination == .exited(0) else { throw MergeError.invalidBranchName(name) }
+    }
+
+    /// The names of `refs/heads/*` in the repository (read only).
+    public func branchNames(in repository: RepositoryInfo) async throws -> [String] {
+        try await run(["for-each-ref", "--format=%(refname)", "refs/heads/"], in: repository.topLevel)
+            .stdout.text.split(separator: "\n").map { String($0.dropFirst("refs/heads/".count)) }
+    }
+
+    /// The names `createBranch` would try for `name`, in order: the name itself, then `name-2`
+    /// up to `name-20`, without those already taken. On a case-insensitive file system `Main`
+    /// would alias a packed `main`: names are compared case- and normalisation-insensitively,
+    /// including folder/file clashes (`a` vs `a/b`).
+    public static func freeBranchNames(for name: String, existing: [String]) -> [String] {
+        let folded = Set(existing.map(foldedBranch))
+        func taken(_ candidate: String) -> Bool {
+            let candidate = foldedBranch(candidate)
+            return folded.contains { $0 == candidate || $0.hasPrefix(candidate + "/") || candidate.hasPrefix($0 + "/") }
+        }
+        return ([name] + (2...20).map { "\(name)-\($0)" }).filter { !taken($0) }
     }
 
     static func foldedBranch(_ name: String) -> String {

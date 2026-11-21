@@ -81,6 +81,8 @@ public struct DecisionSheet: Sendable, Equatable {
     public var blockers: [String]
     /// For a publication: exactly what the approval binds to.
     public var shown: ShownApproval?
+    /// For a delivery branch: the job, name and integration state the sheet showed.
+    public var delivery: ShownDelivery?
 
     public var canApprove: Bool { blockers.isEmpty }
 
