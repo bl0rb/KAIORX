@@ -198,7 +198,7 @@ public enum Labels {
         case RejectionReason.gitMetadata.rawValue: "Git-Verwaltungsdatei"
         case RejectionReason.submodule.rawValue: "Submodul"
         case RejectionReason.unmerged.rawValue: "ungelöster Konflikt"
-        case "recoveredUnknown": "nach Neustart ermittelt"
+        case RejectionReason.recoveredUnknown.rawValue: "nach Neustart ermittelt"
         default: raw
         }
     }

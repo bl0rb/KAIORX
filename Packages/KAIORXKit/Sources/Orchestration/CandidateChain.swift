@@ -358,7 +358,7 @@ public actor CandidateChain {
         let consents = try await store.consents(project: candidate.projectID)
         let profiles = try await store.modelProfiles()
         let blocked = Set(try await store.openBlocks().map(\.accountID))
-        let active = try await store.activeAttempts().filter(Self.holdsSlot)
+        let activeGlobal = try await store.activeAttemptCount(account: nil)
         let available = await coordinator.providers
 
         var options: [ReviewOption] = []
@@ -376,9 +376,9 @@ public actor CandidateChain {
             if profile == nil { blockers.append(.noModelProfile) }
             let account = consent?.draft.accountID
             if let account, blocked.contains(account) { blockers.append(.accountBlocked) }
-            if active.count >= limits.global {
+            if activeGlobal >= limits.global {
                 blockers.append(.slotsFull(global: true))
-            } else if let account, active.filter({ $0.accountID == account }).count >= limits.perAccount {
+            } else if let account, try await store.activeAttemptCount(account: account) >= limits.perAccount {
                 blockers.append(.slotsFull(global: false))
             }
             var note: String?
@@ -544,16 +544,6 @@ public actor CandidateChain {
             }
             let backToAuthor: Set<TaskState> = [.pending, .ready, .running, .needsChanges]
             if task.state.isTerminal || backToAuthor.contains(task.state) { clearIssue(id) }
-        }
-    }
-
-    /// Mirrors the store's slot count: active attempts, and `uncertain` ones whose process may
-    /// still run (not lost on a restart).
-    static func holdsSlot(_ attempt: AttemptRecord) -> Bool {
-        switch attempt.state {
-        case .reserved, .starting, .running, .awaitingApproval, .cancelling: true
-        case .uncertain: attempt.errorClass != "processLostOnRestart"
-        case .succeeded, .failed, .cancelled: false
         }
     }
 

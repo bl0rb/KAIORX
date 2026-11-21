@@ -101,7 +101,7 @@ public enum ChainMessages {
         case ChainActionError.nothingToDecide: "Für dieses Ergebnis ist gerade nichts zu entscheiden."
         case ChainActionError.reviewBlocked(let reasons): "Das Review kann nicht starten: \(reasons.joined(separator: "; "))."
         case ChainActionError.emptyReview: "Füge zuerst den Text des Reviews ein."
-        // `IntegrationError.reviewStartFailed` (WP1) falls through to the generic text until it exists.
+        case IntegrationError.reviewStartFailed(_, let reason): "Das Review konnte nicht starten: \(reason)"
         default: IntegrationMessages.text(error)
         }
     }

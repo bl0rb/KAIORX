@@ -145,7 +145,9 @@ public enum BackupRestore {
         let lock = open(Store.lockPath(for: database), O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard lock >= 0 else { throw RestoreError.databaseInUse(database) }
         defer { close(lock) }
-        guard Store.acquireLock(lock, attempts: 1) else { throw RestoreError.databaseInUse(database) }
+        // The short retry of `Store.acquireLock`: a child spawned on another thread briefly holds a
+        // copy of a just-closed store's lock until its exec. A running app keeps it and is refused.
+        guard Store.acquireLock(lock) else { throw RestoreError.databaseInUse(database) }
         // A forget the ledger missed (its write failed) still counts: the database knows it.
         if let forget = newestForgetInDatabase(database), backup.time <= forget {
             throw RestoreError.predatesForget(backupTime: backup.time, forgetTime: forget)

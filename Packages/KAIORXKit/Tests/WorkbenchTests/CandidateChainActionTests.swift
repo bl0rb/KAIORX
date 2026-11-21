@@ -414,6 +414,7 @@ struct ChainFixture {
         #expect(ChainMessages.text(PlanningError.noReviewerConsent(.codex)) == "Für Codex fehlt die Zustimmung als Prüfer.")
         #expect(ChainMessages.text(ChainActionError.notAPlanTask(TaskID())).hasPrefix("Nur Aufgaben aus einem Plan"))
         #expect(ChainMessages.text(ActionError.unavailable("Kandidatenkette")) == "Nicht verfügbar: Kandidatenkette.")
+        #expect(ChainMessages.text(IntegrationError.reviewStartFailed(AttemptID(), reason: "kein Login")) == "Das Review konnte nicht starten: kein Login")
     }
 }
 
