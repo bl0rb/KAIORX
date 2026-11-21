@@ -42,7 +42,10 @@ Paket A verlangt: „Offene Drittanbieter-Automation bleibt per Capability gespe
    - Gelesen wird nur, wenn alle billigeren Stufen bestanden haben.
    - Alle Quellen des Gates (installiertes Programm, Sandbox-Prüfung, Abo-Urteil) sind injizierbar. Tests nutzen Attrappen und erreichen nie die echten Programme. Erst `prepare` beim Start der App bindet die echten Adapter.
 
-7. **Echtes `accessRestored`.** Nach Ablauf einer Quota-Sperre liest das Gate das Abo-Urteil neu, am Zwischenspeicher vorbei, und hebt die Sperre nur bei `subscription` auf. Sonst folgt wie in ADR 0005 §10 eine zeitlich begrenzte Sperre mit Verdopplung. Ohne gebundene Adapter oder ohne Adapter für den Anbieter ist der Zugang nicht wiederhergestellt.
+7. **Echtes `accessRestored`.** Nach Ablauf einer Quota-Sperre durchläuft das Gate zuerst dieselben billigeren Stufen wie vor einer Reservierung (Punkt 4, Stufen 1 bis 4: Kanal und Freigabe, installierter Build mit `liveVerified`-Eintrag, wirksame Isolation). Erst wenn alle bestanden haben, liest es das Abo-Urteil neu, am Zwischenspeicher vorbei, und hebt die Sperre nur bei `subscription` auf.
+   - Scheitert eine billigere Stufe, ist der Zugang nicht wiederhergestellt, ohne dass das Abo-Urteil gelesen wird. Im vertriebenen Kanal ohne Freigabe liest das Gate auch hier nichts über die Installation (Punkt 3), auch wenn die Sperre aus einem Benutzerstart stammt.
+   - Sonst folgt wie in ADR 0005 §10 eine zeitlich begrenzte Sperre mit Verdopplung bis zum Höchstwert; die Prüfung läuft also nicht bei jedem Tick, sondern erst nach Ablauf der erneuerten Sperre.
+   - Ohne gebundene Adapter oder ohne Adapter für den Anbieter ist der Zugang nicht wiederhergestellt.
 
 8. **Benutzerstarts bleiben erlaubt**, in jedem Kanal. Ein ausdrücklicher Start fragt das Gate nicht. Beim Start selbst gilt weiter `AdapterPolicy` (ADR 0003 §1): Es läuft nur ein live abgenommener Build, und nur isoliert. Reviews startet heute nur der Benutzer; der Scheduler reserviert keine.
 

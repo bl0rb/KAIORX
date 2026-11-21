@@ -191,34 +191,43 @@ public actor AutomationGate: CapabilityGate {
     }
 
     public func automaticVerdict(_ provider: ProviderKind) async -> AutomaticVerdict {
-        guard provider == .claude || provider == .codex else { return .blocked(.notPermitted) }
-        guard channelPermits(provider) else { return .blocked(.channel(channel)) }
-        guard let sources else { return .blocked(.identityUnknown) }
-        let identity: BinaryIdentity
-        do {
-            guard let installed = try await sources.installed(provider) else { return .blocked(.notInstalled) }
-            identity = installed
-        } catch {
-            return .blocked(.identityUnknown)
-        }
-        switch CompatibilityMatrix.liveVerification(provider, identity: identity) {
-        case .verified: break
-        case .versionNotListed: return .blocked(.versionNotListed(identity.version))
-        case .versionNotLiveVerified: return .blocked(.versionNotLiveVerified(identity.version))
-        case .buildNotVerified: return .blocked(.buildNotVerified(identity.version))
-        }
-        let status: ConfinementStatus
-        if let confinement { status = confinement } else { status = await refreshConfinement() }
-        guard status == .effective else { return .blocked(.confinementIneffective) }
+        if let block = await cheaperStages(provider) { return .blocked(block) }
         let verdict = await subscription(provider, fresh: false)
         guard verdict.allowsRun else { return .blocked(.notSubscribed(verdict.code)) }
         return .allowed
     }
 
-    /// After a quota block: the auth verdict read afresh, not taken from the cache.
+    /// After a quota block: the same cheaper stages as `automaticVerdict` first (in the
+    /// distributed channel without clearance nothing about the installation is read), then the
+    /// auth verdict read afresh, not taken from the cache. A failed stage keeps the block; the
+    /// scheduler renews it timed, with doubling up to its maximum, so nothing is read in a loop.
     public func accessRestored(_ provider: ProviderKind, account: AccountID) async -> Bool {
-        guard provider == .claude || provider == .codex, sources != nil else { return false }
+        guard await cheaperStages(provider) == nil else { return false }
         return await subscription(provider, fresh: true).allowsRun
+    }
+
+    /// Stages 1 to 3 (channel, installed build, confinement); nil when all passed.
+    private func cheaperStages(_ provider: ProviderKind) async -> AutomationBlock? {
+        guard provider == .claude || provider == .codex else { return .notPermitted }
+        guard channelPermits(provider) else { return .channel(channel) }
+        guard let sources else { return .identityUnknown }
+        let identity: BinaryIdentity
+        do {
+            guard let installed = try await sources.installed(provider) else { return .notInstalled }
+            identity = installed
+        } catch {
+            return .identityUnknown
+        }
+        switch CompatibilityMatrix.liveVerification(provider, identity: identity) {
+        case .verified: break
+        case .versionNotListed: return .versionNotListed(identity.version)
+        case .versionNotLiveVerified: return .versionNotLiveVerified(identity.version)
+        case .buildNotVerified: return .buildNotVerified(identity.version)
+        }
+        let status: ConfinementStatus
+        if let confinement { status = confinement } else { status = await refreshConfinement() }
+        guard status == .effective else { return .confinementIneffective }
+        return nil
     }
 
     // MARK: Confinement

@@ -18,9 +18,12 @@ final class FakeGateSources: Sendable {
         var identityCalls = 0
         var confinementCalls = 0
         var subscriptionCalls = 0
+        /// Holds every subscription read until `latch` is released.
+        var holdsSubscription = false
     }
 
     let state: Mutex<State>
+    let latch = Latch()
 
     init(identity: BinaryIdentity?) { state = Mutex(State(identity: identity)) }
 
@@ -37,7 +40,11 @@ final class FakeGateSources: Sendable {
                 }
             },
             confinement: { [self] in state.withLock { s in s.confinementCalls += 1; return s.confinement } },
-            subscription: { [self] _ in state.withLock { s in s.subscriptionCalls += 1; return s.verdict } }
+            subscription: { [self] _ in
+                let hold = state.withLock { s in s.subscriptionCalls += 1; return s.holdsSubscription }
+                if hold { await latch.wait() }
+                return state.withLock { $0.verdict }
+            }
         )
     }
 
@@ -45,6 +52,31 @@ final class FakeGateSources: Sendable {
     static func verifiedClaude() throws -> BinaryIdentity {
         let entry = try #require(CompatibilityMatrix.entries.first { $0.provider == .claude && $0.status == .liveVerified })
         return BinaryIdentity(path: "/bin/claude", resolvedPath: "/bin/claude", sha256: try #require(entry.builds.first), version: entry.version)
+    }
+}
+
+/// A one-shot gate: `wait` suspends until `release`, and returns at once afterwards.
+final class Latch: Sendable {
+    private let state = Mutex<(released: Bool, waiters: [CheckedContinuation<Void, Never>])>((false, []))
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let resume = state.withLock { s in
+                if s.released { return true }
+                s.waiters.append(continuation)
+                return false
+            }
+            if resume { continuation.resume() }
+        }
+    }
+
+    func release() {
+        let waiters = state.withLock { s in
+            s.released = true
+            defer { s.waiters = [] }
+            return s.waiters
+        }
+        for waiter in waiters { waiter.resume() }
     }
 }
 
@@ -192,6 +224,26 @@ extension SchedulerHarness {
         #expect(await gate.accessRestored(.claude, account: h.author))
         #expect(fake.snapshot.subscriptionCalls >= 2)
     }
+
+    @Test func anExpiredBlockInTheDistributedChannelReadsNothingAboutTheInstallation() async throws {
+        let h = try await SchedulerHarness()
+        try await h.activate([planTask("A")])
+        let fake = FakeGateSources(identity: try FakeGateSources.verifiedClaude())
+        let gate = h.gate(.distributed, fake)
+        let scheduler = h.scheduler(gate: gate)
+        // A block from a run the user started; it expires while no clearance exists.
+        _ = try await h.store.blockAccount(h.author, reason: "rateLimited")
+        for _ in 0..<4 {
+            h.clock.advance(15 * 60_000)
+            let report = try await scheduler.tick()
+            #expect(report.reserved.isEmpty)
+            // The block is renewed (timed, never open-ended), so the next check waits for it.
+            #expect(report.nextWakeAt != nil)
+        }
+        #expect(fake.snapshot.identityCalls == 0 && fake.snapshot.subscriptionCalls == 0 && fake.snapshot.confinementCalls == 0)
+        #expect(await !gate.accessRestored(.claude, account: h.author))
+        #expect(fake.snapshot.identityCalls == 0 && fake.snapshot.subscriptionCalls == 0)
+    }
 }
 
 @Suite struct AutomationGateTests {
@@ -200,6 +252,52 @@ extension SchedulerHarness {
         #expect(await gate.automaticVerdict(.claude) == .blocked(.identityUnknown))
         #expect(await !gate.accessRestored(.claude, account: AccountID()))
         #expect(await gate.refreshConfinement() != .effective)
+    }
+
+    @Test func accessIsNotRestoredWithoutTheCheaperStagesAndNothingIsRead() async throws {
+        let unlisted = FakeGateSources(identity: BinaryIdentity(path: "/bin/claude", resolvedPath: "/bin/claude", sha256: "abc", version: "9.9.9"))
+        let gate = AutomationGate(channel: .personal, sources: unlisted.sources)
+        #expect(await !gate.accessRestored(.claude, account: AccountID()))
+        #expect(unlisted.snapshot.subscriptionCalls == 0)
+
+        let unconfined = FakeGateSources(identity: try FakeGateSources.verifiedClaude())
+        unconfined.set { $0.confinement = .unavailable("not blocked") }
+        let confinedGate = AutomationGate(channel: .personal, sources: unconfined.sources)
+        #expect(await !confinedGate.accessRestored(.claude, account: AccountID()))
+        #expect(await !confinedGate.accessRestored(.claude, account: AccountID()))
+        // Probed once and remembered; the subscription is never asked.
+        #expect(unconfined.snapshot.subscriptionCalls == 0 && unconfined.snapshot.confinementCalls == 1)
+
+        let missing = FakeGateSources(identity: nil)
+        #expect(await !AutomationGate(channel: .personal, sources: missing.sources).accessRestored(.claude, account: AccountID()))
+        #expect(missing.snapshot.subscriptionCalls == 0)
+
+        // With every cheaper stage passed, the verdict is read afresh.
+        let verified = FakeGateSources(identity: try FakeGateSources.verifiedClaude())
+        let open = AutomationGate(channel: .personal, sources: verified.sources)
+        #expect(await open.accessRestored(.claude, account: AccountID()))
+        #expect(await open.accessRestored(.claude, account: AccountID()))
+        #expect(verified.snapshot.subscriptionCalls == 2)
+    }
+
+    @Test func concurrentChecksShareOneInFlightSubscriptionRead() async throws {
+        let fake = FakeGateSources(identity: try FakeGateSources.verifiedClaude())
+        fake.set { $0.holdsSubscription = true }
+        let gate = AutomationGate(channel: .personal, sources: fake.sources)
+        await gate.refreshConfinement()
+        let automatic = Task { await gate.automaticVerdict(.claude) }
+        for _ in 0..<100_000 where fake.snapshot.subscriptionCalls < 1 { await Task.yield() }
+        let restored = Task { await gate.accessRestored(.claude, account: AccountID()) }
+        let another = Task { await gate.automaticVerdict(.claude) }
+        // Both later checks have passed the identity stage; give them time to reach the read.
+        for _ in 0..<100_000 where fake.snapshot.identityCalls < 3 { await Task.yield() }
+        for _ in 0..<200 where fake.snapshot.subscriptionCalls == 1 { await Task.yield() }
+        #expect(fake.snapshot.subscriptionCalls == 1)
+        fake.latch.release()
+        #expect(await automatic.value == .allowed)
+        #expect(await restored.value)
+        #expect(await another.value == .allowed)
+        #expect(fake.snapshot.subscriptionCalls == 1)
     }
 
     @Test func aValidClearanceOpensTheDistributedChannelUntilItExpires() async throws {
