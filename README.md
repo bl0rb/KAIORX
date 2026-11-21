@@ -23,11 +23,13 @@ What the packages deliver:
 - **F, plan and scheduling:** plans as validated DAGs with write areas, kept as immutable revisions; a scheduler that respects slots, write areas, consent, quota and budgets (ADR 0005).
 - **G, memory and sources:** task, project and global notes with provenance, searchable with SQLite FTS5; agents get only the excerpts granted for their project, task and provider; forgetting removes every local copy (ADR 0006).
 - **H, workspace and beta:** the native app (`KAIORX.xcodeproj`, SwiftUI/AppKit) with projects, jobs, a filtered monitor, candidate review with per-file diffs, decision sheets, an editor that writes only on Save, a PTY terminal, onboarding and backup restore (ADR 0007).
+- **Candidate chain in the app:** after a run, KAIORX seals the result and builds the candidate on its own (host-only, no provider start); you confirm undeclared paths and empty results, resolve conflicts, run tests and start the cross-provider review; finished reviews are collected automatically (ADR 0011, proposed).
 - **A, live acceptance:** the owner-only kit `kaiorx-acceptance` checks one provider version live and proposes the matrix change that the owner commits (`docs/live-acceptance/README.md`, ADR 0008).
 
 Still open before the beta:
 
-- **End-to-end run in the app** with the real Claude Code and Codex (plan, author, review, approval, publication). So far the providers were checked live only through the acceptance kit.
+- **End-to-end run in the app** with the real Claude Code and Codex (plan, author, seal and build, tests, review, approval, publication). The chain is wired and covered by fake-provider and UI tests; the providers were checked live only through the acceptance kit.
+- **Owner approval** of ADR 0009, 0010 and 0011.
 - **Owner's beta checks** in `docs/beta-checklist.md`: signing and notarization with a Developer ID, a clean Mac, macOS 15, offline first launch, VoiceOver and keyboard, quitting during a run, the untouched checkout, contrast and Dark Mode, restore.
 - **Optional live checks of package A:** second-account detection, Claude quota signals, login expiry and token refresh, Codex SIWC login.
 - **Performance:** every beta target is met on the M4 measurement; the reference Mac is still to be chosen.
