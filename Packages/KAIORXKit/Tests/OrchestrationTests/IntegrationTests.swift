@@ -38,16 +38,26 @@ struct IntegrationHarness {
     let reviewer = ReviewerScript()
     let coordinator: RunCoordinator
     let integration: IntegrationService
-    let passing = TestProfile(executable: "/bin/sh", arguments: ["-c", "exit 0"])
+    let passing: TestProfileID
 
     init() async throws {
         base = try await ServiceHarness()
+        passing = try await base.store.confirmedTestProfile(project: base.project, arguments: ["-c", "exit 0"], name: "passing")
         coordinator = RunCoordinator(store: base.store, adapters: [reviewer.adapter])
         integration = IntegrationService(store: base.store, workspace: base.service, git: base.git, coordinator: coordinator)
         _ = try await base.service.openIntegration(base.job, baseRevision: "main")
     }
 
     var ref: String { "refs/kaiorx/integrations/\(base.job.uuidString)" }
+
+    /// Another confirmed profile of the project.
+    func profile(
+        executable: String = "/bin/sh", _ arguments: [String], writesWorktree: Bool = false, testInputPrefixes: [String] = []
+    ) async throws -> TestProfileID {
+        try await base.store.confirmedTestProfile(
+            project: base.project, executable: executable, arguments: arguments, writesWorktree: writesWorktree, testInputPrefixes: testInputPrefixes
+        )
+    }
 
     func target() async throws -> String { try await base.sh("git rev-parse \(ref)") }
 
@@ -231,11 +241,11 @@ struct IntegrationHarness {
         let h = try await IntegrationHarness()
         let (_, tree) = try await h.authorResult("echo eins > a.txt; mkdir -p tests; echo t > tests/t.sh")
         guard case .built(let candidate) = try await h.integration.buildCandidate(from: tree.id) else { Issue.record("not built"); return }
-        let broken = TestProfile(executable: "/nonexistent/runner")
+        let broken = try await h.profile(executable: "/nonexistent/runner", [])
         #expect(try await h.integration.runTests(candidate.id, profile: broken).status == .infrastructureError)
         #expect(try await h.base.store.candidate(candidate.id)?.state == .built)
         let failing = try await h.integration.runTests(
-            candidate.id, profile: TestProfile(executable: "/bin/sh", arguments: ["-c", "exit 4"], testInputPrefixes: ["tests"])
+            candidate.id, profile: try await h.profile(["-c", "exit 4"], testInputPrefixes: ["tests"])
         )
         #expect(failing.status == .failed && failing.exitCode == 4)
         #expect(failing.changedTestInputs == ["tests/t.sh"])
@@ -561,7 +571,7 @@ extension Store {
         let h = try await IntegrationHarness()
         let (_, tree) = try await h.authorResult("mkdir -p scripts && echo 'exit 0' > scripts/test.sh && echo x > a.txt")
         guard case .built(let candidate) = try await h.integration.buildCandidate(from: tree.id) else { Issue.record("not built"); return }
-        let result = try await h.integration.runTests(candidate.id, profile: TestProfile(executable: "/bin/sh", arguments: ["scripts/test.sh"]))
+        let result = try await h.integration.runTests(candidate.id, profile: try await h.profile(["scripts/test.sh"]))
         #expect(result.changedTestInputs == ["scripts/test.sh"])
     }
 }
@@ -640,7 +650,7 @@ extension Store {
 
         let (redTask, red) = try await h.authorResult("echo zwei > b.txt")
         guard case .built(let failing) = try await h.integration.buildCandidate(from: red.id) else { Issue.record("not built"); return }
-        try await h.integration.runTests(failing.id, profile: TestProfile(executable: "/bin/sh", arguments: ["-c", "exit 1"]))
+        try await h.integration.runTests(failing.id, profile: try await h.profile(["-c", "exit 1"]))
         try await backToVerification(redTask)
         await #expect(throws: IntegrationStoreError.rejectedBefore(failing.id)) { _ = try await h.integration.buildCandidate(from: red.id) }
         #expect(try await h.base.store.worktrees().filter { $0.kind == .integration }.allSatisfy { $0.state == .removed })
@@ -662,7 +672,7 @@ extension Store {
         #expect(task.state == .conflict && task.resumeState == .verifying)
         try await h.integration.resolveConflicts(rebuilt.id, ["src/a.swift": .theirs])
         #expect(try await h.base.store.task(taskB)?.state == .verifying)
-        try await h.integration.runTests(rebuilt.id, profile: TestProfile(executable: "/bin/sh", arguments: ["-c", "exit 1"]))
+        try await h.integration.runTests(rebuilt.id, profile: try await h.profile(["-c", "exit 1"]))
         task = try #require(try await h.base.store.task(taskB))
         #expect(task.state == .needsChanges)
     }

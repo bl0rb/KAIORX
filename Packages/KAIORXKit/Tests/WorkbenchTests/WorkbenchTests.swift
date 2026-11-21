@@ -398,7 +398,7 @@ func sh(_ script: String, in directory: String) async throws -> String {
         #expect(backup.version == 7 && backup.time == 20)
         #expect(try BackupRestore.validate(backup, database: path) == 7)
         let report = try BackupRestore.restore(backup, database: path, now: 30)
-        #expect(report.previousBackup?.hasSuffix(".backup-v8-30") == true)
+        #expect(report.previousBackup?.hasSuffix(".backup-v\(CoreSchema.migrations.count)-30") == true)
         let reopened = try Store(path: path, clock: { 40 })
         #expect(try await reopened.projects().map(\.id) == [project.id])
         await reopened.close()

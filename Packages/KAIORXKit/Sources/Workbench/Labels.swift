@@ -171,6 +171,8 @@ public enum Labels {
         case .noHumanReviewForSensitiveTask: "Sicherheitskritische Aufgabe ohne zustimmendes menschliches Review"
         case .blockingFindings: "Blockierende Befunde"
         case .undecidedFindings: "Offene Befunde ohne Entscheidung"
+        case .testProfileNotConfirmed(let name): "Testprofil „\(name)“ ist nicht bestätigt"
+        case .noConfirmedTestProfile: "Kein bestätigtes Testprofil im Projekt"
         }
     }
 

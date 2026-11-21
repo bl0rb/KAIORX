@@ -31,12 +31,15 @@ final class AppModel {
     var sheet: ActiveSheet?
     var pendingTerminalRequests: [TerminalRequest] = []
     var restartNeeded = false
+    /// Counts test profile changes (ADR 0010); views showing profiles reload on a new value.
+    var testProfileRevision = 0
 
     enum ActiveSheet: Identifiable, Equatable {
         case trustProject(String)
         case newJob(ProjectID)
         case decision(PendingDecision)
         case reject(CandidateID)
+        case testProfiles(ProjectID)
 
         var id: String {
             switch self {
@@ -44,6 +47,7 @@ final class AppModel {
             case .newJob(let id): "job:\(id.uuidString)"
             case .decision(let decision): "decision:\(decision.id)"
             case .reject(let id): "reject:\(id.uuidString)"
+            case .testProfiles(let id): "testProfiles:\(id.uuidString)"
             }
         }
     }
@@ -72,9 +76,14 @@ final class AppModel {
         case .ready(let services):
             self.services = services
             if launch.isUITest { await seedForUITests(services.store) }
+            let seeded = launch.seed == "candidate" ? await seedCandidateForUITests(services) : nil
             let projector = Projector(store: services.store)
             if let loaded = try? await projector.load() { state = loaded }
             selectedProject = state.projects.values.sorted { $0.createdAt < $1.createdAt }.first?.id
+            if let seeded {
+                selectedJob = seeded.job
+                selectedTask = seeded.task
+            }
             phase = .ready
             startPump(projector)
             startTicker()
@@ -100,6 +109,16 @@ final class AppModel {
             try? await store.registerModelProfile(ModelProfile(provider: .fake, role: .author, tier: tier, model: "fake-\(tier.rawValue)", typicalTokens: 1_000, verifiedAt: 1))
         }
         try? await store.registerModelProfile(ModelProfile(provider: .codex, role: .reviewer, tier: .fast, model: "fake-reviewer", typicalTokens: 500, verifiedAt: 1))
+    }
+
+    /// UI tests with `KAIORX_UITEST_SEED=candidate`: the fixture repository opened and a built
+    /// candidate in it (no provider run), so the test reaches the candidate review directly.
+    private func seedCandidateForUITests(_ services: AppServices) async -> (job: JobID, task: TaskID)? {
+        guard let repo = launch.uiTestRepository else { return nil }
+        let actions = WorkbenchActions(services: services)
+        guard let project = try? await actions.openProject(at: repo),
+              let seeded = try? await UITestSeed.builtCandidate(services: services, project: project, title: "Leerwert prüfen") else { return nil }
+        return (seeded.job, seeded.task)
     }
 
     /// Local probes only (`--version`, sandbox check); never a login or a model call.
@@ -249,6 +268,9 @@ final class AppModel {
         case ActionError.notARepository: "Der Ordner ist kein unterstütztes Git-Repository."
         case ActionError.notAFolder: "Der Ordner existiert nicht."
         case RestoreError.predatesForget: "Diese Sicherung ist älter als eine Löschung und wird nicht wiederhergestellt."
+        case let error as TestProfileError: Labels.testProfileError(error)
+        case TestProfileStoreError.digestChanged: "Das Testprofil hat sich geändert. Bitte die neue Fassung prüfen und bestätigen."
+        case TestProfileStoreError.invalid(let issues): issues.map(Labels.testProfileIssue).joined(separator: " ")
         default: String(describing: error)
         }
     }
@@ -274,6 +296,8 @@ struct LaunchMode: Sendable {
     let isUITest: Bool
     let uiTestFolder: String?
     let fakeScript: String
+    /// What a UI test starts with besides the fixture repository (`candidate`: a built candidate).
+    var seed: String? = nil
 
     static let current: LaunchMode = {
         let arguments = ProcessInfo.processInfo.arguments
@@ -286,7 +310,9 @@ struct LaunchMode: Sendable {
         #endif
         guard requested else { return LaunchMode(isUITest: false, uiTestFolder: nil, fakeScript: "success") }
         let folder = environment["KAIORX_UITEST_FOLDER"] ?? NSTemporaryDirectory() + "kaiorx-uitest-\(UUID().uuidString)"
-        return LaunchMode(isUITest: true, uiTestFolder: folder, fakeScript: environment["KAIORX_UITEST_SCRIPT"] ?? "success")
+        return LaunchMode(
+            isUITest: true, uiTestFolder: folder, fakeScript: environment["KAIORX_UITEST_SCRIPT"] ?? "success", seed: environment["KAIORX_UITEST_SEED"]
+        )
     }()
 
     var uiTestRepository: String? { uiTestFolder.map { $0 + "/repo" } }

@@ -185,7 +185,7 @@ import Testing
         let h = try await IntegrationHarness()
         let (_, tree) = try await h.authorResult("echo eins > a.txt")
         guard case .built(let candidate) = try await h.integration.buildCandidate(from: tree.id) else { Issue.record("not built"); return }
-        let red = TestProfile(executable: "/bin/sh", arguments: ["-c", "echo x > stuck.txt; chflags uchg stuck.txt; exit 1"], writesWorktree: true)
+        let red = try await h.profile(["-c", "echo x > stuck.txt; chflags uchg stuck.txt; exit 1"], writesWorktree: true)
         let result = try await h.integration.runTests(candidate.id, profile: red)
         let (_, recovery) = try await h.integration.recover()
         let qa = try await h.base.store.worktrees().filter { $0.kind == .qa }

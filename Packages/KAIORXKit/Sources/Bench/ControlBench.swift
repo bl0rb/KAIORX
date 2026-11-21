@@ -47,6 +47,9 @@ public enum ControlBench {
         let streams = PacedAdapter(provider: .codex, interval: options.interval, deltas: 100_000)
         let coordinator = RunCoordinator(store: store, adapters: [streams, reviewer()])
         let integration = IntegrationService(store: store, workspace: workspace, git: git, coordinator: coordinator)
+        // Tests run only from the confirmed registry (ADR 0010).
+        let profile = try await store.proposeTestProfile(project: project, TestProfileSpec(name: "bench", executable: "/bin/sh", arguments: ["-c", "exit 0"]))
+        try await store.confirmTestProfile(profile.id, digest: profile.digest, actor: "bench")
         let pump = AppPump(store: store)
         let loop = Task { try await pump.run() }
 
@@ -76,7 +79,7 @@ public enum ControlBench {
             _ = try await store.ingest(.completed(.succeeded), attemptID: author)
             _ = try await workspace.seal(tree.id, allowedPrefixes: nil, message: "Runde \(round)")
             guard case .built(let candidate) = try await integration.buildCandidate(from: tree.id) else { throw BenchError.unexpected("candidate not built") }
-            _ = try await integration.runTests(candidate.id, profile: TestProfile(executable: "/bin/sh", arguments: ["-c", "exit 0"]))
+            _ = try await integration.runTests(candidate.id, profile: profile.id)
             let review = try await integration.startReview(candidate.id, provider: .fake, model: "reviewer", criteria: "Datei vorhanden")
             _ = try await integration.collectReview(candidate.id, attempt: review)
             return candidate.id

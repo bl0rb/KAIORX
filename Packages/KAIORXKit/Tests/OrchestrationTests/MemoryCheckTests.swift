@@ -246,7 +246,8 @@ import Testing
             tokenEstimate: 5, reason: .lexical, rank: 0
         )])
         guard case .built(let candidate) = try await h.integration.buildCandidate(from: tree.id) else { Issue.record("not built"); return }
-        let printing = TestProfile(executable: "/bin/sh", arguments: ["-c", "echo \(marker); exit 0"])
+        // Assembled at run time: the profile stays in the registry, only its output is forgotten.
+        let printing = try await h.profile(["-c", "printf '%s%s\\n' \(marker.prefix(4)) \(marker.dropFirst(4)); exit 0"])
         _ = try await h.integration.runTests(candidate.id, profile: printing)
         let reviewer = try await h.integration.startReview(candidate.id, provider: .fake, model: "reviewer", criteria: "ok")
         _ = try await h.coordinator.waitUntilFinished(reviewer)
@@ -307,7 +308,8 @@ import Testing
             tokenEstimate: 5, reason: .lexical, rank: 0
         )])
         guard case .built(let candidate) = try await h.integration.buildCandidate(from: tree.id) else { Issue.record("not built"); return }
-        let failing = TestProfile(executable: "/bin/sh", arguments: ["-c", "echo \(marker) >&2; exit 1"])
+        // Assembled at run time: the profile stays in the registry, only its output is forgotten.
+        let failing = try await h.profile(["-c", "printf '%s%s\\n' \(marker.prefix(4)) \(marker.dropFirst(4)) >&2; exit 1"])
         _ = try await h.integration.runTests(candidate.id, profile: failing)
         #expect(try await store.candidate(candidate.id)?.state == .rejected)
         func leaks() async throws -> Bool {
