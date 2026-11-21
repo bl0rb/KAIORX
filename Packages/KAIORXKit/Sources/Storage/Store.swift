@@ -615,21 +615,42 @@ public actor Store {
     public func attemptEvents(_ attempt: AttemptID, afterOrdinal: Int = 0, limit: Int = 500) throws -> [EventRecord] {
         try connection().query(
             """
-            SELECT e.seq, e.event_id, e.schema_version, e.project_id, e.task_id, e.attempt_id, e.ordinal,
-                   e.kind, e.at, e.payload_id, a.inline_content, e.dedup_key, e.payload_purged_at
+            SELECT \(Self.attemptEventColumns)
             FROM event e LEFT JOIN artifact a ON a.id = e.payload_id
             WHERE e.attempt_id = ? AND e.ordinal > ? ORDER BY e.ordinal LIMIT ?
             """,
             [.text(attempt.uuidString), .integer(Int64(afterOrdinal)), .integer(Int64(limit))]
-        ) { row in
-            EventRecord(
-                seq: row.int(0), eventID: try parseID(row.requiredText(1)), schemaVersion: Int(row.int(2)),
-                projectID: try parseID(row.requiredText(3)), taskID: try row.text(4).map(parseID),
-                attemptID: try row.text(5).map(parseID), ordinal: row.optionalInt(6).map(Int.init),
-                kind: EventKind(rawValue: try row.requiredText(7)), at: row.int(8),
-                payloadID: try row.text(9).map(parseID), payload: row.blob(10), dedupKey: row.text(11), payloadPurgedAt: row.optionalInt(12)
-            )
-        }
+        ) { try Self.attemptEvent(from: $0) }
+    }
+
+    /// One attempt's newest events (with payloads) before `beforeOrdinal` (from the end when
+    /// nil): read newest first through `event_attempt_ordinal`, returned in ordinal order. The
+    /// monitor opens a run on its last page and reads older pages only on request.
+    public func latestAttemptEvents(_ attempt: AttemptID, beforeOrdinal: Int? = nil, limit: Int = 500) throws -> [EventRecord] {
+        try connection().query(
+            """
+            SELECT \(Self.attemptEventColumns)
+            FROM event e LEFT JOIN artifact a ON a.id = e.payload_id
+            WHERE e.attempt_id = ? AND e.ordinal < ? ORDER BY e.ordinal DESC LIMIT ?
+            """,
+            [.text(attempt.uuidString), .integer(beforeOrdinal.map(Int64.init) ?? .max), .integer(Int64(limit))]
+        ) { try Self.attemptEvent(from: $0) }
+        .reversed()
+    }
+
+    private static let attemptEventColumns = """
+        e.seq, e.event_id, e.schema_version, e.project_id, e.task_id, e.attempt_id, e.ordinal,
+        e.kind, e.at, e.payload_id, a.inline_content, e.dedup_key, e.payload_purged_at
+        """
+
+    private static func attemptEvent(from row: SQLRow) throws -> EventRecord {
+        EventRecord(
+            seq: row.int(0), eventID: try parseID(row.requiredText(1)), schemaVersion: Int(row.int(2)),
+            projectID: try parseID(row.requiredText(3)), taskID: try row.text(4).map(parseID),
+            attemptID: try row.text(5).map(parseID), ordinal: row.optionalInt(6).map(Int.init),
+            kind: EventKind(rawValue: try row.requiredText(7)), at: row.int(8),
+            payloadID: try row.text(9).map(parseID), payload: row.blob(10), dedupKey: row.text(11), payloadPurgedAt: row.optionalInt(12)
+        )
     }
 
     public func snapshot() throws -> StoreSnapshot {
