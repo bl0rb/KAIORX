@@ -17,11 +17,14 @@ public struct AppConfiguration: Sendable {
     public var gate: any CapabilityGate
     public var clock: WorkbenchClock
     public var limits: SchedulerLimits
+    /// Where the real providers' model profiles come from. The default registers none, so tests,
+    /// UI tests and benchmarks keep their own fakes; the real app uses the verified catalog.
+    public var profileRegistration: ProfileRegistration
 
     public init(
         databasePath: String, workspaceRoot: String, adapters: @escaping @Sendable (ProcessHost) -> [any AgentAdapter],
         gate: any CapabilityGate = AutomationGate(channel: .distributed), limits: SchedulerLimits = SchedulerLimits(),
-        clock: @escaping WorkbenchClock = { Int64(Date().timeIntervalSince1970 * 1000) }
+        clock: @escaping WorkbenchClock = { Int64(Date().timeIntervalSince1970 * 1000) }, profileRegistration: ProfileRegistration = .none
     ) {
         self.databasePath = databasePath
         self.workspaceRoot = workspaceRoot
@@ -29,6 +32,7 @@ public struct AppConfiguration: Sendable {
         self.gate = gate
         self.limits = limits
         self.clock = clock
+        self.profileRegistration = profileRegistration
     }
 
     /// The real app: `~/Library/Application Support/KAIORX`, gated for the build's channel
@@ -40,12 +44,28 @@ public struct AppConfiguration: Sendable {
         let folder = try AppPaths.supportFolder()
         return AppConfiguration(
             databasePath: database.path(percentEncoded: false), workspaceRoot: workspaceRoot(support: folder), adapters: adapters,
-            gate: AutomationGate(channel: channel)
+            gate: AutomationGate(channel: channel), profileRegistration: .verifiedCatalog(installed: nil)
         )
     }
 
     /// Where the real app keeps worktrees and its other workspace files.
     public static func workspaceRoot(support: String) -> String { support + "/workspace" }
+}
+
+/// Which model profiles of the real providers the app registers at start (ADR 0012).
+public enum ProfileRegistration: Sendable {
+    /// None: whoever configures the app registers its own (tests, UI tests, benchmarks).
+    case none
+    /// From `VerifiedModelProfiles`, synced at every start. `installed` names each provider's
+    /// installed binary; nil asks the app's `AutomationGate` (which reads nothing in a channel
+    /// without automation), so the version probe is the one the adapters cache for their starts.
+    case verifiedCatalog(installed: (@Sendable (ProviderKind) async -> BinaryIdentity?)?)
+}
+
+/// How the start-up profile sync went; a failure is recorded, never fatal.
+public enum ProfileSyncOutcome: Sendable, Equatable {
+    case synced(ModelProfileSyncReport)
+    case failed(String)
 }
 
 /// Why the app cannot open normally; the recovery screen offers restore or quit, never a crash.
@@ -74,6 +94,8 @@ public struct AppServices: Sendable {
     public let chain: CandidateChain?
     public let recovery: RecoveryReport
     public let restored: RestoreReport?
+    /// The model profile sync at this start; nil when the configuration registers none.
+    public let profileSync: ProfileSyncOutcome?
 
     public var degraded: Bool { git == nil }
 }
@@ -141,6 +163,8 @@ public enum AppBootstrap {
         await configuration.gate.prepare(GateContext(
             adapters: adapters, host: agents, scratch: configuration.workspaceRoot + "/preflight", clock: configuration.clock
         ))
+        // The real providers' profiles, before the scheduler and the chain can look for one.
+        let profileSync = await syncProfiles(configuration, store: store)
         let git = try? GitRunner(host: agents, home: configuration.workspaceRoot + "/git-home")
         let recovery: RecoveryReport
         do { recovery = try await coordinator.bootstrap() }
@@ -169,8 +193,23 @@ public enum AppBootstrap {
         return .ready(AppServices(
             configuration: configuration, store: store, agents: agents, terminals: terminals, coordinator: coordinator, git: git,
             workspace: workspace, integration: integration, memory: memory, scheduler: scheduler, chain: chain, recovery: recovery,
-            restored: restored
+            restored: restored, profileSync: profileSync
         ))
+    }
+
+    /// Registers the verified catalog's profiles (ADR 0012); a failure is reported, not fatal.
+    static func syncProfiles(_ configuration: AppConfiguration, store: Store) async -> ProfileSyncOutcome? {
+        guard case .verifiedCatalog(let lookup) = configuration.profileRegistration else { return nil }
+        var installed: [ProviderKind: BinaryIdentity] = [:]
+        for provider in ModelProfileSync.managed.sorted(by: { $0.rawValue < $1.rawValue }) {
+            if let lookup {
+                installed[provider] = await lookup(provider)
+            } else if let gate = configuration.gate as? AutomationGate {
+                installed[provider] = await gate.installedIdentity(provider)
+            }
+        }
+        do { return .synced(try await ModelProfileSync.run(store: store, installed: installed)) }
+        catch { return .failed(String(describing: error)) }
     }
 
     /// Quitting: running attempts are stopped (they become `uncertain` only if the stop fails),

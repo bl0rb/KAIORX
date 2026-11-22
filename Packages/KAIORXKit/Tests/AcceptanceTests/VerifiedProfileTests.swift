@@ -230,4 +230,37 @@ import Testing
             try ProfileProposal.propose(source: "", provider: "claude", version: "9.0.0", model: "m", roles: [.author], reportPath: "x", reportSHA256: "x", mode: "x", date: "x")
         }
     }
+
+    // MARK: Source scan
+
+    /// Real profiles are registered only by the catalog sync; hand registration stays in the
+    /// store, the UI-test seed and the app's UI-test branch.
+    @Test func profileRegistrationStaysWhereItBelongs() throws {
+        let sources = Self.package.appending(path: "Sources").path(percentEncoded: false)
+        let app = Self.package.deletingLastPathComponent().deletingLastPathComponent().appending(path: "App").path(percentEncoded: false)
+        let rules: [(needle: String, allowed: Set<String>)] = [
+            ("registerModelProfile(", ["Storage/StorePlanning.swift", "Workbench/UITestSeed.swift", "App/AppModel.swift"]),
+            ("syncCatalogModelProfiles(", ["Storage/StorePlanning.swift", "Workbench/ModelProfileSync.swift"]),
+            ("ModelProfileSync.run(", ["Workbench/Bootstrap.swift"]),
+        ]
+        var offenders: [String] = []
+        var seen: [String: Set<String>] = [:]
+        for (base, prefix) in [(sources, ""), (app, "App/")] {
+            let enumerator = FileManager.default.enumerator(atPath: base)
+            while let name = enumerator?.nextObject() as? String {
+                guard name.hasSuffix(".swift") else { continue }
+                let file = prefix + name
+                let text = try String(contentsOfFile: base + "/" + name, encoding: .utf8)
+                for rule in rules where text.contains(rule.needle) {
+                    seen[rule.needle, default: []].insert(file)
+                    if !rule.allowed.contains(file) { offenders.append("\(file): \(rule.needle)") }
+                }
+            }
+        }
+        #expect(offenders.isEmpty, "\(offenders)")
+        // The scan sees the files it guards (a moved file must update this test).
+        #expect(seen["syncCatalogModelProfiles("] == ["Storage/StorePlanning.swift", "Workbench/ModelProfileSync.swift"])
+        #expect(seen["ModelProfileSync.run("] == ["Workbench/Bootstrap.swift"])
+        #expect(seen["registerModelProfile("]?.contains("App/AppModel.swift") == true)
+    }
 }

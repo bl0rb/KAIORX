@@ -230,6 +230,14 @@ public actor AutomationGate: CapabilityGate {
         return nil
     }
 
+    /// The installed binary as automation sees it, for the model profile sync at app start
+    /// (ADR 0012). nil without reading anything when the channel permits no automation for the
+    /// provider (ADR 0009 §3), and nil when it is not installed or could not be identified.
+    public func installedIdentity(_ provider: ProviderKind) async -> BinaryIdentity? {
+        guard provider == .claude || provider == .codex, channelPermits(provider), let sources else { return nil }
+        return try? await sources.installed(provider)
+    }
+
     // MARK: Confinement
 
     /// The last probe result; nil before the first probe.

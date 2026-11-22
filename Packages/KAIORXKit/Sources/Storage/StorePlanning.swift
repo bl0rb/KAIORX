@@ -500,6 +500,72 @@ extension Store {
 
     public func modelProfiles() throws -> [ModelProfile] { try modelProfiles(try connection()) }
 
+    /// Brings the profiles of the `managed` providers in line with the verified catalog (ADR
+    /// 0012), in one transaction. Never deletes (attempts reference profiles):
+    /// - a missing `desired` row is inserted; an existing one gets the desired `verified_at`,
+    ///   `typical_tokens`, `effort` and `context_limit`;
+    /// - `disabled_reason` is set or cleared only where it is NULL or a `catalog:` reason, so a
+    ///   reason set elsewhere (a future user disable) stays;
+    /// - every other row of a managed provider gets `catalog:removed` (same rule);
+    /// - rows of other providers (`fake`) are never touched.
+    @discardableResult
+    public func syncCatalogModelProfiles(_ desired: [ModelProfile], managed: Set<ProviderKind>) throws -> ModelProfileSyncReport {
+        if let stray = desired.first(where: { !managed.contains($0.provider) }) { throw ModelProfileSyncError.unmanagedProvider(stray.provider) }
+        return try syncManaged(desired, managed: managed)
+    }
+
+    private func syncManaged(_ desired: [ModelProfile], managed: Set<ProviderKind>) throws -> ModelProfileSyncReport {
+        let db = try connection()
+        let now = currentTime()
+        return try db.transaction {
+            let existing = Dictionary(try modelProfiles(db).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            var report = ModelProfileSyncReport()
+            func catalogOwned(_ reason: String?) -> Bool { reason == nil || reason!.hasPrefix(ModelProfileSyncReport.reasonPrefix) }
+            var wanted = Set<ModelProfileID>()
+            for profile in desired {
+                wanted.insert(profile.id)
+                guard let row = existing[profile.id] else {
+                    try db.run(
+                        """
+                        INSERT INTO model_profile (id, provider, role, tier, model, effort, context_limit, typical_tokens, observed_duration_ms,
+                            verified_at, disabled_reason, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            .text(profile.id.uuidString), .text(profile.provider.rawValue), .text(profile.role.rawValue), .text(profile.tier.rawValue),
+                            .text(profile.model), .optional(profile.effort), .optional(profile.contextLimit), .optional(profile.typicalTokens),
+                            .optional(profile.observedDurationMs), .optional(profile.verifiedAt), .optional(profile.disabledReason), .integer(now),
+                        ]
+                    )
+                    report.inserted.append(profile.id)
+                    continue
+                }
+                // The ID is derived from provider, role, tier and model; a row that differs there is not ours.
+                guard row.provider == profile.provider, row.role == profile.role, row.tier == profile.tier, row.model == profile.model else {
+                    throw ModelProfileSyncError.identityMismatch(profile.id)
+                }
+                let reason = catalogOwned(row.disabledReason) ? profile.disabledReason : row.disabledReason
+                guard row.verifiedAt != profile.verifiedAt || row.typicalTokens != profile.typicalTokens || row.effort != profile.effort
+                        || row.contextLimit != profile.contextLimit || row.disabledReason != reason else { continue }
+                try db.run(
+                    "UPDATE model_profile SET verified_at = ?, typical_tokens = ?, effort = ?, context_limit = ?, disabled_reason = ? WHERE id = ?",
+                    [
+                        .optional(profile.verifiedAt), .optional(profile.typicalTokens), .optional(profile.effort), .optional(profile.contextLimit),
+                        .optional(reason), .text(profile.id.uuidString),
+                    ]
+                )
+                report.updated.append(profile.id)
+            }
+            for row in existing.values.sorted(by: { $0.id.uuidString < $1.id.uuidString })
+            where managed.contains(row.provider) && !wanted.contains(row.id) && catalogOwned(row.disabledReason)
+                && row.disabledReason != ModelProfileSyncReport.removed {
+                try db.run("UPDATE model_profile SET disabled_reason = ? WHERE id = ?", [.text(ModelProfileSyncReport.removed), .text(row.id.uuidString)])
+                report.removed.append(row.id)
+            }
+            return report
+        }
+    }
+
     func modelProfiles(_ db: SQLiteConnection) throws -> [ModelProfile] {
         try db.query(
             """
@@ -1254,4 +1320,27 @@ extension Store {
         }
         return estimate
     }
+}
+
+/// What `syncCatalogModelProfiles` changed; all empty when nothing did.
+public struct ModelProfileSyncReport: Sendable, Equatable {
+    /// Disabled reasons the catalog sync owns start with this prefix.
+    public static let reasonPrefix = "catalog:"
+    /// A row of a managed provider that the catalog no longer lists.
+    public static let removed = "catalog:removed"
+
+    public var inserted: [ModelProfileID] = []
+    public var updated: [ModelProfileID] = []
+    public var removed: [ModelProfileID] = []
+
+    public init() {}
+
+    public var changed: Bool { !inserted.isEmpty || !updated.isEmpty || !removed.isEmpty }
+}
+
+public enum ModelProfileSyncError: Error, Equatable, Sendable {
+    /// A desired profile of a provider the sync does not manage.
+    case unmanagedProvider(ProviderKind)
+    /// A stored row with this ID has another provider, role, tier or model.
+    case identityMismatch(ModelProfileID)
 }
