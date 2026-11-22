@@ -1,6 +1,6 @@
 # ADR 0005 · Plan, Scheduler und Routing
 
-**Status:** angenommen, 20. November 2026 · **Betrifft:** Paket F, `Plan/ARCHITEKTURPLAN.md` (Abschnitt 3), `Plan/laufzeitvertrag.md` (Plan, Lease, Budget, Entscheidung), ADR 0003, ADR 0004
+**Status:** angenommen, 20. November 2026; ergänzt durch ADR 0012 (Modellprofile, vorgeschlagen) · **Betrifft:** Paket F, `Plan/ARCHITEKTURPLAN.md` (Abschnitt 3), `Plan/laufzeitvertrag.md` (Plan, Lease, Budget, Entscheidung), ADR 0003, ADR 0004
 
 ## Kontext
 

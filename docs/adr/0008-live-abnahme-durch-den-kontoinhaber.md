@@ -1,6 +1,6 @@
 # ADR 0008 · Live-Abnahme durch den Kontoinhaber
 
-**Status:** angenommen, 20. November 2026; Abnahme bestanden (Lauf `20261120-1429-a265`) · **Betrifft:** Paket A, `Plan/anbieter.md` §5, `Plan/ARCHITEKTURPLAN.md` (Paket A, Qualitätsnachweis), ADR 0003, ADR 0006, ADR 0007
+**Status:** angenommen, 20. November 2026; Abnahme bestanden (Lauf `20261120-1429-a265`); ergänzt durch ADR 0012 (Modellprofile, vorgeschlagen) · **Betrifft:** Paket A, `Plan/anbieter.md` §5, `Plan/ARCHITEKTURPLAN.md` (Paket A, Qualitätsnachweis), ADR 0003, ADR 0006, ADR 0007
 
 ## Kontext
 

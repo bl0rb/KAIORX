@@ -28,8 +28,8 @@ What the packages deliver:
 
 Still open before the beta:
 
-- **End-to-end run in the app** with the real Claude Code and Codex (plan, author, seal and build, tests, review, approval, publication). The chain is wired and covered by fake-provider and UI tests; the providers were checked live only through the acceptance kit. Owner's guide and checklist (German): [docs/e2e-durchlauf.md](docs/e2e-durchlauf.md). It is blocked at the first author start for now: outside the UI tests no code path registers model profiles for Claude and Codex, so a task waits with "Kein passendes Modellprofil" and the review sheet offers no reviewer model.
-- **Owner approval** of ADR 0009, 0010 and 0011.
+- **End-to-end run in the app** with the real Claude Code and Codex (plan, author, seal and build, tests, review, approval, publication). The chain is wired and covered by fake-provider and UI tests; the providers were checked live only through the acceptance kit. Owner's guide and checklist (German): [docs/e2e-durchlauf.md](docs/e2e-durchlauf.md). Model profiles for the real providers come from the committed live report `20261120-1429-a265` and are registered at every app start (ADR 0012, proposed): Claude 2.1.329 `sonnet` and Codex 0.170.0 `gpt-6.2-sol`, each as author and reviewer, tier standard.
+- **Owner approval** of ADR 0009, 0010, 0011 and 0012.
 - **Owner's beta checks** in `docs/beta-checklist.md`: signing and notarization with a Developer ID, a clean Mac, macOS 15, offline first launch, VoiceOver and keyboard, quitting during a run, the untouched checkout, contrast and Dark Mode, restore.
 - **Optional live checks of package A:** second-account detection, Claude quota signals, login expiry and token refresh, Codex SIWC login.
 - **Performance:** every beta target is met on the M4 measurement; the reference Mac is still to be chosen.

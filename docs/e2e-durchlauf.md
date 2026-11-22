@@ -2,16 +2,15 @@
 
 Anleitung für den Kontoinhaber. Sie führt einmal durch die ganze Kette in der App: Projekt, Testprofil, Auftrag, Zustimmung, automatischer Autorenlauf, Versiegeln und Bauen, Tests, Review beim anderen Anbieter, Freigabe, Veröffentlichung und Lieferbranch. Dabei laufen der **echte Claude Code** und der **echte Codex** im **Debug-Build** der App.
 
-- **Stand:** Commit `20969e7` auf `feat/live-kit-package-a`, ADR 0009, 0010 und 0011.
+- **Stand:** Branch `feat/live-kit-package-a` mit den Modellprofilen aus der Live-Abnahme, ADR 0009, 0010, 0011 und 0012.
 - **Wer:** nur der Kontoinhaber, von Hand, auf dem eigenen Mac. Claude Code, Codex, Skripte und CI führen diese Schritte nicht aus (`CLAUDE.md`).
 - **Dauer:** Hauptweg etwa 60 bis 90 Minuten, die optionalen Teile je 15 bis 30 Minuten.
 - **Wozu:** Der Durchlauf ist die Datenquelle für die Nachweise von I.1, I.3 und I.4 (`Plan/paket-i.md`, Stufe 0.7). Die Daten bleiben deshalb in der echten Datenbank.
 
-> **Bekannter Blocker im Stand `20969e7`: Modellprofile.** Der Scheduler startet einen Autor nur mit einem verifizierten Modellprofil des Anbieters, und das Review-Blatt bietet einen Prüfer nur mit einem Prüfer-Profil an. Außerhalb der UI-Tests legt heute kein Codepfad solche Profile an: weder die App noch `kaiorx-acceptance` noch `kaiorx-dev`. Auf einer frischen Datenbank bleibt die Aufgabe nach der Zustimmung deshalb bei „Kein passendes Modellprofil“ stehen, und das Review-Blatt zeigt „Für Codex gibt es kein passendes Prüfermodell“.
+> **Modellprofile kommen aus der Live-Abnahme (ADR 0012).** Beim Start registriert die App aus dem committeten Bericht `20261120-1429-a265` vier Profile: Claude 2.1.329 mit `sonnet` und Codex 0.170.0 mit `gpt-6.2-sol`, je als Autor und Prüfer, Stufe `standard`. Trage Profile **nicht** von Hand in die Datenbank ein.
 >
-> - Trage Profile **nicht** von Hand in die Datenbank ein. `verified_at` setzt außerhalb von Tests nur Paket A (ADR 0005).
-> - Prüfe vor dem Start, ob ein neuerer Stand diese Lücke geschlossen hat (`README.md`, „Still open before the beta“).
-> - Ist sie noch offen: Führe den Durchlauf bis Schritt 9 durch, halte das Verhalten im Protokoll fest (Prüfung in Schritt 5.4) und brich dort ab. Mehr lässt sich mit diesem Stand nicht prüfen.
+> - Hat sich Claude oder Codex selbst aktualisiert, bleiben die Profile nutzbar. Die Aufgabe wartet dann mit „Wartet auf deinen Start: … nicht live abgenommen“, nicht mit „Kein passendes Modellprofil“. Dann brauchst du zuerst eine neue Live-Abnahme; nach dem Commit ihres Patches startest du KAIORX neu.
+> - Nur Aufgaben der Stufe `intensive` (oder eine Eskalation dorthin) warten mit „Kein passendes Modellprofil“: Für diese Stufe ist noch kein Modell abgenommen.
 
 ## 1 Protokoll führen
 
@@ -20,7 +19,7 @@ Lege vor dem Start eine Protokolldatei **außerhalb** des Wegwerf-Repositories a
 | Zeit | Schritt | Erwartet | Beobachtet | OK / Abweichung | Bild |
 |---|---|---|---|---|---|
 | 14:05 | E8.3 | Aufgabe „Wartet auf deine Zustimmung“ | wie erwartet | OK | – |
-| 14:07 | E10.1 | Lauf „Läuft“ | „Kein passendes Modellprofil“ | Abweichung | `e10-1.png` |
+| 14:07 | E10.1 | Lauf „Läuft“ | „Wartet auf deinen Start: Dieser Build von Claude 2.1.329 ist nicht live abgenommen“ | Abweichung | `e10-1.png` |
 
 - **Zeit:** Uhrzeit, zu der du das Ergebnis gesehen hast (nicht die des Klicks). Bei Wartezeiten beide Zeiten notieren.
 - **Erwartet:** steht in dieser Anleitung jeweils hinter „Erwartet“. Kopiere den Text oder schreibe nur „wie erwartet“.
@@ -180,14 +179,23 @@ cd ~/kaiorx-e2e
 
 3. **E5.3** Wenn „Schreibschutz für Agenten“ „Fehlt“ zeigt, startet keine Automatik („Der Schreibschutz für Agenten wirkt nicht“). Notiere den Detailtext und brich ab.
 
-4. **E5.4** **Modellprofile prüfen** (Blocker oben). Die Abfrage liest nur:
+4. **E5.4** **Modellprofile prüfen.** Die Abfrage liest nur:
 
    ```sh
    sqlite3 -readonly "$HOME/Library/Application Support/KAIORX/kaiorx.sqlite" \
      "SELECT provider, role, tier, model FROM model_profile WHERE verified_at IS NOT NULL AND disabled_reason IS NULL;"
    ```
 
-   **Erwartet:** mindestens eine Zeile `claude|author|…` und eine `codex|reviewer|…` (oder umgekehrt: Autor bei Codex, Prüfer bei Claude). **Im Stand `20969e7` ist die Ausgabe leer.** Notiere das und arbeite bis Schritt 9 weiter.
+   **Erwartet:** genau diese vier Zeilen (Reihenfolge egal):
+
+   ```text
+   claude|author|standard|sonnet
+   claude|reviewer|standard|sonnet
+   codex|author|standard|gpt-6.2-sol
+   codex|reviewer|standard|gpt-6.2-sol
+   ```
+
+   Ist die Ausgabe leer, notiere das als Abweichung: Dann hat der Abgleich beim Start nicht geklappt.
 
 ## 6 Projekt öffnen und vertrauen
 
@@ -254,7 +262,7 @@ Ein Blatt deckt beide Anbieter ab: jeder als Autor **und** als Reviewer. Der Sch
    - „Jeder Lauf überträgt freigegebene Inhalte an Claude und Codex.“
 
    Return wählt „Nicht zustimmen“.
-3. **E9.3** Klicke „Zustimmen“. **Erwartet:** Der Wartegrund verschwindet innerhalb von etwa einer Sekunde, und der Lauf startet (Schritt 10). **Im Stand `20969e7`** erscheint stattdessen „Kein passendes Modellprofil“. Notiere das als Abweichung. Der Hauptweg endet dann hier; weiter mit Abschnitt 19.
+3. **E9.3** Klicke „Zustimmen“. **Erwartet:** Der Wartegrund verschwindet innerhalb von etwa einer Sekunde, und der Lauf startet (Schritt 10).
 
 **Mögliche andere Wartegründe** (je ein Satz in der Spalte „Wartet auf“; notiere den genauen Text):
 
@@ -267,16 +275,17 @@ Ein Blatt deckt beide Anbieter ab: jeder als Autor **und** als Reviewer. Der Sch
 | „Wartet auf deinen Start: Der Schreibschutz für Agenten wirkt nicht“ | Sandbox-Prüfung gescheitert |
 | „Wartet auf deinen Start: Claude startet in dieser Ausgabe von KAIORX nie automatisch (keine Anbieterfreigabe)“ | falscher Build (Release statt Debug, 4.1) |
 | „Kein unabhängiger Reviewer verfügbar“ | Zustimmung für den anderen Anbieter fehlt |
+| „Kein passendes Modellprofil“ | Aufgabe der Stufe `intensive`; abgenommen ist nur `standard` (ADR 0012) |
 | „Wartet auf das Nutzungslimit“ | Kontingent oder die 3-Läufe-Grenze |
 
 Bei „Wartet auf deinen Start: …“ kannst du die Aufgabe selbst starten: „Entscheiden …“ (⇧⌘D), dann das Blatt „Aufgabe starten“ und „Starten“. Ein selbst gestarteter Lauf läuft aber auch nur mit einem live abgenommenen Build. Notiere die Automatik-Abweichung trotzdem.
 
 ## 10 Automatischer Lauf und Monitor
 
-1. **E10.1** **Erwartet** im Aufgabendetail unter „Läufe“: „Autor · Claude · <Modell>“, nacheinander mit den Status „Reserviert“, „Startet“ und „Läuft“. Die Aufgabe zeigt „Läuft“.
+1. **E10.1** **Erwartet** im Aufgabendetail unter „Läufe“: „Autor · Claude · sonnet“, nacheinander mit den Status „Reserviert“, „Startet“ und „Läuft“. Die Aufgabe zeigt „Läuft“.
    - Wird Codex Autor, ist das keine Abweichung. Dann prüft in Schritt 13 Claude.
 2. **E10.2** Öffne den Monitor (⌥⌘M oder Werkzeugleiste „Monitor“). **Erwartet:**
-   - Filter „Offen“ zeigt den Lauf mit Aufgabe, „Claude · <Modell>“, Rolle „Autor“, Status „Läuft“ und wachsender Laufzeit;
+   - Filter „Offen“ zeigt den Lauf mit Aufgabe, „Claude · sonnet“, Rolle „Autor“, Status „Läuft“ und wachsender Laufzeit;
    - Auswahl des Laufs zeigt rechts den „Verlauf“ mit Ereignissen, die laufend nachkommen.
 3. **E10.3** Warte das Ende ab. **Erwartet:**
    - Lauf „Erfolgreich“; im Monitor verschwindet er aus „Offen“ und steht unter „Beendet“;
@@ -318,19 +327,18 @@ Die Kandidatenkette prüft einmal je Sekunde. Sie versiegelt nur auf dem Host un
 Reviews startet nur der Benutzer (ADR 0009 §8). Ein Review verbraucht Kontingent beim Prüferkonto.
 
 1. **E13.1** Klicke „Review starten …“ (⌥⌘R). **Erwartet:**
-   - Abschnitt „Prüfer“ mit einer Zeile je Anbieter. „Codex · <Modell>“ ist gewählt; „Claude“ trägt „– Der Prüfer muss von einem anderen Anbieter kommen als der Autor“.
+   - Abschnitt „Prüfer“ mit einer Zeile je Anbieter. „Codex · gpt-6.2-sol“ ist gewählt; „Claude“ trägt „– Der Prüfer muss von einem anderen Anbieter kommen als der Autor“.
    - Darunter das Blatt „Review starten“ mit diesen Zeilen:
-     - „Geprüfter Commit: <voller Commit>“, „Prüfer: Codex · <Modell>“;
+     - „Geprüfter Commit: <voller Commit>“, „Prüfer: Codex · gpt-6.2-sol“;
      - „Autor: Claude – der Prüfer kommt von einem anderen Anbieter“;
      - „Diff und Testbelege gehen an Codex.“;
      - „Der Prüfer arbeitet schreibgeschützt in einem eigenen Worktree.“;
      - „Ein Review verbraucht Kontingent beim Prüferkonto.“
    - Eine Zeile „Automatik (nur zur Information): …“ darf erscheinen; sie sperrt nicht.
    - Return wählt „Nicht jetzt“.
-   - **Im Stand `20969e7`** steht bei Codex „kein Prüfermodell – Für Codex gibt es kein passendes Prüfermodell“, und „Review starten“ ist gesperrt (Blocker).
 2. **E13.2** Klicke „Review starten“. **Erwartet:** „Review bei Codex gestartet. Das Ergebnis wird übernommen, sobald der Prüfer fertig ist.“ Schließe mit „Fertig“.
 3. **E13.3** **Erwartet:**
-   - Abschnitt „Review“ zeigt „Review läuft (Codex)“; unter „Läufe“ steht „Reviewer · Codex · <Modell>“ mit „Läuft“.
+   - Abschnitt „Review“ zeigt „Review läuft (Codex)“; unter „Läufe“ steht „Reviewer · Codex · gpt-6.2-sol“ mit „Läuft“.
    - Der Monitor zeigt den Lauf mit Rolle „Reviewer“.
    - Ein Lauf im Status „Wartet auf Entscheidung“ ist nicht vorgesehen. Codex-Freigaben entscheidet KAIORX selbst nach Rolle; notiere diesen Status, falls er auftaucht.
 
@@ -536,7 +544,7 @@ Hake ab und trage Zeit und Beobachtung im Protokoll ein. Fett markiert ist der H
 
 - [ ] **E5.1** App startet, „Willkommen bei KAIORX“
 - [ ] **E5.2** Onboarding: Git, Claude und Codex „live abgenommen“, Anmeldung „Wird beim ersten Lauf geprüft“, „sandbox-exec wirkt.“
-- [ ] **E5.4** Modellprofile vorhanden (im Stand `20969e7`: leer → Blocker notieren)
+- [ ] **E5.4** vier Modellprofile: Claude `sonnet` und Codex `gpt-6.2-sol`, je Autor und Prüfer, Stufe `standard`
 - [ ] **E6.1–E6.3** Projekt per „Vertrauen und öffnen“ geöffnet, Return wählte „Nicht öffnen“
 
 **Testprofil, Auftrag, Zustimmung**
@@ -550,7 +558,7 @@ Hake ab und trage Zeit und Beobachtung im Protokoll ein. Fett markiert ist der H
 
 **Lauf, Kette, Prüfung**
 
-- [ ] **E10.1** „Autor · Claude · <Modell>“: Reserviert → Startet → Läuft
+- [ ] **E10.1** „Autor · Claude · sonnet“: Reserviert → Startet → Läuft
 - [ ] **E10.2** Monitor zeigt den Lauf und den Verlauf
 - [ ] **E10.3** „Erfolgreich“, Aufgabe „Ergebnis liegt vor“, Laufzeit notiert
 - [ ] **E11.1** „Wird versiegelt …“ → „Versiegelt: Commit … – Kandidat wird gebaut …“
