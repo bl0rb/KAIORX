@@ -7,12 +7,15 @@ import XCTest
 @MainActor
 final class CandidateChainUITests: XCTestCase {
     var app: XCUIApplication!
+    /// The app's temporary folder; the fixture repository is `repo` in it.
+    var folder: String!
 
     func launch(script: String = "success", seed: String? = nil) {
         app = XCUIApplication()
         app.launchArguments = ["-KAIORXUITest"]
+        folder = NSTemporaryDirectory() + "kaiorx-uitest-\(UUID().uuidString)"
         app.launchEnvironment = [
-            "KAIORX_UITEST_FOLDER": NSTemporaryDirectory() + "kaiorx-uitest-\(UUID().uuidString)",
+            "KAIORX_UITEST_FOLDER": folder,
             "KAIORX_UITEST_SCRIPT": script,
         ]
         if let seed { app.launchEnvironment["KAIORX_UITEST_SEED"] = seed }
@@ -91,6 +94,64 @@ final class CandidateChainUITests: XCTestCase {
             return
         }
         XCTFail("segment \(segment) not found")
+    }
+
+    /// Scrolls the detail view until the element can be clicked (in a small window the review
+    /// and test buttons sit below the diff).
+    func reveal(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        let scroll = app.scrollViews.containing(NSPredicate(format: "identifier == %@", element.identifier)).firstMatch
+        var tries = 0
+        while !element.isHittable, scroll.exists, tries < 20 {
+            scroll.scroll(byDeltaX: 0, deltaY: element.frame.minY > scroll.frame.midY ? -150 : 150)
+            tries += 1
+        }
+        XCTAssertTrue(element.isHittable, "\(element.identifier) stays out of view", file: file, line: line)
+    }
+
+    /// From the `candidate` seed: confirms a test profile, runs its tests, and waits until the
+    /// candidate is in review.
+    func confirmProfileAndRunTests(file: StaticString = #filePath, line: UInt = #line) {
+        let openProfiles = app.buttons["openTestProfiles"]
+        XCTAssertTrue(openProfiles.waitForExistence(timeout: 30), "no candidate without a confirmed profile", file: file, line: line)
+        reveal(openProfiles, file: file, line: line)
+        openProfiles.click()
+        let name = app.textFields["profileName"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5), file: file, line: line)
+        name.click()
+        name.typeText("Schnelltest")
+        let executable = app.textFields["profileExecutable"]
+        executable.click()
+        executable.typeText("/bin/sh")
+        let arguments = app.textViews["profileArguments"]
+        arguments.click()
+        arguments.typeText("-c\ntest -f LEERWERT.md")
+        app.buttons["proposeTestProfile"].click()
+        let confirm = app.buttons["confirmTestProfile-Schnelltest"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 10), file: file, line: line)
+        confirm.click()
+        approveWhenEnabled(file: file, line: line)
+        XCTAssertTrue(confirm.waitForNonExistence(timeout: 10), file: file, line: line)
+        app.buttons["closeTestProfiles"].click()
+
+        let run = app.buttons["runTests"]
+        XCTAssertTrue(run.waitForExistence(timeout: 10), file: file, line: line)
+        reveal(run, file: file, line: line)
+        run.click()
+        XCTAssertTrue(waitForLabel(element("candidateStatus"), containing: "Im Review", timeout: 60), file: file, line: line)
+    }
+
+    /// Starts the review by the fake Codex reviewer through the review sheet.
+    func startCodexReview(file: StaticString = #filePath, line: UInt = #line) {
+        let start = app.buttons["startReview"]
+        XCTAssertTrue(start.waitForExistence(timeout: 10), file: file, line: line)
+        reveal(start, file: file, line: line)
+        start.click()
+        let codex = element("reviewOption-codex")
+        XCTAssertTrue(codex.waitForExistence(timeout: 10), file: file, line: line)
+        codex.click()
+        approveWhenEnabled(file: file, line: line)
+        XCTAssertTrue(waitForLabel(element("sheetResult"), containing: "gestartet", timeout: 30), file: file, line: line)
+        app.buttons["reviewDone"].click()
     }
 
     // MARK: Tests
@@ -189,31 +250,7 @@ final class CandidateChainUITests: XCTestCase {
     /// user starts the review explicitly; the chain collects it and the candidate can be approved.
     func testReviewMakesTheCandidateApprovable() {
         launch(seed: "candidate")
-        let openProfiles = app.buttons["openTestProfiles"]
-        XCTAssertTrue(openProfiles.waitForExistence(timeout: 30), "no candidate without a confirmed profile")
-        openProfiles.click()
-        let name = app.textFields["profileName"]
-        XCTAssertTrue(name.waitForExistence(timeout: 5))
-        name.click()
-        name.typeText("Schnelltest")
-        let executable = app.textFields["profileExecutable"]
-        executable.click()
-        executable.typeText("/bin/sh")
-        let arguments = app.textViews["profileArguments"]
-        arguments.click()
-        arguments.typeText("-c\ntest -f LEERWERT.md")
-        app.buttons["proposeTestProfile"].click()
-        let confirm = app.buttons["confirmTestProfile-Schnelltest"]
-        XCTAssertTrue(confirm.waitForExistence(timeout: 10))
-        confirm.click()
-        approveWhenEnabled()
-        XCTAssertTrue(confirm.waitForNonExistence(timeout: 10))
-        app.buttons["closeTestProfiles"].click()
-
-        let run = app.buttons["runTests"]
-        XCTAssertTrue(run.waitForExistence(timeout: 10))
-        run.click()
-        XCTAssertTrue(waitForLabel(element("candidateStatus"), containing: "Im Review", timeout: 60))
+        confirmProfileAndRunTests()
         let review = element("reviewStatus")
         XCTAssertTrue(review.waitForExistence(timeout: 10))
         XCTAssertTrue(waitForLabel(review, containing: "Noch kein Review", timeout: 10))
@@ -222,6 +259,7 @@ final class CandidateChainUITests: XCTestCase {
         XCTAssertTrue(waitForLabel(review, containing: "Noch kein Review", timeout: 2))
 
         // The import sheet: without text nothing can be stored; declining stores nothing.
+        reveal(app.buttons["importReview"])
         app.buttons["importReview"].click()
         let pasted = app.textViews["importReviewText"]
         XCTAssertTrue(pasted.waitForExistence(timeout: 10))
@@ -243,15 +281,37 @@ final class CandidateChainUITests: XCTestCase {
         assertReturnDoesNotApprove()
         XCTAssertTrue(waitForLabel(review, containing: "Noch kein Review", timeout: 5))
 
-        app.buttons["startReview"].click()
-        XCTAssertTrue(codex.waitForExistence(timeout: 10))
-        codex.click()
-        approveWhenEnabled()
-        XCTAssertTrue(waitForLabel(element("sheetResult"), containing: "gestartet", timeout: 30))
-        app.buttons["reviewDone"].click()
+        startCodexReview()
         XCTAssertTrue(waitForLabel(review, containing: "Zugestimmt", timeout: 60), "the review was not collected")
         let approve = app.buttons["approveCandidate"]
         XCTAssertTrue(approve.waitForExistence(timeout: 20), "the candidate cannot be approved")
+    }
+
+    /// A finished review whose collect the chain refused (the repository was unreachable) is not
+    /// retried on its own; „Übernahme erneut versuchen“ makes the next pass collect it.
+    func testARefusedCollectIsRetriedByTheUser() throws {
+        launch(script: "refuseCollect", seed: "candidate")
+        confirmProfileAndRunTests()
+        startCodexReview()
+        let issue = element("reviewIssue")
+        XCTAssertTrue(issue.waitForExistence(timeout: 30), "the refused collect is not shown")
+        let retry = app.buttons["retryCollect"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 10))
+
+        // The repository is back; the refused review still waits for the user.
+        let repository = folder + "/repo"
+        try FileManager.default.moveItem(atPath: repository + "/.git-weg", toPath: repository + "/.git")
+        Thread.sleep(forTimeInterval: 3)
+        XCTAssertTrue(retry.exists, "the refused collect was retried on its own")
+        XCTAssertFalse(waitForLabel(element("reviewStatus"), containing: "Zugestimmt", timeout: 1))
+
+        XCTAssertTrue(retry.isEnabled)
+        reveal(retry)
+        retry.click()
+        XCTAssertTrue(waitForLabel(element("reviewStatus"), containing: "Zugestimmt", timeout: 30), "the retried collect did not collect the review")
+        XCTAssertTrue(issue.waitForNonExistence(timeout: 10))
+        XCTAssertFalse(retry.exists)
+        XCTAssertTrue(app.buttons["approveCandidate"].waitForExistence(timeout: 20), "the candidate cannot be approved")
     }
 
     /// A rebuild that finds the result already in the integration state offers „Als erledigt

@@ -412,12 +412,13 @@ struct LaunchMode: Sendable {
         if let folder = uiTestFolder {
             try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
             let script = fakeScript
+            let repository = uiTestRepository
             return AppConfiguration(
                 databasePath: folder + "/kaiorx.sqlite", workspaceRoot: folder + "/workspace",
                 // Author and reviewer must differ: the fake provider writes, a second fake reviews.
                 adapters: { _ in [
                     FakeAdapter(provider: .fake) { spec in UITestScripts.author(script, spec: spec) },
-                    FakeAdapter(provider: .codex) { spec in UITestScripts.reviewer(spec) },
+                    FakeAdapter(provider: .codex) { spec in UITestScripts.reviewer(spec, script: script, repository: repository) },
                 ] },
                 gate: UITestGate()
             )
@@ -447,10 +448,15 @@ enum UITestScripts {
     }
 
     /// The independent reviewer approves the candidate its prompt names
-    /// („Review candidate <oid> …“); any other run just succeeds.
-    static func reviewer(_ spec: AttemptSpec) -> FakeScript {
+    /// („Review candidate <oid> …“); any other run just succeeds. With `refuseCollect` its start
+    /// also moves the repository's `.git` to `.git-weg`, so the chain cannot read the candidate's
+    /// changes and refuses to collect the finished review until the UI test moves it back.
+    static func reviewer(_ spec: AttemptSpec, script: String = "success", repository: String? = nil) -> FakeScript {
         let words = spec.prompt.split(separator: " ", maxSplits: 3)
         guard words.count >= 3, words[0] == "Review", words[1] == "candidate" else { return .success() }
+        if script == "refuseCollect", let repository {
+            try? FileManager.default.moveItem(atPath: repository + "/.git", toPath: repository + "/.git-weg")
+        }
         let oid = String(words[2])
         let verdict = #"```json\#n{"candidateOID": "\#(oid)", "verdict": "approve", "summary": "ok", "findings": []}\#n```"#
         return FakeScript(steps: [
