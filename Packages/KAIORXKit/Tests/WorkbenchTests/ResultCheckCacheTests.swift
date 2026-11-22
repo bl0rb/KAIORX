@@ -114,20 +114,40 @@ import Testing
     }
 
     /// The lookup the app passes to `PendingDecisions.collect` asks the chain's check once for
-    /// an unchanged state.
+    /// an unchanged state (key built from the projected state and the job's live integration tip)
+    /// and once more after the task moved on.
     @Test(.tags(.chainDriver)) func theLookupReusesTheChainsCheck() async throws {
         let f = try await ChainFixture("chain-check-cache")
         let chain = try #require(f.services.chain)
         let (_, task, _) = try await UITestSeed.empty(services: f.services, project: f.project, title: "Leer")
         let state = try await Projector(store: f.store).load()
+        // The projected state yields a key, so the lookup can cache at all.
+        let job = try #require(state.tasks[task]?.jobID)
+        let tip = try await f.store.integrationTip(job: job)
+        #expect(ResultCheckCache.key(task, in: state, tip: tip, issue: await chain.issue(task)) != nil)
         let cache = ResultCheckCache()
-        let lookup = cache.lookup(state: state, store: f.store, chain: chain)
+        let counter = Counter()
+        let countingCheck: @Sendable (CandidateChain, TaskID) async throws -> ResultCheck? = { chain, task in
+            counter.hit()
+            return try await chain.check(task)
+        }
+        let lookup = cache.lookup(state: state, store: f.store, chain: chain, chainCheck: countingCheck)
         #expect(try await lookup(task) == .empty)
         #expect(try await lookup(task) == .empty)
+        #expect(counter.count == 1)
         let pending = try await PendingDecisions.collect(
             state, project: f.project, gate: { _ in [] }, openFindings: { _ in false }, resultCheck: lookup, chainIssue: { await chain.issue($0) }
         )
         #expect(pending.contains(.result(task)))
+        #expect(counter.count == 1)
+        // The task moved on: exactly one more check, then cached again.
+        var moved = state
+        moved.tasks[task]?.version += 1
+        let movedLookup = cache.lookup(state: moved, store: f.store, chain: chain, chainCheck: countingCheck)
+        #expect(try await movedLookup(task) == .empty)
+        #expect(counter.count == 2)
+        #expect(try await movedLookup(task) == .empty)
+        #expect(counter.count == 2)
         await f.close()
     }
 }

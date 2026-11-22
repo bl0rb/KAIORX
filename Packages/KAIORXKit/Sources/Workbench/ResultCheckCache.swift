@@ -68,12 +68,20 @@ public actor ResultCheckCache {
     public nonisolated func lookup(
         state: WorkspaceState, store: Store, chain: CandidateChain?
     ) -> @Sendable (TaskID) async throws -> ResultCheck? {
+        lookup(state: state, store: store, chain: chain) { chain, task in try await chain.check(task) }
+    }
+
+    /// `lookup` with the call of the chain's check passed in, so tests can count it.
+    nonisolated func lookup(
+        state: WorkspaceState, store: Store, chain: CandidateChain?,
+        chainCheck: @escaping @Sendable (CandidateChain, TaskID) async throws -> ResultCheck?
+    ) -> @Sendable (TaskID) async throws -> ResultCheck? {
         { [self] task in
             guard let chain else { return nil }
             var tip: String?
             if let job = state.tasks[task]?.jobID { tip = try await store.integrationTip(job: job) }
             let key = Self.key(task, in: state, tip: tip, issue: await chain.issue(task))
-            return try await check(task, key: key) { try await chain.check(task) }
+            return try await check(task, key: key) { try await chainCheck(chain, task) }
         }
     }
 }
