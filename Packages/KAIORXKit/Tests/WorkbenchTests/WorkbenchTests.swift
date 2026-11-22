@@ -59,6 +59,7 @@ func sh(_ script: String, in directory: String) async throws -> String {
         let checks: [ResultCheck] = [
             .notApplicable, .awaitingSeal, .planTaskMissing, .empty, .contained(tip: "t"), .rejectedOnly(rejected: ["a": "symlink"]),
             .undeclared(resultOID: "r", rejected: ["a": "symlink", "b": "symlink"]), .buildable(resultOID: "r"), .candidate(CandidateID()),
+            .supersededContained(tip: "t"),
         ]
         let results = checks.map { Labels.result($0, issue: nil) }
         #expect(Set(results.map(\.text)).count == checks.count && results.allSatisfy { !$0.symbol.isEmpty })

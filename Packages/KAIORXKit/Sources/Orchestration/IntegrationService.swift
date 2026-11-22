@@ -477,6 +477,22 @@ public actor IntegrationService {
         try await store.acceptEmptyResult(taskID, expectedVersion: task.version, integratedOID: tip)
     }
 
+    /// A superseded candidate's result that `tip` already contains, accepted as done (ADR 0011 §10):
+    /// checked against Git, then integrated at `tip` in one store transaction, which also checks
+    /// that `tip` is still the integration state and that the task is still at `expectedVersion`.
+    public func acceptContainedResult(_ taskID: TaskID, expectedVersion: Int, tip: String) async throws {
+        guard let task = try await store.task(taskID), let attemptID = task.currentAttemptID,
+              let attempt = try await store.attempt(attemptID), attempt.role == .author, attempt.state == .succeeded,
+              let treeID = attempt.worktreeID else { throw IntegrationError.resultNotEmpty(taskID) }
+        let tree = try await workspace.worktree(treeID)
+        // Ancestry against a fixed commit cannot change; the store compares the tip atomically.
+        guard tree.sealStatus == .committed, let result = tree.resultOID,
+              try await git.isAncestor(result, of: tip, in: try await workspace.attach(tree.projectID)) else {
+            throw IntegrationError.resultNotEmpty(taskID)
+        }
+        try await store.acceptContainedResult(taskID, expectedVersion: expectedVersion, authorAttempt: attemptID, integratedOID: tip)
+    }
+
     // MARK: Approval and publication
 
     /// The user's approval, bound to the candidate's commit and the target state it was built
@@ -503,11 +519,12 @@ public actor IntegrationService {
     }
 
     /// The user rejects a candidate (built, testing, reviewing, accepted or conflicted) with a
-    /// reason; its task follows (`needsChanges`, a revert task ends).
-    public func rejectCandidate(_ id: CandidateID, reason: String) async throws {
+    /// reason; its task follows (`needsChanges`, a revert task ends). The reason is marked as the
+    /// user's (`actor`), so it goes to the task's next author (`Store.reworkReason`).
+    public func rejectCandidate(_ id: CandidateID, reason: String, actor: String = "user") async throws {
         guard !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw IntegrationError.reasonRequired }
         guard let candidate = try await store.candidate(id) else { throw IntegrationError.candidateNotIn(id, .rejected) }
-        try await reject(candidate, reason: reason)
+        try await reject(candidate, reason: reason, actor: actor)
     }
 
     /// Publishes exactly the approved commit with `update-ref <target> <C> <P>`.
@@ -712,10 +729,10 @@ public actor IntegrationService {
     }
 
     /// Rejects the candidate; its task follows in the same transaction (`needsChanges`, a revert
-    /// task ends).
-    private func reject(_ candidate: CandidateRecord, reason: String) async throws {
+    /// task ends). Automatic rejections pass no `actor`: their reason never reaches an author.
+    private func reject(_ candidate: CandidateRecord, reason: String, actor: String? = nil) async throws {
         try await store.transitionCandidate(
-            candidate.id, to: .rejected, reason: reason, onlyFrom: [.built, .testing, .reviewing, .accepted, .conflicted]
+            candidate.id, to: .rejected, reason: reason, onlyFrom: [.built, .testing, .reviewing, .accepted, .conflicted], actor: actor
         )
     }
 

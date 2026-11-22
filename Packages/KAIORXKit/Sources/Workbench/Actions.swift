@@ -119,7 +119,7 @@ public struct WorkbenchActions: Sendable {
 
     public func reject(_ candidate: CandidateID, reason: String) async throws {
         guard let integration = services.integration else { throw ActionError.unavailable("Integration") }
-        try await integration.rejectCandidate(candidate, reason: reason)
+        try await integration.rejectCandidate(candidate, reason: reason, actor: WorkbenchActor.user)
     }
 
     public func decideFinding(_ finding: FindingID, accept: Bool, reason: String) async throws {

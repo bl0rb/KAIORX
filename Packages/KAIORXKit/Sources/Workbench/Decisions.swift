@@ -19,7 +19,8 @@ public enum PendingDecision: Sendable, Equatable, Hashable, Identifiable {
     /// A candidate in review with findings that need a decision.
     case findings(CandidateID)
     /// A sealed result the driver does not build on its own (ADR 0011): undeclared paths, an
-    /// empty or already contained result, only rejected changes, or a missing plan task.
+    /// empty or already contained result, only rejected changes, a missing plan task, or a
+    /// superseded candidate's result already contained after a rebuild (§10).
     case result(TaskID)
     /// A conflicted candidate whose conflicts wait for the user's resolution.
     case conflicts(CandidateID)
@@ -49,7 +50,7 @@ public enum PendingDecisions {
     /// Whether a result check leaves the next step to the user (ADR 0011).
     public static func needsUser(_ check: ResultCheck) -> Bool {
         switch check {
-        case .empty, .contained, .rejectedOnly, .undeclared, .planTaskMissing: true
+        case .empty, .contained, .supersededContained, .rejectedOnly, .undeclared, .planTaskMissing: true
         case .notApplicable, .awaitingSeal, .buildable, .candidate: false
         }
     }
@@ -100,10 +101,17 @@ public enum PendingDecisions {
             if let reason = task.waitReason.flatMap(WaitReason.init(stored:)), userKinds.contains(reason.kind) {
                 result.append(.task(task.id, reason))
             }
-            // A held task is not offered: its result decisions need `resultReady`.
-            guard task.state == .resultReady, state.openCandidate(of: task.id) == nil else { continue }
+            // A held task is not offered: its result decisions need `resultReady`, or past it a
+            // superseded result the integration state already contains (ADR 0011 §10).
+            let past = task.state == .verifying || task.state == .awaitingMerge
+            guard task.state == .resultReady || past, state.openCandidate(of: task.id) == nil else { continue }
             // A check that fails (for example a moved checkout) leaves only this task out.
             let check = (try? await resultCheck(task.id)) ?? nil
+            if past {
+                // A driver issue of a task past its result (a failed rebuild) is no result decision.
+                if case .supersededContained? = check { result.append(.result(task.id)) }
+                continue
+            }
             let issue = await chainIssue(task.id)
             if check.map(needsUser) == true || needsUser(issue) {
                 result.append(.result(task.id))
@@ -189,7 +197,10 @@ public struct DecisionSheet: Sendable, Equatable {
         DecisionSheet(
             title: "Kandidat ablehnen",
             action: "Den Kandidaten \(Labels.short(candidate.candidateOID ?? "–")) ablehnen.",
-            scope: ["Aufgabe: \(task?.title ?? "–")", "Freigaben dieses Kandidaten werden widerrufen."],
+            scope: [
+                "Aufgabe: \(task?.title ?? "–")", "Freigaben dieses Kandidaten werden widerrufen.",
+                "Die Begründung geht an den nächsten Autor dieser Aufgabe.",
+            ],
             ifRejected: "Wenn du nicht ablehnst, bleibt der Kandidat im aktuellen Zustand.",
             approveLabel: "Ablehnen", rejectLabel: "Abbrechen", reported: nil, blockers: [], shown: nil
         )
@@ -211,9 +222,10 @@ public struct DecisionSheet: Sendable, Equatable {
     }
 
     /// More attempts for a task that stopped for the user's decision.
-    /// A task waiting for rework after a rejection gets its own sheet (`rework`).
-    public static func moreAttempts(_ task: TaskRecord, reason: WaitReason) -> DecisionSheet {
-        if reason.detail == "rework" { return rework(task) }
+    /// A task waiting for rework after a rejection gets its own sheet (`rework`), with the user's
+    /// reason the next author gets (`Store.reworkReason`).
+    public static func moreAttempts(_ task: TaskRecord, reason: WaitReason, rework reworkReason: ReworkReason? = nil) -> DecisionSheet {
+        if reason.detail == "rework" { return rework(task, reason: reworkReason) }
         return DecisionSheet(
             title: "Weitere Versuche erlauben",
             action: "Für „\(task.title)“ weitere Versuche erlauben; die Zählung beginnt neu.",
@@ -228,19 +240,28 @@ public struct DecisionSheet: Sendable, Equatable {
 
     /// A task back in `needsChanges` without a counted failure (its candidate was rejected, or
     /// nothing was left to integrate): it returns to an author only with the user's grant
-    /// (ADR 0011 §6). The approval is the same grant as „Weitere Versuche erlauben“.
-    public static func rework(_ task: TaskRecord) -> DecisionSheet {
+    /// (ADR 0011 §6). The approval is the same grant as „Weitere Versuche erlauben“. `reason` is
+    /// the user's own reason the next author gets, if any.
+    public static func rework(_ task: TaskRecord, reason: ReworkReason? = nil) -> DecisionSheet {
         DecisionSheet(
             title: "Nacharbeit erlauben",
             action: "„\(task.title)“ erneut von einem Autor bearbeiten lassen; die Zählung der Versuche beginnt neu.",
             scope: [
                 "Grund des Halts: \(stopReason("rework"))",
-                "Der Grund der Ablehnung geht nicht an den Autor; er bekommt die Aufgabe wie beim ersten Lauf.",
+                reworkLine(reason),
                 "Jeder Versuch kann beim Anbieter Kontingent und Budget verbrauchen.",
             ],
             ifRejected: "Die Aufgabe bleibt bei „Änderungen nötig“ stehen; es startet kein neuer Lauf.",
             approveLabel: "Nacharbeit erlauben", rejectLabel: "Nicht jetzt", reported: nil, blockers: [], shown: nil
         )
+    }
+
+    /// What the next author gets of the user's reason.
+    static func reworkLine(_ reason: ReworkReason?) -> String {
+        guard let reason else { return "Es liegt kein Grund von dir vor; der Autor bekommt die Aufgabe wie beim ersten Lauf." }
+        if ReworkPrompt.isWithheld(reason) { return "Dein Grund sieht nach einem Geheimnis aus und geht nicht an den Autor." }
+        let text = reason.text.count > 200 ? String(reason.text.prefix(200)) + " […]" : reason.text
+        return "Dein Grund geht an den nächsten Autor: „\(text)“"
     }
 
     static func stopReason(_ detail: String) -> String {

@@ -289,10 +289,11 @@ extension Store {
     /// With `onlyFrom`, nothing happens unless the current state is one of them (decided in the
     /// same transaction, so a concurrent change cannot be overwritten from a stale snapshot).
     /// With `atVersion`, nothing happens if evidence arrived since that version was read.
+    /// `actor` marks the user's own move (a rejection): its reason may go to the next author.
     @discardableResult
     public func transitionCandidate(
         _ id: CandidateID, to target: CandidateState, candidateOID: String? = nil, conflicts: [String]? = nil, reason: String? = nil,
-        onlyFrom: Set<CandidateState>? = nil, atVersion: Int? = nil
+        onlyFrom: Set<CandidateState>? = nil, atVersion: Int? = nil, actor: String? = nil
     ) throws -> CandidateRecord {
         let db = try connection()
         let now = currentTime()
@@ -300,7 +301,9 @@ extension Store {
             let candidate = try loadCandidate(db, id)
             if let onlyFrom, !onlyFrom.contains(candidate.state) { return candidate }
             if let atVersion, candidate.version != atVersion { return candidate }
-            try changeCandidate(db, candidate, to: target, candidateOID: candidateOID, conflicts: conflicts, reason: reason, now: now)
+            try changeCandidate(
+                db, candidate, to: target, candidateOID: candidateOID, conflicts: conflicts, reason: reason, now: now, actor: actor
+            )
             return try loadCandidate(db, id)
         }
     }
@@ -662,7 +665,7 @@ extension Store {
 
     private func changeCandidate(
         _ db: SQLiteConnection, _ candidate: CandidateRecord, to target: CandidateState, candidateOID: String?, conflicts: [String]?,
-        reason: String?, now: Int64, moveTask: Bool = true
+        reason: String?, now: Int64, moveTask: Bool = true, actor: String? = nil
     ) throws {
         try candidate.state.validateTransition(to: target)
         try db.run(
@@ -685,10 +688,54 @@ extension Store {
             attemptID: nil,
             payload: Canonical.encode(StateChange(
                 entityID: candidate.id.uuidString, from: candidate.state.rawValue, to: target.rawValue,
-                reason: try contentPurged(db, candidate) ? reason.map { _ in Self.purgedText } : reason
+                reason: try contentPurged(db, candidate) ? reason.map { _ in Self.purgedText } : reason,
+                actor: actor, attemptID: actor == nil ? nil : candidate.authorAttemptID?.uuidString
             )),
             dedupKey: nil, now: now
         )
+    }
+
+    /// The user's reason for sending the task's last result back, for the next author prompt: the
+    /// newest rejection by the user of a candidate built from the last succeeded author attempt,
+    /// or the user's discard of that attempt (ADR 0011, rework reason). nil when there is none,
+    /// when its payload or the attempt's content was forgotten, or when it is empty. Automatic
+    /// rejections carry no `actor` and never count. Read in one transaction (one snapshot).
+    public func reworkReason(task: TaskID) throws -> ReworkReason? {
+        let db = try connection()
+        return try db.transaction {
+            guard let anchor = try db.query(
+                """
+                SELECT id, content_purged_at FROM attempt WHERE task_id = ? AND role = 'author' AND state = 'succeeded'
+                ORDER BY ordinal DESC LIMIT 1
+                """,
+                [.text(task.uuidString)], { (id: try $0.requiredText(0), purgedAt: $0.optionalInt(1)) }
+            ).first, anchor.purgedAt == nil else { return nil }
+            let payload = "CAST(p.inline_content AS TEXT)"
+            guard let row = try db.query(
+                """
+                SELECT e.kind, e.at, \(payload) FROM event e JOIN artifact p ON p.id = e.payload_id
+                WHERE e.task_id = ?1 AND e.attempt_id IS NULL AND e.payload_purged_at IS NULL
+                  AND json_extract(\(payload), '$.actor') IS NOT NULL
+                  AND ((e.kind = 'candidate.stateChanged' AND json_extract(\(payload), '$.to') = 'rejected'
+                        AND json_extract(\(payload), '$.entityID') IN (SELECT id FROM candidate WHERE author_attempt_id = ?2))
+                    OR (e.kind = 'task.stateChanged' AND json_extract(\(payload), '$.to') = 'needsChanges'
+                        AND json_extract(\(payload), '$.attemptID') = ?2))
+                ORDER BY e.seq DESC LIMIT 1
+                """,
+                [.text(task.uuidString), .text(anchor.id)], { (kind: try $0.requiredText(0), at: $0.int(1), json: $0.text(2)) }
+            ).first, let json = row.json else { return nil }
+            struct Stored: Decodable {
+                var entityID: String
+                var reason: String?
+            }
+            let stored = try JSONDecoder().decode(Stored.self, from: Data(json.utf8))
+            guard let text = stored.reason, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text != Self.purgedText else {
+                return nil
+            }
+            let source: ReworkReason.Source = row.kind == EventKind.candidateStateChanged.rawValue
+                ? .rejected(try parseID(stored.entityID)) : .discarded
+            return ReworkReason(source: source, attemptID: try parseID(anchor.id), text: text, at: row.at)
+        }
     }
 
     /// The candidate's author attempt had its content forgotten: texts that arrive later about

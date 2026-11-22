@@ -262,8 +262,8 @@ public actor CandidateChain {
                 report.conflicted.append(candidate.id)
                 clearIssue(taskID)
             case .alreadyContained:
-                // The tip moved meanwhile: the next `check` says `.contained`. A rebuild cannot
-                // be accepted as empty (`acceptEmptyResult` needs `resultReady`): a known limit.
+                // The tip moved meanwhile: the next `check` says `.contained`. After a rebuild
+                // the user accepts it (`ResultCheck.supersededContained`).
                 if rebuild { await fail(taskID, .containedAfterRebuild, report: &report) }
             }
         } catch IntegrationError.taskNotInVerification, IntegrationStoreError.openCandidateExists {
@@ -283,6 +283,7 @@ public actor CandidateChain {
     public func check(_ taskID: TaskID) async throws -> ResultCheck {
         guard let task = try await store.task(taskID) else { throw StoreError.notFound(entity: "task", id: taskID.uuidString) }
         if let open = try await openCandidate(of: task) { return .candidate(open.id) }
+        if task.state == .verifying || task.state == .awaitingMerge { return try await supersededContained(task) ?? .notApplicable }
         guard Self.waitsWithResult(task), case let (attempt, tree)? = try await authorResult(task) else { return .notApplicable }
         guard let status = tree.sealStatus else {
             if case .missing = await writeArea(task, attempt: attempt) { return .planTaskMissing }
@@ -328,17 +329,26 @@ public actor CandidateChain {
         return outcome
     }
 
-    /// Accepts the empty or already contained result the sheet showed as done.
+    /// Accepts the empty, already contained, or contained after a rebuild result the sheet showed
+    /// as done.
     public func acceptEmpty(_ shown: ShownResult) async throws {
         guard claim(shown.task) else { throw ChainError.busy(shown.task) }
         defer { release(shown.task) }
         _ = try await requireShown(shown)
         switch shown.check {
-        case .empty, .contained: break
-        default: throw ChainError.shownStateChanged
+        case .empty, .contained:
+            try await integration.acceptEmptyResult(shown.task)
+        case .supersededContained(let tip):
+            do {
+                try await integration.acceptContainedResult(shown.task, expectedVersion: shown.taskVersion, tip: tip)
+            } catch StoreError.versionConflict, PlanningError.emptyResultNotAcceptable {
+                throw ChainError.shownStateChanged
+            }
+        default:
+            throw ChainError.shownStateChanged
         }
-        try await integration.acceptEmptyResult(shown.task)
         clearIssue(shown.task)
+        given[shown.task] = nil
     }
 
     /// Clears the task's backoff and its refused collects, so the next pass tries again.
@@ -411,26 +421,32 @@ public actor CandidateChain {
     /// Discards the result the sheet showed (ADR 0011 §7) under the task's lock, so no build of
     /// the driver runs meanwhile: checks that the task is still exactly where the sheet saw it,
     /// then grants and moves it to `needsChanges` in one store transaction
-    /// (`Store.discardResult`); on any failure nothing is recorded.
-    public func discard(_ shown: ShownResult, actor: String) async throws {
-        try await discard(shown, actor: actor, afterCheck: {})
+    /// (`Store.discardResult`); on any failure nothing is recorded. The user's optional `reason` is
+    /// stored with the move (never in the grant, which a forget does not purge) and goes to the
+    /// next author (`Store.reworkReason`).
+    public func discard(_ shown: ShownResult, reason: String? = nil, actor: String) async throws {
+        try await discard(shown, reason: reason, actor: actor, afterCheck: {})
     }
 
     /// `afterCheck` runs under the lock between the shown-state check and the store transaction
     /// (test seam).
-    func discard(_ shown: ShownResult, actor: String, afterCheck: @Sendable () async -> Void) async throws {
+    func discard(_ shown: ShownResult, reason: String? = nil, actor: String, afterCheck: @Sendable () async -> Void) async throws {
         guard claim(shown.task) else { throw ChainError.busy(shown.task) }
         defer { release(shown.task) }
         switch shown.check {
-        case .notApplicable, .candidate: throw ChainError.shownStateChanged
+        case .notApplicable, .candidate, .supersededContained: throw ChainError.shownStateChanged
         default: break
         }
         _ = try await requireShown(shown)
         guard let task = try await store.task(shown.task), task.state == .resultReady else { throw ChainError.shownStateChanged }
+        // The attempt `requireShown` just checked: the reason is about its result.
+        guard let attempt = task.currentAttemptID else { throw ChainError.shownStateChanged }
         await afterCheck()
         do {
-            try await store.discardResult(task: task.id, expectedVersion: shown.taskVersion, actor: actor)
+            try await store.discardResult(task: task.id, expectedVersion: shown.taskVersion, attempt: attempt, reason: reason, actor: actor)
         } catch let error as StoreError where error.isVersionConflict {
+            throw ChainError.shownStateChanged
+        } catch StoreError.notFound(entity: "result", id: _) {
             throw ChainError.shownStateChanged
         } catch is DomainError {
             throw ChainError.shownStateChanged
@@ -564,6 +580,20 @@ public actor CandidateChain {
         guard let id = task.currentAttemptID, let attempt = try await store.attempt(id), attempt.role == .author,
               attempt.state == .succeeded, let treeID = attempt.worktreeID, let tree = try await store.worktree(treeID) else { return nil }
         return (attempt, tree)
+    }
+
+    /// A task past its result whose superseded candidate's result the integration state already
+    /// contains (ADR 0011 §10). Derived from stored facts only, so it holds across a restart.
+    private func supersededContained(_ task: TaskRecord) async throws -> ResultCheck? {
+        guard case let (attempt, tree)? = try await authorResult(task), tree.sealStatus == .committed, let result = tree.resultOID else {
+            return nil
+        }
+        let own = try await store.candidates(jobID: task.jobID).filter { $0.taskID == task.id && $0.authorAttemptID == attempt.id }
+        guard own.contains(where: { $0.state == .superseded && $0.kind == .implementation }),
+              !own.contains(where: { $0.state == .published || $0.state == .rejected }),
+              let tip = try await store.integrationTip(job: task.jobID),
+              try await git.isAncestor(result, of: tip, in: try await workspace.attach(tree.projectID)) else { return nil }
+        return .supersededContained(tip: tip)
     }
 
     private func openCandidate(of task: TaskRecord) async throws -> CandidateRecord? {

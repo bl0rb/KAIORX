@@ -259,8 +259,7 @@ public enum Labels {
         case .collectFailed(let detail): "Review konnte nicht übernommen werden: \(detail)"
         case .planTaskMissing: "Die Planaufgabe fehlt in der Planfassung des Laufs; das Ergebnis wird nicht versiegelt."
         case .containedAfterRebuild:
-            // A known limit (ADR 0011): the task stays in verification, there is no action for it.
-            "Nach dem Neubau ist das Ergebnis schon im Integrationsstand enthalten; es wird kein neuer Kandidat gebaut. Die Aufgabe bleibt in der Prüfung stehen."
+            "Nach dem Neubau ist das Ergebnis schon im Integrationsstand enthalten; es wird kein neuer Kandidat gebaut. Du kannst die Aufgabe als erledigt annehmen."
         }
     }
 
@@ -292,6 +291,7 @@ public enum Labels {
         case .planTaskMissing: return StatusLabel("Planaufgabe fehlt", "exclamationmark.triangle", .warning)
         case .empty: return StatusLabel("Leer: der Lauf hat nichts geändert", "tray", .waiting)
         case .contained: return StatusLabel("Schon im Integrationsstand enthalten", "checkmark.circle", .waiting)
+        case .supersededContained: return StatusLabel("Nach Neubau schon im Integrationsstand enthalten", "checkmark.circle", .waiting)
         case .rejectedOnly: return StatusLabel("Nur verworfene Änderungen", "xmark.bin", .warning)
         case .undeclared(_, let rejected) where onlyUnknownPaths(rejected):
             return StatusLabel("Verworfene Pfade unbekannt – Bestätigung nötig", "exclamationmark.shield", .waiting)

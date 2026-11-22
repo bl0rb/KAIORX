@@ -15,6 +15,8 @@ extension AppModel {
     /// - `undeclared`: a sealed plan-task result whose seal dropped `NOTIZ.md`.
     /// - `empty`: a sealed result of a run that changed nothing.
     /// - `conflicted`: a conflicted candidate on `KONFLIKT.md`.
+    /// - `containedAfterRebuild`: an accepted candidate superseded by its own commit; the rebuild
+    ///   finds the result already contained (ADR 0011 §10).
     /// Returns the job and task to select, or nil for an unknown seed or a failed step.
     func seedChainForUITests(_ services: AppServices, seed: String) async -> (job: JobID, task: TaskID)? {
         guard let repo = launch.uiTestRepository else { return nil }
@@ -34,6 +36,9 @@ extension AppModel {
                 return (seeded.job, seeded.task)
             case "conflicted":
                 let seeded = try await UITestSeed.conflicted(services: services, project: project, title: "Konflikt anlegen")
+                return (seeded.job, seeded.task)
+            case "containedAfterRebuild":
+                let seeded = try await UITestSeed.containedAfterRebuild(services: services, project: project, title: "Schon enthalten nach Neubau")
                 return (seeded.job, seeded.task)
             default:
                 return nil

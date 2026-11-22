@@ -677,6 +677,11 @@ public actor Store {
         var from: String
         var to: String
         var reason: String?
+        /// Set only on the user's own move (a rejection, a discard): its reason may go to the next
+        /// author (`reworkReason`). Absent otherwise, so earlier payloads keep their bytes.
+        var actor: String? = nil
+        /// The author attempt the user's move is about; the forget purges by it (ADR 0006 §7).
+        var attemptID: String? = nil
     }
 
     struct LoadedTask {
@@ -690,12 +695,16 @@ public actor Store {
     }
 
     /// A task transition as `Command(.transitionTask)` applies it (version, command rules,
-    /// journal), inside the caller's transaction.
-    func transitionTask(_ db: SQLiteConnection, _ id: TaskID, to target: TaskState, expectedVersion: Int, now: Int64) throws {
+    /// journal), inside the caller's transaction. `reason`, `actor` and `attemptID` go into the
+    /// event payload (`StateChange`); a command passes none.
+    func transitionTask(
+        _ db: SQLiteConnection, _ id: TaskID, to target: TaskState, expectedVersion: Int, now: Int64,
+        reason: String? = nil, actor: String? = nil, attemptID: String? = nil
+    ) throws {
         let task = try loadTask(db, id)
         try checkVersion(entity: "task", id: id.uuidString, expected: expectedVersion, actual: task.record.version)
         try checkTaskCommand(db, task, to: target)
-        try changeTaskState(db, task, to: target, reason: nil, now: now)
+        try changeTaskState(db, task, to: target, reason: reason, now: now, actor: actor, attemptID: attemptID)
     }
 
     /// Commands may not enter `running` except as the resume of a side state whose author attempt
@@ -740,7 +749,9 @@ public actor Store {
     }
 
     /// Validates, applies and journals a task transition, keeping the resume state of side states.
-    func changeTaskState(_ db: SQLiteConnection, _ task: LoadedTask, to target: TaskState, reason: String?, now: Int64) throws {
+    func changeTaskState(
+        _ db: SQLiteConnection, _ task: LoadedTask, to target: TaskState, reason: String?, now: Int64, actor: String? = nil, attemptID: String? = nil
+    ) throws {
         let current = task.record.state
         try current.validateTransition(to: target, resumeState: task.record.resumeState)
         let resume = current.resumeState(after: target, current: task.record.resumeState)
@@ -750,7 +761,9 @@ public actor Store {
         )
         try appendEvent(
             db, kind: .taskStateChanged, projectID: task.projectID, taskID: task.record.id.uuidString, attemptID: nil,
-            payload: Canonical.encode(StateChange(entityID: task.record.id.uuidString, from: current.rawValue, to: target.rawValue, reason: reason)),
+            payload: Canonical.encode(StateChange(
+                entityID: task.record.id.uuidString, from: current.rawValue, to: target.rawValue, reason: reason, actor: actor, attemptID: attemptID
+            )),
             dedupKey: nil, now: now
         )
         if target == .ready || target == .needsChanges || (target.isTerminal && target != .integrated) {
