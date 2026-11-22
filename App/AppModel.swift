@@ -234,6 +234,8 @@ final class AppModel {
     }
 
     private var decisionGeneration = 0
+    /// The chain's result checks (Git calls), reused per task while nothing they read changed.
+    private let resultChecks = ResultCheckCache()
 
     /// Rebuilds the pending decisions from the current state; a refresh that finishes after a
     /// newer one started is dropped, so an older state never overwrites a newer list.
@@ -243,6 +245,8 @@ final class AppModel {
         let generation = decisionGeneration
         let integration = services.integration
         let chain = services.chain
+        let state = state
+        await resultChecks.keep(only: Set(state.tasks.keys))
         // A lookup that fails for one task or candidate drops only that entry (`collect`); should
         // the whole collection fail, the last list stays instead of an empty one.
         guard let collected = try? await PendingDecisions.collect(
@@ -252,7 +256,7 @@ final class AppModel {
                 let findings = try await services.store.findings(candidate: id)
                 return findings.contains { $0.severity.needsDecision && $0.disposition == .open }
             },
-            resultCheck: { id in try await chain?.check(id) },
+            resultCheck: resultChecks.lookup(state: state, store: services.store, chain: chain),
             chainIssue: { id in await chain?.issue(id) }
         ) else { return }
         if generation == decisionGeneration { pending = collected }

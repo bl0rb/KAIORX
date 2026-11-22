@@ -124,7 +124,8 @@ public enum PendingDecisions {
         return result
     }
 
-    static func collectFailed(_ issue: ChainIssue?) -> Bool {
+    /// Whether the driver refused to collect a finished reviewer of the task.
+    public static func collectFailed(_ issue: ChainIssue?) -> Bool {
         if case .collectFailed? = issue { return true }
         return false
     }

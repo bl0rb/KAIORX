@@ -200,6 +200,13 @@ extension WorkbenchActions {
         await chain.retryBuild(task)
     }
 
+    /// Forgets the review collects the driver refused for the task, so its next pass collects
+    /// the finished reviewers again. Starts no provider.
+    public func retryCollect(_ task: TaskID) async throws {
+        let chain = try requireChain()
+        await chain.retryCollect(task)
+    }
+
     /// The conflicting paths of a conflicted candidate with their kinds, and the commits the
     /// side diffs read between. Read-only.
     public func conflictPreview(_ candidate: CandidateID) async throws -> ConflictPreview {
