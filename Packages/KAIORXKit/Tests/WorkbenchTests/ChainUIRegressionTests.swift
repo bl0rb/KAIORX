@@ -171,7 +171,12 @@ import Testing
         #expect(DecisionSheet.moreAttempts(waiting, reason: reason).scope.contains("Es liegt kein Grund von dir vor; der Autor bekommt die Aufgabe wie beim ersten Lauf."))
         let secret = ReworkReason(source: .discarded, attemptID: AttemptID(), text: "password = geheim1234", at: 1)
         #expect(DecisionSheet.rework(waiting, reason: secret).scope.contains("Dein Grund sieht nach einem Geheimnis aus und geht nicht an den Autor."))
-        #expect(DecisionSheet.rejectCandidate(candidate, task: waiting).scope.contains("Die Begründung geht an den nächsten Autor dieser Aufgabe."))
+        #expect(DecisionSheet.rejectCandidate(candidate, task: waiting).scope.contains("Die Begründung geht an den nächsten Autor dieser Aufgabe, außer sie sieht nach einem Geheimnis aus."))
+        var revert = candidate
+        revert.kind = .revert
+        let revertScope = DecisionSheet.rejectCandidate(revert, task: waiting).scope
+        #expect(revertScope.contains("Die Rücknahme endet mit der Ablehnung; die Begründung bleibt nur im Verlauf."))
+        #expect(revertScope.allSatisfy { !$0.contains("nächsten Autor") })
         #expect(sheet.scope.allSatisfy { !$0.contains("Startfehler") })
         // The other user decisions keep their reasons; an unknown one claims no cause.
         #expect(DecisionSheet.moreAttempts(waiting, reason: WaitReason(.userDecision, "startRetries")).scope.contains("Grund des Halts: Wiederholte Startfehler"))

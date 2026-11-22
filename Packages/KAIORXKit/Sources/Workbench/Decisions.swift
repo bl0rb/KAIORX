@@ -199,11 +199,20 @@ public struct DecisionSheet: Sendable, Equatable {
             action: "Den Kandidaten \(Labels.short(candidate.candidateOID ?? "–")) ablehnen.",
             scope: [
                 "Aufgabe: \(task?.title ?? "–")", "Freigaben dieses Kandidaten werden widerrufen.",
-                "Die Begründung geht an den nächsten Autor dieser Aufgabe.",
+                rejectionReasonLine(candidate.kind),
             ],
             ifRejected: "Wenn du nicht ablehnst, bleibt der Kandidat im aktuellen Zustand.",
             approveLabel: "Ablehnen", rejectLabel: "Abbrechen", reported: nil, blockers: [], shown: nil
         )
+    }
+
+    /// What happens to a rejection reason: a revert task ends with its candidate, so no author
+    /// gets it; a reason that looks like a secret is withheld from the next author.
+    public static func rejectionReasonLine(_ kind: CandidateKind) -> String {
+        switch kind {
+        case .revert: "Die Rücknahme endet mit der Ablehnung; die Begründung bleibt nur im Verlauf."
+        case .implementation: "Die Begründung geht an den nächsten Autor dieser Aufgabe, außer sie sieht nach einem Geheimnis aus."
+        }
     }
 
     /// The explicit start of a task that waits for the user.

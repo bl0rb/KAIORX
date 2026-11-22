@@ -126,10 +126,18 @@ struct RejectSheet: View {
     let candidate: CandidateID
     @State private var reason = ""
 
+    private var rejectText: String {
+        let kind = model.state.candidates[candidate]?.kind ?? .implementation
+        let consequence = kind == .revert
+            ? "Freigaben dieses Kandidaten werden widerrufen."
+            : "Die Aufgabe geht zurück zur Überarbeitung; Freigaben dieses Kandidaten werden widerrufen."
+        return consequence + " " + DecisionSheet.rejectionReasonLine(kind)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Kandidat ablehnen").font(.headline)
-            Text("Die Aufgabe geht zurück zur Überarbeitung; Freigaben dieses Kandidaten werden widerrufen. Die Begründung geht an den nächsten Autor dieser Aufgabe.")
+            Text(rejectText)
             TextField("Begründung", text: $reason, axis: .vertical).lineLimit(3...6).accessibilityIdentifier("rejectReason")
             HStack {
                 Spacer()

@@ -319,7 +319,8 @@ final class CandidateChainUITests: XCTestCase {
         app.typeKey(.return, modifierFlags: [])
         XCTAssertFalse(element("sheetResult").waitForExistence(timeout: 2), "Return in the reason field discarded")
         XCTAssertTrue(waitForLabel(element("taskStatus"), containing: "Ergebnis liegt vor", timeout: 5))
-        app.buttons["decisionReject"].click()
+        // Return may take the safe choice and close the sheet; close it if it is still open.
+        if app.buttons["decisionReject"].exists { app.buttons["decisionReject"].click() }
         XCTAssertTrue(app.buttons["decisionApprove"].waitForNonExistence(timeout: 5))
         // Escape takes the same safe choice.
         discard.click()
