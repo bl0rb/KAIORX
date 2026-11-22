@@ -4,10 +4,11 @@ import ProcessHost
 import ProviderFixtures
 import Synchronization
 import Testing
+import TestSupport
 @testable import Providers
 
 func workspace() throws -> String {
-    let url = FileManager.default.temporaryDirectory.appending(path: "kaiorx-adapter-\(UUID().uuidString)")
+    let url = try Scratch.directory("adapter")
     try FileManager.default.createDirectory(at: url.appending(path: "work"), withIntermediateDirectories: true)
     return Confinement.resolved(url.path(percentEncoded: false))
 }

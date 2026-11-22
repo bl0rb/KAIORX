@@ -2,6 +2,7 @@ import Domain
 import Foundation
 import ProcessHost
 import Testing
+import TestSupport
 @testable import Orchestration
 @testable import Storage
 @testable import Workspace
@@ -20,7 +21,7 @@ struct ServiceHarness {
     let task = TaskID()
 
     init() async throws {
-        let base = FileManager.default.temporaryDirectory.appending(path: "kaiorx-svc-\(UUID().uuidString)")
+        let base = try Scratch.directory("svc")
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let root = Confinement.resolved(base.path(percentEncoded: false))
         checkout = root + "/user"

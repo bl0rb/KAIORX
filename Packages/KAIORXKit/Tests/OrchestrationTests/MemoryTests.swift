@@ -5,6 +5,7 @@ import ProcessHost
 import Providers
 import Synchronization
 import Testing
+import TestSupport
 @testable import Orchestration
 @testable import Storage
 @testable import Workspace
@@ -127,7 +128,7 @@ struct MemoryHarness {
     }
 
     @Test func theIndexSurvivesARestartAndChecksOut() async throws {
-        let base = FileManager.default.temporaryDirectory.appending(path: "kaiorx-mem-\(UUID().uuidString)").path(percentEncoded: false)
+        let base = try Scratch.directory("mem").path(percentEncoded: false)
         try FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true)
         let path = base + "/m.sqlite"
         let project = ProjectID()
@@ -354,7 +355,7 @@ struct MemoryHarness {
     }
 
     @Test func aPurgeJobInterruptedByACrashFinishesAtTheNextStart() async throws {
-        let base = FileManager.default.temporaryDirectory.appending(path: "kaiorx-purge-\(UUID().uuidString)").path(percentEncoded: false)
+        let base = try Scratch.directory("purge").path(percentEncoded: false)
         try FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true)
         let path = base + "/m.sqlite"
         let project = ProjectID()

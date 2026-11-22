@@ -1,10 +1,11 @@
 import Darwin
 import Foundation
 import Testing
+import TestSupport
 @testable import ProcessHost
 
 func scratchDirectory() throws -> String {
-    let url = FileManager.default.temporaryDirectory.appending(path: "kaiorx-proc-\(UUID().uuidString)")
+    let url = try Scratch.directory("proc")
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return Confinement.resolved(url.path(percentEncoded: false))
 }

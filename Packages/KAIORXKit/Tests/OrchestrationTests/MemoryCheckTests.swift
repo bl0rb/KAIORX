@@ -5,6 +5,7 @@ import ProcessHost
 import Providers
 import Synchronization
 import Testing
+import TestSupport
 @testable import Orchestration
 @testable import Storage
 @testable import Workspace
@@ -209,7 +210,7 @@ import Testing
     }
 
     @Test func bootstrapRunsPendingPurgeJobs() async throws {
-        let base = FileManager.default.temporaryDirectory.appending(path: "kaiorx-boot-\(UUID().uuidString)").path(percentEncoded: false)
+        let base = try Scratch.directory("boot").path(percentEncoded: false)
         try FileManager.default.createDirectory(atPath: base, withIntermediateDirectories: true)
         let path = base + "/m.sqlite"
         let backup = path + ".backup-v5-1"

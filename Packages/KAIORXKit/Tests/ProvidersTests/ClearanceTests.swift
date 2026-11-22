@@ -2,6 +2,7 @@ import CryptoKit
 import Domain
 import Foundation
 import Testing
+import TestSupport
 @testable import Providers
 
 @Suite struct DistributionChannelTests {
@@ -32,7 +33,7 @@ import Testing
     }
 
     @Test func theCheckFindsMissingChangedAndMalformedEntries() throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: "kaiorx-clearance-\(UUID().uuidString)").path(percentEncoded: false)
+        let root = try Scratch.directory("clearance").path(percentEncoded: false)
         try FileManager.default.createDirectory(atPath: root + "/docs/provider-clearance", withIntermediateDirectories: true)
         let text = Data("Schriftliche Freigabe (redigiert)\n".utf8)
         try text.write(to: URL(filePath: root + "/docs/provider-clearance/codex.md"))

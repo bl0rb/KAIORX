@@ -3,6 +3,7 @@ import Foundation
 import ProcessHost
 import Providers
 import Testing
+import TestSupport
 @testable import Orchestration
 @testable import Storage
 @testable import Workbench
@@ -10,7 +11,7 @@ import Testing
 
 /// A temporary folder that disappears with the test process.
 func temporaryFolder(_ name: String) throws -> String {
-    let path = FileManager.default.temporaryDirectory.appending(path: "kaiorx-wb-\(name)-\(UUID().uuidString)").path(percentEncoded: false)
+    let path = try Scratch.directory("wb-\(name)").path(percentEncoded: false)
     try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
     return URL(filePath: path).resolvingSymlinksInPath().path(percentEncoded: false)
 }

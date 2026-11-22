@@ -4,6 +4,7 @@ import ProcessHost
 import Providers
 import Synchronization
 import Testing
+import TestSupport
 @testable import Orchestration
 @testable import Storage
 @testable import Workspace
@@ -81,7 +82,7 @@ struct ChainHarness {
     let limits: SchedulerLimits
 
     init(limits: SchedulerLimits = SchedulerLimits(global: 2, perAccount: 2), extraProviders: [ProviderKind] = []) async throws {
-        let base = FileManager.default.temporaryDirectory.appending(path: "kaiorx-chain-\(UUID().uuidString)")
+        let base = try Scratch.directory("chain")
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let root = Confinement.resolved(base.path(percentEncoded: false))
         checkout = root + "/user"

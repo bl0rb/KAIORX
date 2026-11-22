@@ -3,10 +3,11 @@ import Darwin
 import Foundation
 import ProcessHost
 import Testing
+import TestSupport
 @testable import Workspace
 
 func tempDirectory(_ label: String) throws -> String {
-    let url = FileManager.default.temporaryDirectory.appending(path: "kaiorx-\(label)-\(UUID().uuidString)")
+    let url = try Scratch.directory(label)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return Confinement.resolved(url.path(percentEncoded: false))
 }

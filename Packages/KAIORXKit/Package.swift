@@ -44,16 +44,18 @@ let package = Package(
         .executableTarget(name: "kaiorx-dev", dependencies: ["Domain", "Storage", "Providers", "Orchestration"]),
 
         .testTarget(name: "DomainTests", dependencies: ["Domain"]),
-        .testTarget(name: "StorageTests", dependencies: ["Domain", "Storage"]),
+        .testTarget(name: "StorageTests", dependencies: ["Domain", "Storage", "TestSupport"]),
         .testTarget(name: "MemoryTests", dependencies: ["Domain", "Memory"]),
         // Test support: fixture programs that speak the provider protocols, and a JSON Schema checker.
         .target(name: "ProviderFixtures", dependencies: ["Providers"], path: "Tests/ProviderFixtures"),
-        .testTarget(name: "ProvidersTests", dependencies: ["Domain", "Providers", "ProcessHost", "ProviderFixtures"], exclude: ["Fixtures"]),
-        .testTarget(name: "OrchestrationTests", dependencies: ["Domain", "Storage", "Providers", "Orchestration", "ProcessHost", "Workspace", "ProviderFixtures", "Memory", "Workbench"]),
-        .testTarget(name: "ProcessHostTests", dependencies: ["ProcessHost"]),
-        .testTarget(name: "WorkspaceTests", dependencies: ["ProcessHost", "Workspace"]),
-        .testTarget(name: "AcceptanceTests", dependencies: ["Acceptance", "Domain", "Providers", "ProcessHost", "Workspace", "ProviderFixtures"]),
+        // Test support: temporary folders that are removed when the test process exits.
+        .target(name: "TestSupport", path: "Tests/TestSupport"),
+        .testTarget(name: "ProvidersTests", dependencies: ["Domain", "Providers", "ProcessHost", "ProviderFixtures", "TestSupport"], exclude: ["Fixtures"]),
+        .testTarget(name: "OrchestrationTests", dependencies: ["Domain", "Storage", "Providers", "Orchestration", "ProcessHost", "Workspace", "ProviderFixtures", "Memory", "Workbench", "TestSupport"]),
+        .testTarget(name: "ProcessHostTests", dependencies: ["ProcessHost", "TestSupport"]),
+        .testTarget(name: "WorkspaceTests", dependencies: ["ProcessHost", "Workspace", "TestSupport"]),
+        .testTarget(name: "AcceptanceTests", dependencies: ["Acceptance", "Domain", "Providers", "ProcessHost", "Workspace", "ProviderFixtures", "TestSupport"]),
         .testTarget(name: "BenchTests", dependencies: ["Bench", "Domain", "Storage", "Workbench"]),
-        .testTarget(name: "WorkbenchTests", dependencies: ["Domain", "Storage", "Memory", "Providers", "ProcessHost", "Workspace", "Orchestration", "Workbench", "ProviderFixtures"]),
+        .testTarget(name: "WorkbenchTests", dependencies: ["Domain", "Storage", "Memory", "Providers", "ProcessHost", "Workspace", "Orchestration", "Workbench", "ProviderFixtures", "TestSupport"]),
     ]
 )

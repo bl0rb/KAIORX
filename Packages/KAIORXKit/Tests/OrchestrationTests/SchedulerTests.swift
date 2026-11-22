@@ -4,6 +4,7 @@ import ProcessHost
 import Providers
 import Synchronization
 import Testing
+import TestSupport
 @testable import Orchestration
 @testable import Storage
 @testable import Workspace
@@ -50,7 +51,7 @@ struct SchedulerHarness {
         limits: SchedulerLimits = SchedulerLimits(global: 2, perAccount: 2), unconfirmed: Int? = 20, budget: Int = 1_000_000,
         script: @escaping @Sendable (AttemptSpec) -> FakeScript = { _ in .success() }
     ) async throws {
-        let base = FileManager.default.temporaryDirectory.appending(path: "kaiorx-sched-\(UUID().uuidString)")
+        let base = try Scratch.directory("sched")
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let root = Confinement.resolved(base.path(percentEncoded: false))
         checkout = root + "/user"

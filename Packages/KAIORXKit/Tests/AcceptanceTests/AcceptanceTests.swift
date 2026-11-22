@@ -4,6 +4,7 @@ import Foundation
 import ProcessHost
 import Synchronization
 import Testing
+import TestSupport
 @testable import Acceptance
 @testable import Providers
 @testable import Workspace
@@ -11,7 +12,7 @@ import Testing
 /// The kit itself, verified without real CLIs: fixture programs stand in for `claude` (CLAUDE.md).
 
 func temporaryRoot(_ name: String) throws -> String {
-    let path = FileManager.default.temporaryDirectory.appending(path: "kaiorx-acc-\(name)-\(UUID().uuidString)").path(percentEncoded: false)
+    let path = try Scratch.directory("acc-\(name)").path(percentEncoded: false)
     try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
     return Confinement.resolved(path)
 }

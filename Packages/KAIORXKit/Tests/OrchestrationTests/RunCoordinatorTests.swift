@@ -2,6 +2,7 @@ import Domain
 import Foundation
 import Synchronization
 import Testing
+import TestSupport
 @testable import Orchestration
 @testable import Providers
 @testable import Storage
@@ -85,7 +86,7 @@ struct Harness {
 
     /// A project with an active job.
     init() async throws {
-        let directory = FileManager.default.temporaryDirectory.appending(path: "kaiorx-orch-\(UUID().uuidString)")
+        let directory = try Scratch.directory("orch")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         path = directory.appending(path: "test.sqlite").path(percentEncoded: false)
         store = try Store(path: path)

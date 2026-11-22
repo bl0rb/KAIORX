@@ -3,6 +3,7 @@ import Foundation
 import SQLite3
 import Synchronization
 import Testing
+import TestSupport
 @testable import Storage
 
 /// Deterministic millisecond clock.
@@ -26,7 +27,7 @@ struct Fixture {
     let clock = TestClock()
 
     init() throws {
-        directory = FileManager.default.temporaryDirectory.appending(path: "kaiorx-tests-\(UUID().uuidString)")
+        directory = try Scratch.directory("tests")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         path = directory.appending(path: "test.sqlite").path(percentEncoded: false)
     }
