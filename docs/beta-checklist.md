@@ -21,3 +21,4 @@ These checks need the account owner, a Developer ID certificate, or a second Mac
 8. **Display:** check with Increase Contrast and in Dark Mode.
 9. **Restore:** in Settings, mark a migration backup for restore and restart. Consents must be revoked. A backup older than a forget must be refused.
 10. **Live provider runs (package A):** follow `docs/live-acceptance/README.md` (`kaiorx-acceptance`). A version becomes `liveVerified` only through the exported, owner-committed report and `matrix.patch`.
+11. **End-to-end run with the real providers (stage 0.7):** in the Debug build, follow `docs/e2e-durchlauf.md` (German) from opening a project to publication and the delivery branch, and log every step against its expected result.

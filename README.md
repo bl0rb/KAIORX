@@ -28,7 +28,7 @@ What the packages deliver:
 
 Still open before the beta:
 
-- **End-to-end run in the app** with the real Claude Code and Codex (plan, author, seal and build, tests, review, approval, publication). The chain is wired and covered by fake-provider and UI tests; the providers were checked live only through the acceptance kit.
+- **End-to-end run in the app** with the real Claude Code and Codex (plan, author, seal and build, tests, review, approval, publication). The chain is wired and covered by fake-provider and UI tests; the providers were checked live only through the acceptance kit. Owner's guide and checklist (German): [docs/e2e-durchlauf.md](docs/e2e-durchlauf.md). It is blocked at the first author start for now: outside the UI tests no code path registers model profiles for Claude and Codex, so a task waits with "Kein passendes Modellprofil" and the review sheet offers no reviewer model.
 - **Owner approval** of ADR 0009, 0010 and 0011.
 - **Owner's beta checks** in `docs/beta-checklist.md`: signing and notarization with a Developer ID, a clean Mac, macOS 15, offline first launch, VoiceOver and keyboard, quitting during a run, the untouched checkout, contrast and Dark Mode, restore.
 - **Optional live checks of package A:** second-account detection, Claude quota signals, login expiry and token refresh, Codex SIWC login.
@@ -77,6 +77,7 @@ Not covered: memory pressure, a cold OS file cache, time to the first model toke
 | `App/Assets.xcassets`, `Design/branding/` | App icon ("Constellation K") and its source artwork (SVG, 1024 px) |
 | `docs/live-acceptance/` | Owner guide for the live acceptance; committed reports and recordings |
 | `scripts/release.sh`, `docs/beta-checklist.md` | Owner-run signing, notarization and the manual beta checks |
+| `docs/e2e-durchlauf.md` | Owner guide for the end-to-end run with the real providers in the Debug build (German) |
 | `docs/adr/` | Architecture decisions that change the plan (German) |
 | `scripts/test.sh` | Package test runner |
 | `Packages/KAIORXKit/Sources/Bench/`, `docs/performance/` | Performance harness `kaiorx-bench` and measured baselines |
