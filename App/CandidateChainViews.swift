@@ -108,8 +108,8 @@ struct ResultBox: View {
     private var needsDecision: Bool { shown.map { PendingDecisions.needsUser($0.check) } ?? false }
 
     /// A retry clears the seal or build backoff. A refused review collect belongs to a task in
-    /// verification, not to this box: it is shown with the review, where a new review can be
-    /// started (the driver's `retryBuild` would also collect it again).
+    /// verification, not to this box: it is shown with the review, where the collect can be
+    /// tried again („Übernahme erneut versuchen“) or a new review started.
     private var canRetry: Bool {
         guard chainAvailable else { return false }
         switch issue {
@@ -211,6 +211,8 @@ struct ChainIssueNote: View {
                 }
             }
         }
+        // The driver reports every issue it sets and every one that went away, a clear by a
+        // user call included (`ChainReport.clearedIssues`), so `chainRevision` moves for both.
         .task(id: "\(task.id.uuidString)|\(task.version)|\(model.chainRevision)") {
             issue = await model.services?.chain?.issue(task.id)
         }
@@ -612,6 +614,17 @@ struct CandidateReviewStatusView: View {
                         .textSelection(.enabled)
                         .accessibilityIdentifier("reviewIssue")
                 }
+                if canRetryCollect {
+                    HStack {
+                        Spacer()
+                        Button("Übernahme erneut versuchen") { retryCollect() }
+                            .disabled(held)
+                            .help(held ? "Aufgabe angehalten" : "Übernimmt das fertige Review beim nächsten Durchlauf noch einmal; es startet kein Prüfer.")
+                            .accessibilityLabel("Übernahme erneut versuchen")
+                            .accessibilityHint("Der nächste Durchlauf versucht, das fertige Review zu übernehmen. Es startet kein Anbieter und verbraucht kein Kontingent.")
+                            .accessibilityIdentifier("retryCollect")
+                    }
+                }
                 if candidate.state == .reviewing {
                     HStack {
                         Spacer()
@@ -634,9 +647,26 @@ struct CandidateReviewStatusView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .accessibilityElement(children: .contain)
-        .task(id: "\(candidate.id.uuidString)|\(candidate.version)|\(model.chainRevision)") {
-            guard let task = candidate.taskID else { return }
-            issue = await model.services?.chain?.issue(task)
+        .task(id: "\(candidate.id.uuidString)|\(candidate.version)|\(model.chainRevision)") { await loadIssue() }
+    }
+
+    /// A refused collect can be tried again while the candidate still waits for that review.
+    private var canRetryCollect: Bool {
+        guard model.services?.chain != nil, candidate.state == .reviewing || candidate.state == .accepted else { return false }
+        return PendingDecisions.collectFailed(issue)
+    }
+
+    private func loadIssue() async {
+        guard let task = candidate.taskID else { return }
+        issue = await model.services?.chain?.issue(task)
+    }
+
+    private func retryCollect() {
+        guard let actions = model.actions, let task = candidate.taskID else { return }
+        Task {
+            do { try await actions.retryCollect(task) } catch { model.errorMessage = ChainMessages.text(error) }
+            await loadIssue()
+            await model.refreshDecisions()
         }
     }
 

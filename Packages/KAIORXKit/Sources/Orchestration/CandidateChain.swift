@@ -13,16 +13,17 @@ public enum ChainError: Error, Sendable, Equatable {
 
 /// The candidate chain's driver (ADR 0011). `step()` runs the host-only steps automatically:
 /// seal a finished author result, build a clean result, rebuild after the integration target
-/// moved, collect finished reviews and remove the worktrees of reviewers no review comes from any
-/// more. It never starts a provider and runs no project code; tests and review starts stay with
-/// the user.
+/// moved, collect finished reviews, remove the worktrees of reviewers no review comes from any
+/// more and the worktrees of authors whose result nothing can need any more. It never starts a
+/// provider and runs no project code; tests and review starts stay with the user.
 ///
 /// The actor is reentrant at every `await`. `inFlight` is the per-task lock: it is checked and
 /// taken before the first `await` of every step and user call, so the driver and the user never
 /// work on one task at the same time. `buildLocks` allows one merge per repository at a time
 /// (Plan/macos-und-git.md). Backoff, refused collects and refused removals live in memory only.
-/// A pass reports an issue only when it is new for the task, so an unchanged issue never makes
-/// the app refresh; `issue(_:)` returns the current one in every task state.
+/// A pass reports an issue only when it is new for the task, and a cleared issue once, so an
+/// unchanged issue never makes the app refresh while a set or cleared one always does;
+/// `issue(_:)` returns the current one in every task state.
 public actor CandidateChain {
     let store: Store
     let workspace: WorkspaceService
@@ -51,8 +52,12 @@ public actor CandidateChain {
     private var standing: [TaskID: ChainIssue] = [:]
     /// Reviewer attempts whose collection failed, per task; retried after `retryBuild` or a restart.
     private var given: [TaskID: Set<AttemptID>] = [:]
-    /// Reviewer worktrees whose removal Git refused; left to recovery or the user until a restart.
+    /// Reviewer and author worktrees whose removal Git refused; left to recovery or the user
+    /// until a restart.
     private var refusedRemovals: Set<WorktreeID> = []
+    /// Every task's issue as the last pass ended, so the next pass can report what changed
+    /// meanwhile, a clear by a user call included.
+    private var lastIssues: [TaskID: ChainIssue] = [:]
 
     static let backoffBase: Int64 = 5_000
     static let backoffCap: Int64 = 300_000
@@ -85,7 +90,26 @@ public actor CandidateChain {
         await rebuildPass(&report)
         await collectPass(&report)
         await cleanupPass(&report)
+        await authorCleanupPass(&report)
+        reportIssueChanges(&report)
         return report
+    }
+
+    /// Compares every task's issue with the one the last pass ended with: a changed issue the
+    /// pass has not reported yet goes into `issues`, a gone one into `clearedIssues`.
+    private func reportIssueChanges(_ report: inout ChainReport) {
+        var current: [TaskID: ChainIssue] = [:]
+        for task in Set(backoff.keys).union(standing.keys) {
+            if let issue = issue(task) { current[task] = issue }
+        }
+        for task in Set(current.keys).union(lastIssues.keys) where current[task] != lastIssues[task] {
+            if let issue = current[task] {
+                if report.issues[task] == nil { report.issues[task] = issue }
+            } else {
+                report.clearedIssues.insert(task)
+            }
+        }
+        lastIssues = current
     }
 
     /// (a) Seals every finished author result whose stream has ended. A held task is sealed too:
@@ -225,6 +249,49 @@ public actor CandidateChain {
 
     private static let removableStates: Set<WorktreeState> = [.ready, .frozen]
 
+    /// (f) Removes the worktrees of author attempts whose result nothing can need any more, once
+    /// their stream ended (`finishedAuthor`). The sealed result stays reachable through its ref
+    /// (`refs/kaiorx/results/<attempt>`), and every reader of a result (diffs, candidates,
+    /// rebuilds, conflict kinds) works from commits and stored records, never from the folder.
+    /// Same rules as for reviewers: only `ready` or `frozen`, and a removal Git refused once is
+    /// not tried again in this session.
+    private func authorCleanupPass(_ report: inout ChainReport) async {
+        guard let trees = try? await store.worktrees() else { return }
+        for tree in trees where tree.kind == .author && Self.removableStates.contains(tree.state) && !refusedRemovals.contains(tree.id) {
+            guard let attempt = await finishedAuthor(of: tree) else { continue }
+            guard claim(attempt.taskID) else { continue }
+            defer { release(attempt.taskID) }
+            // Read again under the lock: the task or a candidate may have moved meanwhile.
+            guard let current = try? await store.worktree(tree.id), Self.removableStates.contains(current.state),
+                  await finishedAuthor(of: current) != nil else { continue }
+            do {
+                try await workspace.remove(tree.id, force: true)
+                report.removedAuthorTrees.append(tree.id)
+            } catch {
+                refusedRemovals.insert(tree.id)
+            }
+        }
+    }
+
+    /// The attempt of an author worktree whose result can no longer be needed; nil otherwise.
+    /// The attempt has ended (an uncertain one still holds its worktree) and its stream too, no
+    /// open candidate was built from it, and either its task has ended (integrated, no result,
+    /// failed, cancelled) or the task has moved on to a newer author attempt. The chain only
+    /// ever continues with the task's current attempt: builds, rebuilds of a superseded
+    /// candidate and „Als erledigt annehmen“ all start from `currentAttemptID`, and that moves
+    /// only when a new author is reserved, after the old result was discarded, rejected or
+    /// failed. The current attempt of a task that has not ended is therefore always kept, held
+    /// tasks included.
+    private func finishedAuthor(of tree: WorktreeRecord) async -> AttemptRecord? {
+        guard let id = tree.attemptID, let attempt = try? await store.attempt(id), attempt.role == .author, attempt.state.isTerminal,
+              let task = try? await store.task(attempt.taskID) else { return nil }
+        guard task.state.isTerminal || task.currentAttemptID != attempt.id else { return nil }
+        guard let candidates = try? await store.candidates(jobID: task.jobID),
+              !candidates.contains(where: { $0.authorAttemptID == attempt.id && Self.openCandidateStates.contains($0.state) }) else { return nil }
+        guard await !isStreaming(id) else { return nil }
+        return attempt
+    }
+
     /// The attempt of a reviewer worktree no review needs any more, with its stream ended; nil
     /// while the reviewer runs or streams, or while a candidate still waits for its review.
     private func finishedReviewer(of tree: WorktreeRecord) async -> AttemptRecord? {
@@ -356,6 +423,13 @@ public actor CandidateChain {
         backoff[task] = nil
         given[task] = nil
         if let issue = standing[task], issue != .planTaskMissing { standing[task] = nil }
+    }
+
+    /// Forgets the task's refused review collects and their issue, so the next pass collects
+    /// those reviewers again („Übernahme erneut versuchen“). A seal or build backoff stays.
+    public func retryCollect(_ task: TaskID) {
+        given[task] = nil
+        if case .collectFailed? = standing[task] { standing[task] = nil }
     }
 
     /// The conflicting paths of a conflicted candidate: the paths the candidate recorded, each

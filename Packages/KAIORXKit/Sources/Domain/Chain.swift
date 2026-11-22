@@ -49,7 +49,14 @@ public struct ChainReport: Sendable, Equatable {
     public var conflicted: [CandidateID] = []
     public var collected: [ReviewID] = []
     public var removedReviewerTrees: [WorktreeID] = []
+    /// Author worktrees no task, candidate or rebuild can need any more (ADR 0011, cleanup).
+    public var removedAuthorTrees: [WorktreeID] = []
+    /// Issues that are new for their task, or changed since the last pass.
     public var issues: [TaskID: ChainIssue] = [:]
+    /// Tasks whose issue went away since the last pass: cleared by the driver (resolved, or the
+    /// task moved on) or by a user call between passes. A clear is a change too, so a view that
+    /// shows the issue reloads.
+    public var clearedIssues: Set<TaskID> = []
 
     public init() {}
 }

@@ -117,7 +117,7 @@ public struct WorkspaceState: Sendable, Equatable {
         return StatusLabel("Noch kein Review", "eye.slash", .waiting)
     }
 
-    public static let reviewNotCollected = StatusLabel("Review nicht übernommen – starte ein neues Review", "exclamationmark.triangle", .failure)
+    public static let reviewNotCollected = StatusLabel("Review nicht übernommen – versuche die Übernahme erneut oder starte ein neues Review", "exclamationmark.triangle", .failure)
     public static let reviewerStopped = StatusLabel("Prüfer abgebrochen", "xmark.circle", .warning)
 }
 
