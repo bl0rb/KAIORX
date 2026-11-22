@@ -46,10 +46,13 @@ public struct KitContext: Sendable {
     public var turnTimeout: Duration
     /// The repository's `Compatibility.swift`, for the proposed matrix change (nil: none).
     public var compatibilitySource: String?
+    /// The repository's `VerifiedModelProfiles.swift`, for the proposed profiles (nil: none).
+    public var verifiedProfilesSource: String?
     /// Tests only: fixture programs are scripts, not Mach-O binaries.
     var allowsScriptBinaries = false
 
-    public init(folders: RunFolders, home: String, host: ProcessHost, prompter: OwnerPrompter, turnTimeout: Duration = .seconds(300), compatibilitySource: String?) {
+    public init(folders: RunFolders, home: String, host: ProcessHost, prompter: OwnerPrompter, turnTimeout: Duration = .seconds(300), compatibilitySource: String?,
+                verifiedProfilesSource: String? = nil) {
         self.folders = folders
         // Without a trailing slash: prefix checks and "~" display rely on it.
         self.home = home.count > 1 && home.hasSuffix("/") ? String(home.dropLast()) : home
@@ -57,6 +60,7 @@ public struct KitContext: Sendable {
         self.prompter = prompter
         self.turnTimeout = turnTimeout
         self.compatibilitySource = compatibilitySource
+        self.verifiedProfilesSource = verifiedProfilesSource
     }
 }
 
@@ -512,7 +516,7 @@ public actor AcceptanceRunner {
         let prompt = "Lies die Datei FACTS.md in diesem Ordner und antworte nur mit dem Kennwort, das dort steht."
         guard consent(index, step, prompt: prompt, folder: folders.repoA) else { return StepResult(status: .skipped, limitation: "Keine Zustimmung") }
         let before = TreeHash.of(folders.repoA)
-        let attempt = spec(index, role: .reviewer, prompt: prompt)
+        let attempt = spec(index, role: step.exercisedRole!, prompt: prompt)
         let run = state.providers[index]
         // From the confinement the turn gets (the same call as in `adapter`), not a fixed text.
         let hidden = AgentConfinement.make(
@@ -624,7 +628,7 @@ public actor AcceptanceRunner {
         guard consent(index, .author, prompt: prompt, folder: folders.repoA) else { return StepResult(status: .skipped, limitation: "Keine Zustimmung") }
         let gitBefore = TreeHash.of(folders.repoA + "/.git")
         let restBefore = TreeHash.of(folders.repoA, excluding: ["allowed", "HOOK-RAN"])
-        let handle = try await adapter(index).start(spec(index, role: .author, prompt: prompt, writable: ["allowed"]))
+        let handle = try await adapter(index).start(spec(index, role: StepID.author.exercisedRole!, prompt: prompt, writable: ["allowed"]))
         let (events, ended, _) = await collect(handle, timeout: context.turnTimeout)
         let fixture = storeFixture(index, step: .author)
         let allowed = (try? String(contentsOfFile: folders.repoA + "/allowed/ergebnis.txt", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)

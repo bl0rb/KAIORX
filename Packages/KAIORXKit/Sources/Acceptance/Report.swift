@@ -1,4 +1,5 @@
 import CryptoKit
+import Domain
 import Foundation
 import ProcessHost
 import Providers
@@ -91,7 +92,7 @@ public struct AcceptanceReport: Codable, Sendable, Equatable {
             if !provider.fixtures.isEmpty { lines += ["", "Redigierte Aufzeichnungen: " + provider.fixtures.map { "`\($0)`" }.joined(separator: ", ")] }
         }
         if let parallel { lines += ["", "## Zwei Anbieter gleichzeitig", "", "\(parallel.status): " + parallel.evidence.joined(separator: "; ")] }
-        lines += ["", "Ein bestandener Bericht erlaubt den Status `liveVerified` nur für genau dieses Programm (SHA-256) und diesen Modus; die Änderung an der Matrix prüft und committet ein Mensch."]
+        lines += ["", "Ein bestandener Bericht erlaubt den Status `liveVerified` nur für genau dieses Programm (SHA-256) und diesen Modus; die Änderung an der Matrix und die vorgeschlagenen Modellprofile prüft und committet ein Mensch."]
         return lines.joined(separator: "\n") + "\n"
     }
 }
@@ -160,6 +161,99 @@ public enum EvidenceCheck {
         for fixture in provider.fixtures {
             let path = repositoryRoot + "/" + (evidence.reportPath as NSString).deletingLastPathComponent + "/fixtures/" + fixture
             if !FileManager.default.fileExists(atPath: path) { problems.append("Aufzeichnung fehlt: \(fixture)") }
+        }
+        return problems
+    }
+}
+
+/// The proposed entry in `VerifiedModelProfiles.swift` for a passed provider (ADR 0012): the model
+/// the run exercised, the roles whose step passed, the report's date and evidence. A pure string
+/// change like `MatrixProposal`; the kit never edits the repository.
+public enum ProfileProposal {
+    public enum Failure: Error, Equatable, Sendable {
+        case markerNotFound
+        case noRoles
+    }
+
+    /// The roles a provider's report proves: those whose exercising step passed.
+    public static func roles(_ provider: AcceptanceReport.Provider) -> [AttemptRole] {
+        let statuses = Dictionary(provider.steps.map { ($0.id, $0.status) }, uniquingKeysWith: { first, _ in first })
+        return AttemptRole.allCases.filter { statuses[StepID.exercising($0).rawValue] == "passed" }
+    }
+
+    /// The source with an entry for `provider`/`version`: a new one above the marker, or the
+    /// existing one replaced in place (keeping the tier the owner chose for it).
+    public static func propose(
+        source: String, provider: String, version: String, model: String, roles: [AttemptRole], reportPath: String, reportSHA256: String,
+        mode: String, date: String
+    ) throws -> String {
+        guard !roles.isEmpty else { throw Failure.noRoles }
+        let ordered = AttemptRole.allCases.filter(roles.contains)
+        let head = "        VerifiedModelEntry(\n            provider: .\(provider), version: \"\(version)\","
+        var text = source
+        var tier = "standard"
+        var target: Range<String.Index>
+        if let start = text.range(of: head), let end = text.range(of: "\n        ),\n", range: start.upperBound..<text.endIndex) {
+            target = start.lowerBound..<end.upperBound
+            if let chosen = text[target].range(of: #"tier: \.[a-z]+"#, options: .regularExpression) {
+                tier = String(text[chosen].dropFirst("tier: .".count))
+            }
+        } else {
+            guard let marker = text.range(of: VerifiedModelProfiles.marker) else { throw Failure.markerNotFound }
+            let lineStart = text[..<marker.lowerBound].lastIndex(of: "\n").map { text.index(after: $0) } ?? text.startIndex
+            target = lineStart..<lineStart
+        }
+        let block = """
+                    VerifiedModelEntry(
+                        provider: .\(provider), version: "\(version)", model: "\(model)", roles: [\(ordered.map { "." + $0.rawValue }.joined(separator: ", "))],
+                        tier: .\(tier), // product setting (ADR 0012); the owner may change it before committing
+                        effort: nil, typicalTokens: nil, verifiedOn: "\(date)",
+                        evidence: LiveEvidence(reportPath: "\(reportPath)", reportSHA256: "\(reportSHA256)", mode: "\(mode)")
+                    ),
+
+            """
+        text.replaceSubrange(target, with: block)
+        return text
+    }
+}
+
+extension EvidenceCheck {
+    /// What a `VerifiedModelProfiles` entry must rest on (ADR 0012), checked by a test on every
+    /// build: a committed, unchanged report in which this provider and version passed with this
+    /// mode and model on the entry's date; a `liveVerified` matrix entry that names the report's
+    /// build; and, for every role, the step that exercises it passed. Tier, effort and tokens are
+    /// product settings, not evidence.
+    public static func profileProblems(
+        _ entry: VerifiedModelEntry, matrix: [CompatibilityEntry] = CompatibilityMatrix.entries, repositoryRoot: String
+    ) -> [String] {
+        var problems: [String] = []
+        if entry.roles.isEmpty { problems.append("Profil ohne Rolle") }
+        if Set(entry.roles).count != entry.roles.count { problems.append("Rolle doppelt") }
+        if VerifiedModelProfiles.verifiedAt(entry) == nil { problems.append("Datum unlesbar") }
+        let evidence = entry.evidence
+        guard let data = FileManager.default.contents(atPath: repositoryRoot + "/" + evidence.reportPath) else {
+            return problems + ["Bericht fehlt: \(evidence.reportPath)"]
+        }
+        let sha = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        guard sha == evidence.reportSHA256 else { return problems + ["Bericht verändert"] }
+        guard let report = try? JSONDecoder().decode(AcceptanceReport.self, from: data) else { return problems + ["Bericht nicht lesbar"] }
+        guard let provider = report.providers.first(where: { $0.provider == entry.provider.rawValue && $0.version == entry.version }) else {
+            return problems + ["Bericht deckt \(entry.provider.rawValue) \(entry.version) nicht ab"]
+        }
+        if !provider.passed { problems.append("Bericht nicht bestanden") }
+        if provider.mode != evidence.mode { problems.append("Modus weicht ab") }
+        if provider.model != entry.model { problems.append("Modell weicht ab") }
+        if report.date != entry.verifiedOn { problems.append("Datum weicht ab") }
+        if let listed = matrix.first(where: { $0.provider == entry.provider && $0.version == entry.version }) {
+            if listed.status != .liveVerified { problems.append("Matrixeintrag nicht liveVerified") }
+            if provider.binarySHA256.map(listed.builds.contains) != true { problems.append("Programm nicht in der Matrix") }
+        } else {
+            problems.append("Version nicht in der Matrix")
+        }
+        let statuses = Dictionary(provider.steps.map { ($0.id, $0.status) }, uniquingKeysWith: { first, _ in first })
+        for role in AttemptRole.allCases where entry.roles.contains(role) {
+            let step = StepID.exercising(role)
+            if statuses[step.rawValue] != "passed" { problems.append("Schritt \(step.rawValue) nicht bestanden (\(role.rawValue))") }
         }
         return problems
     }

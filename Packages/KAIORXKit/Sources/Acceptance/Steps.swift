@@ -43,6 +43,22 @@ public enum StepID: String, Codable, Sendable, CaseIterable, Comparable {
         }
     }
 
+    /// The product role a step's turn runs in, when the step proves that role works with the
+    /// model (ADR 0012): the read runs as a reviewer, the write as an author. `Runner` takes the
+    /// role of these turns from here, so the mapping holds by construction.
+    public var exercisedRole: AttemptRole? {
+        switch self {
+        case .read: .reviewer
+        case .author: .author
+        case .identify, .auth, .billing, .isolation, .hiddenHome, .cancel, .quota, .revoke, .wrongAccount, .parallel: nil
+        }
+    }
+
+    /// The step that exercises `role`.
+    public static func exercising(_ role: AttemptRole) -> StepID {
+        allCases.first { $0.exercisedRole == role }!
+    }
+
     public static func < (a: StepID, b: StepID) -> Bool {
         allCases.firstIndex(of: a)! < allCases.firstIndex(of: b)!
     }

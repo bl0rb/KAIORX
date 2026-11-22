@@ -143,7 +143,12 @@ public enum CompatibilityMatrix {
     /// its version that names its build. The product's start check and the scheduler's gate
     /// before a reservation both use it (ADR 0009).
     public static func liveVerification(_ provider: ProviderKind, identity: BinaryIdentity) -> LiveVerification {
-        guard let entry = entry(for: provider, version: identity.version) else { return .versionNotListed }
+        liveVerification(provider, identity: identity, in: entries)
+    }
+
+    /// The same check against another list (tests and the profile sync inject one).
+    public static func liveVerification(_ provider: ProviderKind, identity: BinaryIdentity, in entries: [CompatibilityEntry]) -> LiveVerification {
+        guard let entry = entries.first(where: { $0.provider == provider && $0.version == identity.version }) else { return .versionNotListed }
         guard entry.status == .liveVerified else { return .versionNotLiveVerified }
         // A live acceptance binds the build that passed; another build of the same version waits.
         guard entry.builds.contains(identity.sha256) else { return .buildNotVerified }

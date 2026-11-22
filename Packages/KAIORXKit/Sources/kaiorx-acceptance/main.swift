@@ -74,6 +74,13 @@ func compatibilitySource() -> String? {
     return FileManager.default.fileExists(atPath: path) ? path : nil
 }
 
+/// The repository's verified model profiles, next to the matrix source (nil when built elsewhere).
+func verifiedProfilesSource() -> String? {
+    let path = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appending(path: "Providers/VerifiedModelProfiles.swift")
+        .path(percentEncoded: false)
+    return FileManager.default.fileExists(atPath: path) ? path : nil
+}
+
 func runFolder(_ id: String) throws -> RunFolders {
     guard id.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" }) else { throw KitError(description: "Ungültige Lauf-ID") }
     return RunFolders(root: try RunFolders.base() + "/" + id)
@@ -82,7 +89,7 @@ func runFolder(_ id: String) throws -> RunFolders {
 func context(_ folders: RunFolders) -> KitContext {
     KitContext(
         folders: folders, home: FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false), host: ProcessHost(),
-        prompter: TerminalPrompter(), compatibilitySource: compatibilitySource()
+        prompter: TerminalPrompter(), compatibilitySource: compatibilitySource(), verifiedProfilesSource: verifiedProfilesSource()
     )
 }
 
@@ -94,23 +101,42 @@ func writeReport(_ folders: RunFolders, state: RunState, context: KitContext) as
     print("Bericht: \(folders.root)/report.md")
     guard let sourcePath = context.compatibilitySource, let source = try? String(contentsOfFile: sourcePath, encoding: .utf8) else { return }
     let sha = json.sha256Hex
+    let reportPath = "docs/live-acceptance/\(state.runID)/report.json"
+    let passed = report.providers.filter { $0.passed && $0.version != nil && $0.binarySHA256 != nil }
     var proposed = source
-    for provider in report.providers where provider.passed {
-        guard let version = provider.version, let binary = provider.binarySHA256 else { continue }
+    for provider in passed {
         proposed = try MatrixProposal.propose(
-            source: proposed, provider: provider.provider, version: version, binarySHA256: binary,
-            reportPath: "docs/live-acceptance/\(state.runID)/report.json", reportSHA256: sha, mode: provider.mode
+            source: proposed, provider: provider.provider, version: provider.version!, binarySHA256: provider.binarySHA256!,
+            reportPath: reportPath, reportSHA256: sha, mode: provider.mode
         )
     }
     guard proposed != source else {
         print("Keine Matrixänderung: kein Anbieter hat bestanden.")
         return
     }
-    let patch = try await MatrixProposal.diff(
+    var patch = try await MatrixProposal.diff(
         original: source, proposed: proposed, label: "Packages/KAIORXKit/Sources/Providers/Compatibility.swift", host: context.host, scratch: folders.temporary
     )
+    // The verified model profiles of the same run (ADR 0012), as a second file in the same patch.
+    if let profilesPath = context.verifiedProfilesSource, let profiles = try? String(contentsOfFile: profilesPath, encoding: .utf8) {
+        var proposedProfiles = profiles
+        for provider in passed {
+            proposedProfiles = try ProfileProposal.propose(
+                source: proposedProfiles, provider: provider.provider, version: provider.version!, model: provider.model,
+                roles: ProfileProposal.roles(provider), reportPath: reportPath, reportSHA256: sha, mode: provider.mode, date: report.date
+            )
+        }
+        if proposedProfiles != profiles {
+            patch += try await MatrixProposal.diff(
+                original: profiles, proposed: proposedProfiles, label: "Packages/KAIORXKit/Sources/Providers/VerifiedModelProfiles.swift",
+                host: context.host, scratch: folders.temporary
+            )
+        }
+    } else {
+        print("Hinweis: VerifiedModelProfiles.swift nicht gefunden; der Patch schlägt keine Modellprofile vor.")
+    }
     try Data(patch.utf8).write(to: URL(filePath: folders.root + "/matrix.patch"), options: .atomic)
-    print("Vorgeschlagene Matrixänderung: \(folders.root)/matrix.patch (prüfen, selbst anwenden und committen)")
+    print("Vorgeschlagene Matrixänderung und Modellprofile: \(folders.root)/matrix.patch (prüfen, selbst anwenden und committen)")
 }
 
 extension Data {
@@ -227,7 +253,7 @@ func run(_ arguments: [String]) async throws {
         if FileManager.default.fileExists(atPath: folders.fixtures) {
             try FileManager.default.copyItem(atPath: folders.fixtures, toPath: destination + "/fixtures")
         }
-        print("Exportiert nach \(destination). Prüfe die Dateien, wende matrix.patch selbst an und committe.")
+        print("Exportiert nach \(destination). Prüfe die Dateien, wende matrix.patch (Matrix und Modellprofile) selbst an und committe.")
 
     default:
         throw KitError(description: usage)
