@@ -17,13 +17,17 @@ public struct StartRequest: Sendable, Equatable {
     public var prompt: String
     public var accountID: AccountID?
     public var consentID: ConsentID?
+    /// For a reviewer: the slot limits the store checks in the reservation (ADR 0011 §8); not
+    /// part of the stored command.
+    public var reviewerSlots: SchedulerLimits?
 
     public init(
         commandID: CommandID = CommandID(), attemptID: AttemptID = AttemptID(), taskID: TaskID,
         projectID: ProjectID, role: AttemptRole = .author, provider: ProviderKind, modelProfile: String,
         model: String, effort: String? = nil, workingDirectory: String? = nil, prompt: String,
-        accountID: AccountID? = nil, consentID: ConsentID? = nil
+        accountID: AccountID? = nil, consentID: ConsentID? = nil, reviewerSlots: SchedulerLimits? = nil
     ) {
+        self.reviewerSlots = reviewerSlots
         self.accountID = accountID
         self.consentID = consentID
         self.commandID = commandID
@@ -94,7 +98,7 @@ public actor RunCoordinator {
             role: request.role, provider: request.provider, mode: .automatic, model: request.model,
             effort: request.effort, specDigest: try spec.digest(), accountID: request.accountID, consentID: request.consentID
         )
-        let outcome = try await store.execute(Command(id: request.commandID, .reserveAttempt(reservation)))
+        let outcome = try await store.execute(Command(id: request.commandID, .reserveAttempt(reservation)), reviewerSlots: request.reviewerSlots)
         let id = request.attemptID
         if outcome.isReplay { return .alreadyRequested(id) }
         return try await launch(id, spec: spec)

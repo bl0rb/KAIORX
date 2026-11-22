@@ -675,6 +675,90 @@ struct ChainHarness {
         _ = try await h.coordinator.waitUntilFinished(attempt)
     }
 
+    /// A reviewer attempt of the reviewer account on a task of another job: it holds one slot
+    /// globally and one of the reviewer account.
+    private func occupyReviewerSlot(_ h: ChainHarness) async throws -> AttemptID {
+        let job = JobID(), task = TaskID(), attempt = AttemptID()
+        try await h.store.execute(Command(.createJob(id: job, projectID: h.project, goal: "Andere")))
+        try await h.store.execute(Command(.createTask(id: task, jobID: job, title: "B")))
+        try await h.store.execute(Command(.reserveAttempt(AttemptReservation(
+            attemptID: attempt, taskID: task, projectID: h.project, role: .reviewer, provider: .fake, mode: .automatic, model: "r",
+            specDigest: "d", accountID: h.reviewerAccount
+        ))))
+        return attempt
+    }
+
+    private func outcome(_ body: () async throws -> AttemptID) async -> Result<AttemptID, any Error> {
+        do { return .success(try await body()) } catch { return .failure(error) }
+    }
+
+    // 19a: the store refuses a reviewer whose slot was taken during the preparation (ADR 0011 §8).
+    @Test func aReviewStartIsRefusedInTheReservationWhenSlotsAreFull() async throws {
+        let h = try await ChainHarness()
+        let chain = h.chain()
+        let candidate = try await h.reviewingCandidate(chain)
+        let taskID = try #require(candidate.taskID)
+        _ = try await occupyReviewerSlot(h)
+        let cases: [(SchedulerLimits, Bool)] = [(SchedulerLimits(global: 1, perAccount: 5), true), (SchedulerLimits(global: 5, perAccount: 1), false)]
+        for (limits, global) in cases {
+            await #expect(throws: PlanningError.slotsFull(global: global, provider: .fake)) {
+                _ = try await h.integration.startReview(candidate.id, provider: .fake, model: "r", criteria: "c", limits: limits)
+            }
+            #expect(try await h.store.attempts(taskID: taskID).allSatisfy { $0.role == .author })
+            #expect(try await h.store.worktrees().allSatisfy { $0.kind != .reviewer || $0.state == .removed })
+            #expect(try await h.store.candidate(candidate.id)?.state == .reviewing)
+            let reserved = try await h.store.events(after: 0, limit: 100_000).filter { $0.kind == .attemptReserved && $0.taskID == taskID }
+            #expect(reserved.count == 1) // the author's only
+        }
+        // Without limits nothing is checked, as before.
+        let attempt = try await h.integration.startReview(candidate.id, provider: .fake, model: "r", criteria: "c")
+        _ = try await h.coordinator.waitUntilFinished(attempt)
+    }
+
+    // 19b: two review starts racing for the last slot start one review.
+    @Test func concurrentReviewStartsTakeOneSlot() async throws {
+        let h = try await ChainHarness()
+        try await h.activate([planTask("A", writes: ["src/A"]), planTask("B", writes: ["src/B"])])
+        _ = try await h.scheduler().tick()
+        for (key, script) in [("A", "mkdir -p src/A && echo x > src/A/f"), ("B", "mkdir -p src/B && echo y > src/B/f")] {
+            let attempt = try #require(try await h.task(key).currentAttemptID)
+            _ = try await h.coordinator.waitUntilFinished(attempt)
+            let tree = try #require(try await h.store.attempt(attempt)?.worktreeID)
+            try await h.sh(script, in: h.service.path(of: try await h.service.worktree(tree)))
+        }
+        let builder = h.chain()
+        for _ in 0..<3 where try await h.candidates().count < 2 { _ = await builder.step() }
+        let built = try await h.candidates()
+        #expect(built.count == 2)
+        for candidate in built { try await h.passTests(candidate.id) }
+
+        let chain = h.chain(limits: SchedulerLimits(global: 1, perAccount: 5))
+        h.reviewer.set(.hang)
+        let a = built[0].id, b = built[1].id
+        let optionA = try #require(try await chain.reviewOptions(a).first { $0.provider == .fake })
+        let optionB = try #require(try await chain.reviewOptions(b).first { $0.provider == .fake })
+        #expect(optionA.blockers.isEmpty && optionB.blockers.isEmpty)
+        // A slot refusal maps to the store's error, not to a stale sheet.
+        let mapped = CandidateChain.error(for: .slotsFull(global: true), option: optionA, candidate: built[0]) as? PlanningError
+        #expect(mapped == .slotsFull(global: true, provider: .fake))
+
+        async let first = outcome { try await chain.startReview(optionA, candidate: a) }
+        async let second = outcome { try await chain.startReview(optionB, candidate: b) }
+        let results = await [first, second]
+        let started = results.compactMap { try? $0.get() }
+        #expect(started.count == 1)
+        for case .failure(let error) in results {
+            #expect(error as? PlanningError == .slotsFull(global: true, provider: .fake) || error as? ChainError == .shownStateChanged, "\(error)")
+        }
+        #expect(try await h.store.activeAttemptCount(account: nil) == 1)
+        let trees = try await h.store.worktrees().filter { $0.kind == .reviewer && $0.state != .removed }
+        #expect(trees.map(\.attemptID) == started.map(Optional.some))
+        for attempt in started {
+            try await h.coordinator.cancel(attempt, reason: "test")
+            _ = try await h.coordinator.waitUntilFinished(attempt)
+        }
+    }
+
     // 20
     @Test func theGateIsNotConsultedForBlocking() async throws {
         let h = try await ChainHarness()
@@ -829,18 +913,16 @@ struct ChainHarness {
         guard case .buildable = shown.check else { Issue.record("not buildable: \(shown.check)"); return }
         let (entered, enteredSignal) = AsyncStream.makeStream(of: Void.self)
         let (proceed, proceedSignal) = AsyncStream.makeStream(of: Void.self)
-        let scheduler = h.scheduler()
-        async let discarded: Void = chain.discard(shown) { id in
+        async let discarded: Void = chain.discard(shown, actor: "user") {
             enteredSignal.yield()
             for await _ in proceed { break }
-            try await scheduler.grant(id, actor: "user")
         }
         for await _ in entered { break }
         // The discard is between its check and its move: the driver's build waits.
         let report = await chain.step()
         #expect(report.built.isEmpty && report.issues.isEmpty)
         #expect(try await h.merges() == 0)
-        await #expect(throws: ChainError.busy(task)) { try await chain.discard(shown) { _ in } }
+        await #expect(throws: ChainError.busy(task)) { try await chain.discard(shown, actor: "user") }
         proceedSignal.yield()
         try await discarded
         #expect(try await h.store.task(task)?.state == .needsChanges)
@@ -849,8 +931,8 @@ struct ChainHarness {
         #expect(try await h.candidates().isEmpty)
     }
 
-    // 26: a discard whose move fails leaves no grant in effect.
-    @Test func aDiscardThatCannotMoveVoidsItsGrant() async throws {
+    // 26: a discard that cannot move records no grant at all.
+    @Test func aDiscardThatCannotMoveRecordsNoGrant() async throws {
         let h = try await ChainHarness()
         try await h.activate([planTask("A", writes: ["src/A"])])
         let (task, _, _) = try await h.runPlanned("A", "mkdir -p docs && echo y > docs/g")
@@ -858,23 +940,50 @@ struct ChainHarness {
         _ = await chain.step()
         let shown = try await h.shown(chain, task)
         guard case .rejectedOnly = shown.check else { Issue.record("not rejected only: \(shown.check)"); return }
-        let scheduler = h.scheduler()
         let store = h.store
         await #expect(throws: ChainError.shownStateChanged) {
-            try await chain.discard(shown) { id in
-                try await scheduler.grant(id, actor: "user")
-                // Another writer moves the task between the grant and the move (a hold).
-                let version = try #require(try await store.task(id)).version
-                try await store.execute(Command(.transitionTask(id: id, to: .blocked, expectedVersion: version)))
+            try await chain.discard(shown, actor: "user") {
+                // Another writer moves the task between the check and the transaction (a hold).
+                guard let version = try? await store.task(task)?.version else { return }
+                _ = try? await store.execute(Command(.transitionTask(id: task, to: .blocked, expectedVersion: version)))
             }
         }
         #expect(try await h.store.task(task)?.state == .blocked)
-        let grants = try await h.store.decisions(task: task).filter { $0.rule == "userGrant" }
-        #expect(grants.count == 2)
-        // The latest grant, the one the scheduler reads, counts from the start again.
-        #expect(grants.last?.outcome == "voided")
-        #expect(grants.last?.evidence["afterOrdinal"] == "0")
-        #expect(grants.last?.evidence["voids"] == grants.first?.id.uuidString)
+        #expect(try await h.store.decisions(task: task).allSatisfy { $0.rule != Store.userGrantRule })
+    }
+
+    // 26b: a crash between grant and move leaves both unwritten; the result still waits.
+    @Test func aCrashBetweenGrantAndMoveLeavesTheResultWaiting() async throws {
+        let h = try await ChainHarness()
+        try await h.activate([planTask("A", writes: ["src/A"])])
+        let (task, attempt, _) = try await h.runPlanned("A", "mkdir -p docs && echo y > docs/g")
+        let chain = h.chain()
+        _ = await chain.step()
+        let shown = try await h.shown(chain, task)
+        guard case .rejectedOnly = shown.check else { Issue.record("not rejected only: \(shown.check)"); return }
+        try await h.store.chainTestRun("""
+            CREATE TEMP TRIGGER failing_move BEFORE UPDATE OF state ON task WHEN NEW.state = 'needsChanges'
+            BEGIN SELECT RAISE(ABORT, 'crash'); END
+            """)
+        await #expect(throws: (any Error).self) { try await chain.discard(shown, actor: "user") }
+        let waiting = try #require(try await h.store.task(task))
+        #expect(waiting.state == .resultReady && waiting.version == shown.taskVersion)
+        #expect(try await h.store.decisions(task: task).allSatisfy { $0.rule != Store.userGrantRule })
+        // The driver still sees the result waiting for the user's decision.
+        let report = await chain.step()
+        #expect(report.built.isEmpty && report.sealed.isEmpty)
+        #expect(try await chain.check(task) == shown.check)
+
+        // Repeated after the fault, the discard goes through and a new author takes over.
+        try await h.store.chainTestRun("DROP TRIGGER failing_move")
+        try await chain.discard(shown, actor: "user")
+        #expect(try await h.store.task(task)?.state == .needsChanges)
+        #expect(try await h.store.decisions(task: task).filter { $0.rule == Store.userGrantRule }.count == 1)
+        let tick = try await h.scheduler().tick()
+        #expect(tick.reserved.count == 1, "\(tick)")
+        let next = try #require(try await h.store.task(task)?.currentAttemptID)
+        #expect(next != attempt)
+        _ = try await h.coordinator.waitUntilFinished(next)
     }
 
     /// A result writing two paths the integration state also wrote: a conflicted candidate.

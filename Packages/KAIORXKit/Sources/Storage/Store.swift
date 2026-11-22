@@ -161,8 +161,10 @@ public actor Store {
 
     // MARK: Commands
 
+    /// `reviewerSlots` are store-side policy, not part of the request: a reviewer reservation is
+    /// refused when they are taken (ADR 0011 §8). They do not enter the request digest.
     @discardableResult
-    public func execute(_ command: Command) throws -> CommandOutcome {
+    public func execute(_ command: Command, reviewerSlots: SchedulerLimits? = nil) throws -> CommandOutcome {
         let db = try connection()
         let digest = try Canonical.sha256Hex(Canonical.encode(command.action))
         let now = clock()
@@ -174,7 +176,7 @@ public actor Store {
                 guard previous.digest == digest else { throw StoreError.commandKeyReused(command.id) }
                 return CommandOutcome(commandID: command.id, objectID: previous.objectID, isReplay: true)
             }
-            let objectID = try apply(command.action, db: db, now: now)
+            let objectID = try apply(command.action, db: db, now: now, reviewerSlots: reviewerSlots)
             try db.run(
                 "INSERT INTO command (id, kind, request_digest, object_id, status, at) VALUES (?, ?, ?, ?, 'applied', ?)",
                 [.text(command.id.uuidString), .text(command.action.kind), .text(digest), .text(objectID), .integer(now)]
@@ -183,7 +185,7 @@ public actor Store {
         }
     }
 
-    private func apply(_ action: CommandAction, db: SQLiteConnection, now: Int64) throws -> String {
+    private func apply(_ action: CommandAction, db: SQLiteConnection, now: Int64, reviewerSlots: SchedulerLimits?) throws -> String {
         switch action {
         case let .openProject(id, name, rootLocator):
             let existing = try db.query(
@@ -267,10 +269,7 @@ public actor Store {
             return id.uuidString
 
         case let .transitionTask(id, target, expectedVersion):
-            let task = try loadTask(db, id)
-            try checkVersion(entity: "task", id: id.uuidString, expected: expectedVersion, actual: task.record.version)
-            try checkTaskCommand(db, task, to: target)
-            try changeTaskState(db, task, to: target, reason: nil, now: now)
+            try transitionTask(db, id, to: target, expectedVersion: expectedVersion, now: now)
             return id.uuidString
 
         case let .reserveAttempt(reservation):
@@ -322,6 +321,16 @@ public actor Store {
                     [.text(reservation.taskID.uuidString)]
                 ) { try $0.requiredText(0) }.first
                 if purged != nil { throw MemoryError.candidateContentPurged(reservation.taskID) }
+                // Reviews count (ADR 0005 §6): checked in this transaction, not only in the sheet
+                // (ADR 0011 §8). An open reviewer holds a slot itself, so it is reported first.
+                if let limits = reviewerSlots {
+                    if try activeAttemptCount(db, account: nil) >= limits.global {
+                        throw PlanningError.slotsFull(global: true, provider: reservation.provider)
+                    }
+                    if let account = reservation.accountID, try activeAttemptCount(db, account: account) >= limits.perAccount {
+                        throw PlanningError.slotsFull(global: false, provider: reservation.provider)
+                    }
+                }
             }
             let ordinal = try db.query(
                 "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM attempt WHERE task_id = ? AND role = ?",
@@ -678,6 +687,15 @@ public actor Store {
     struct LoadedAttempt {
         var record: AttemptRecord
         var projectID: String
+    }
+
+    /// A task transition as `Command(.transitionTask)` applies it (version, command rules,
+    /// journal), inside the caller's transaction.
+    func transitionTask(_ db: SQLiteConnection, _ id: TaskID, to target: TaskState, expectedVersion: Int, now: Int64) throws {
+        let task = try loadTask(db, id)
+        try checkVersion(entity: "task", id: id.uuidString, expected: expectedVersion, actual: task.record.version)
+        try checkTaskCommand(db, task, to: target)
+        try changeTaskState(db, task, to: target, reason: nil, now: now)
     }
 
     /// Commands may not enter `running` except as the resume of a side state whose author attempt

@@ -132,15 +132,11 @@ public actor Scheduler {
     /// The user's decision on a task that waits for one (attempt limit, top tier, start
     /// retries): the count starts afresh after the attempts so far, optionally at a higher tier.
     public func grant(_ taskID: TaskID, tier: CapabilityTier? = nil, actor: String) async throws {
-        let ordinal = try await store.attempts(taskID: taskID).filter { $0.role == .author }.map(\.ordinal).max() ?? 0
-        var evidence = ["afterOrdinal": String(ordinal)]
-        if let tier { evidence["tier"] = tier.rawValue }
-        try await store.recordDecision(task: taskID, rule: "userGrant", evidence: evidence, outcome: "granted", actor: actor, remaining: Router.maxAuthorAttempts)
-        try await store.setWaitReason(taskID, nil)
+        try await store.grantAttempts(task: taskID, tier: tier, actor: actor)
     }
 
     private func latestGrant(_ taskID: TaskID) async throws -> (afterOrdinal: Int, tier: CapabilityTier?)? {
-        guard let decision = try await store.decisions(task: taskID).last(where: { $0.rule == "userGrant" }) else { return nil }
+        guard let decision = try await store.decisions(task: taskID).last(where: { $0.rule == Store.userGrantRule }) else { return nil }
         return (Int(decision.evidence["afterOrdinal"] ?? "0") ?? 0, decision.evidence["tier"].flatMap(CapabilityTier.init(rawValue:)))
     }
 

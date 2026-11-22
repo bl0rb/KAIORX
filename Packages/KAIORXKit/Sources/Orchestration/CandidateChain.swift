@@ -410,11 +410,15 @@ public actor CandidateChain {
 
     /// Discards the result the sheet showed (ADR 0011 §7) under the task's lock, so no build of
     /// the driver runs meanwhile: checks that the task is still exactly where the sheet saw it,
-    /// lets `grant` restart the attempt count, then moves the task to `needsChanges`. The grant
-    /// comes first (after a crash in between the task still waits with its result, and the user
-    /// repeats the discard); if the grant or the move fails, the grant is voided, so the grant
-    /// before it counts again.
-    public func discard(_ shown: ShownResult, grant: @Sendable (TaskID) async throws -> Void) async throws {
+    /// then grants and moves it to `needsChanges` in one store transaction
+    /// (`Store.discardResult`); on any failure nothing is recorded.
+    public func discard(_ shown: ShownResult, actor: String) async throws {
+        try await discard(shown, actor: actor, afterCheck: {})
+    }
+
+    /// `afterCheck` runs under the lock between the shown-state check and the store transaction
+    /// (test seam).
+    func discard(_ shown: ShownResult, actor: String, afterCheck: @Sendable () async -> Void) async throws {
         guard claim(shown.task) else { throw ChainError.busy(shown.task) }
         defer { release(shown.task) }
         switch shown.check {
@@ -423,30 +427,15 @@ public actor CandidateChain {
         }
         _ = try await requireShown(shown)
         guard let task = try await store.task(shown.task), task.state == .resultReady else { throw ChainError.shownStateChanged }
-        let before = try await store.decisions(task: task.id).last { $0.rule == Self.grantRule }
+        await afterCheck()
         do {
-            try await grant(task.id)
-            try await store.execute(Command(.transitionTask(id: task.id, to: .needsChanges, expectedVersion: shown.taskVersion)))
-        } catch {
-            try? await voidGrant(task.id, since: before)
-            if (try? await store.task(task.id))?.version != shown.taskVersion { throw ChainError.shownStateChanged }
-            throw error
+            try await store.discardResult(task: task.id, expectedVersion: shown.taskVersion, actor: actor)
+        } catch let error as StoreError where error.isVersionConflict {
+            throw ChainError.shownStateChanged
+        } catch is DomainError {
+            throw ChainError.shownStateChanged
         }
         clearIssue(task.id)
-    }
-
-    /// The scheduler's grant rule; the latest such decision is the one that counts.
-    private static let grantRule = "userGrant"
-
-    /// Records the grant that counted before `since` again, if a newer one was recorded: the
-    /// scheduler reads only the latest grant. No grant before means counting from the start.
-    private func voidGrant(_ task: TaskID, since before: DecisionRecord?) async throws {
-        guard let latest = try await store.decisions(task: task).last(where: { $0.rule == Self.grantRule }), latest.id != before?.id else { return }
-        var evidence = before?.evidence ?? ["afterOrdinal": "0"]
-        evidence["voids"] = latest.id.uuidString
-        try await store.recordDecision(
-            task: task, rule: Self.grantRule, evidence: evidence, outcome: "voided", actor: latest.actor, remaining: before?.remainingAttempts
-        )
     }
 
     /// Resolves the conflicts the sheet showed with the user's choices.
@@ -466,7 +455,8 @@ public actor CandidateChain {
 
     /// The providers a review of the candidate could run with, each with its blockers. The
     /// author's own provider is listed with `sameProviderAsAuthor`, so the sheet can say why.
-    /// Slots are a pre-check, not a reservation (ADR 0011 §8). The automation gate's verdict is
+    /// Slots are shown as a pre-check; the store checks them again in the reservation transaction
+    /// (ADR 0011 §8). The automation gate's verdict is
     /// shown as `automationNote` (an `AutomationBlock.detail(for:)` code) and never blocks
     /// (ADR 0009 §8).
     public func reviewOptions(_ id: CandidateID) async throws -> [ReviewOption] {
@@ -536,7 +526,7 @@ public actor CandidateChain {
         if let blocker = current.blockers.first {
             throw Self.error(for: blocker, option: current, candidate: first)
         }
-        return try await integration.startReview(id, provider: shown.provider, model: shown.model, criteria: shown.criteria)
+        return try await integration.startReview(id, provider: shown.provider, model: shown.model, criteria: shown.criteria, limits: limits)
     }
 
     /// The acceptance criteria text a review of the task gets: the criteria of the plan revision
@@ -720,7 +710,8 @@ public actor CandidateChain {
         case .reviewerOpen(let attempt): candidate.taskID.map { StoreError.activeReviewerExists(taskID: $0, attemptID: attempt) } ?? ChainError.shownStateChanged
         case .contentPurged: candidate.taskID.map { MemoryError.candidateContentPurged($0) } ?? ChainError.shownStateChanged
         case .candidateNotReviewing: IntegrationError.candidateNotIn(candidate.id, candidate.state)
-        case .noModelProfile, .slotsFull, .adapterMissing: ChainError.shownStateChanged
+        case .slotsFull(let global): PlanningError.slotsFull(global: global, provider: option.provider)
+        case .noModelProfile, .adapterMissing: ChainError.shownStateChanged
         }
     }
 
