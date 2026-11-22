@@ -106,6 +106,25 @@ public enum MatrixProposal {
         case entryNotFound(String)
     }
 
+    /// What the source says about a version before a proposal (ADR 0012 §6): only an
+    /// `offlineVerified` entry gets a matrix change; a version that is already `liveVerified`
+    /// with the run's build needs none.
+    public enum EntryState: Equatable, Sendable {
+        case notListed
+        case offlineVerified
+        case liveVerified(sameBuild: Bool)
+    }
+
+    public static func state(source: String, provider: String, version: String, binarySHA256: String) -> EntryState {
+        let head = "provider: .\(provider), version: \"\(version)\", status: ."
+        guard let start = source.range(of: head) else { return .notListed }
+        let rest = source[start.upperBound...]
+        if rest.hasPrefix("offlineVerified,") { return .offlineVerified }
+        guard rest.hasPrefix("liveVerified,") else { return .notListed }
+        let end = source.range(of: "\n        ),", range: start.upperBound..<source.endIndex)?.lowerBound ?? source.endIndex
+        return .liveVerified(sameBuild: source[start.upperBound..<end].contains("\"\(binarySHA256)\""))
+    }
+
     /// The source with the entry for `provider`/`version` changed.
     public static func propose(source: String, provider: String, version: String, binarySHA256: String, reportPath: String, reportSHA256: String, mode: String) throws -> String {
         let anchor = "provider: .\(provider), version: \"\(version)\", status: .offlineVerified,"
@@ -181,15 +200,16 @@ public enum ProfileProposal {
         return AttemptRole.allCases.filter { statuses[StepID.exercising($0).rawValue] == "passed" }
     }
 
-    /// The source with an entry for `provider`/`version`: a new one above the marker, or the
-    /// existing one replaced in place (keeping the tier the owner chose for it).
+    /// The source with an entry for `provider`/`version`/`model` (ADR 0012 §6): the entry of the
+    /// same model and version is replaced in place (keeping the tier the owner chose for it); a
+    /// new model, also one for a version that already has another model, is added above the marker.
     public static func propose(
         source: String, provider: String, version: String, model: String, roles: [AttemptRole], reportPath: String, reportSHA256: String,
         mode: String, date: String
     ) throws -> String {
         guard !roles.isEmpty else { throw Failure.noRoles }
         let ordered = AttemptRole.allCases.filter(roles.contains)
-        let head = "        VerifiedModelEntry(\n            provider: .\(provider), version: \"\(version)\","
+        let head = "        VerifiedModelEntry(\n            provider: .\(provider), version: \"\(version)\", model: \"\(model)\","
         var text = source
         var tier = "standard"
         var target: Range<String.Index>
@@ -214,6 +234,73 @@ public enum ProfileProposal {
             """
         text.replaceSubrange(target, with: block)
         return text
+    }
+
+    /// The models of other catalog entries for the same provider and version. The catalog allows
+    /// one model per (provider, version, role, tier), so the owner chooses the new model's tier.
+    public static func otherModels(source: String, provider: String, version: String, model: String) -> [String] {
+        let head = "provider: .\(provider), version: \"\(version)\", model: \""
+        var models: [String] = []
+        var cursor = source.startIndex
+        while let found = source.range(of: head, range: cursor..<source.endIndex) {
+            cursor = found.upperBound
+            guard let close = source[found.upperBound...].firstIndex(of: "\"") else { break }
+            let name = String(source[found.upperBound..<close])
+            if name != model && !models.contains(name) { models.append(name) }
+        }
+        return models
+    }
+}
+
+/// Everything the kit proposes for a report (ADR 0008 §8, ADR 0012 §6): the changed matrix and
+/// catalog sources and notes for the owner. Pure; `writeReport` diffs and writes the patch.
+public enum ReportProposal {
+    public struct Result: Sendable, Equatable {
+        /// `Compatibility.swift` with every matrix change.
+        public var compatibility: String
+        /// `VerifiedModelProfiles.swift` with every proposed entry; nil when it was not found.
+        public var profiles: String?
+        public var notes: [String]
+    }
+
+    /// Per passed provider: an `offlineVerified` version becomes `liveVerified` with the run's
+    /// build; a version that is already `liveVerified` with that build stays as it is. Either
+    /// way the run's model is proposed for the catalog. A version the matrix does not list, or
+    /// lists with another build, gets neither; the other providers still get their proposals.
+    public static func make(report: AcceptanceReport, reportPath: String, reportSHA256: String, compatibility: String, profiles: String?) throws -> Result {
+        var result = Result(compatibility: compatibility, profiles: profiles, notes: [])
+        for provider in report.providers where provider.passed {
+            guard let version = provider.version, let build = provider.binarySHA256 else { continue }
+            let name = "\(provider.provider) \(version)"
+            switch MatrixProposal.state(source: result.compatibility, provider: provider.provider, version: version, binarySHA256: build) {
+            case .offlineVerified:
+                result.compatibility = try MatrixProposal.propose(
+                    source: result.compatibility, provider: provider.provider, version: version, binarySHA256: build,
+                    reportPath: reportPath, reportSHA256: reportSHA256, mode: provider.mode
+                )
+            case .liveVerified(sameBuild: true):
+                result.notes.append("\(name) ist mit diesem Programm schon liveVerified: keine Matrixänderung, nur das Modellprofil.")
+            case .liveVerified(sameBuild: false):
+                result.notes.append("\(name): Die Matrix nennt ein anderes Programm als dieser Lauf; weder Matrixänderung noch Modellprofil.")
+                continue
+            case .notListed:
+                result.notes.append("\(name) steht nicht als offlineVerified oder liveVerified in der Matrix; kein Vorschlag.")
+                continue
+            }
+            guard let catalog = result.profiles else { continue }
+            let others = ProfileProposal.otherModels(source: catalog, provider: provider.provider, version: version, model: provider.model)
+            result.profiles = try ProfileProposal.propose(
+                source: catalog, provider: provider.provider, version: version, model: provider.model, roles: ProfileProposal.roles(provider),
+                reportPath: reportPath, reportSHA256: reportSHA256, mode: provider.mode, date: report.date
+            )
+            if !others.isEmpty {
+                result.notes.append(
+                    "\(name): \(provider.model) kommt neben \(others.joined(separator: ", ")) in den Katalog. Wähle im Patch eine Stufe, "
+                        + "die kein anderes Modell dieser Version mit derselben Rolle hat (ein Modell je Version, Rolle und Stufe)."
+                )
+            }
+        }
+        return result
     }
 }
 

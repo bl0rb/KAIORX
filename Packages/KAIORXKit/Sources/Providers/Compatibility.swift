@@ -220,6 +220,18 @@ public struct AdapterPolicy: Sendable, Equatable {
             }
         }
     }
+
+    /// The product also binds the model to the binary (ADR 0012 §5): a start runs only a model
+    /// that the owner's live acceptance exercised for exactly this version and role, as listed
+    /// in `VerifiedModelProfiles`. Profile selection cannot know the installed version (the
+    /// distributed channel reads nothing, a probe may fail), so this check, next to the build
+    /// check at every start, keeps an unverified model/version pair from ever running.
+    func checkModel(_ provider: ProviderKind, identity: BinaryIdentity, model: String, role: AttemptRole,
+                    catalog: [VerifiedModelEntry] = VerifiedModelProfiles.entries) throws {
+        guard gate == .liveVerified else { return }
+        let listed = catalog.contains { $0.provider == provider && $0.version == identity.version && $0.model == model && $0.roles.contains(role) }
+        guard listed else { throw ProviderError.modelNotLiveVerified(provider: provider, version: identity.version, model: model) }
+    }
 }
 
 public enum ProviderError: Error, Equatable, Sendable {
@@ -228,6 +240,8 @@ public enum ProviderError: Error, Equatable, Sendable {
     case versionNotInMatrix(provider: ProviderKind, version: String)
     /// Automatic runs wait for package A's live verification of this version.
     case notLiveVerified(provider: ProviderKind, version: String)
+    /// The live acceptance never exercised this model with this version and role (ADR 0012).
+    case modelNotLiveVerified(provider: ProviderKind, version: String, model: String)
     case missingWorkingDirectory
     case unsupportedMode(RunMode)
     /// The provider broke its protocol (invalid frame, unknown terminal status, …).

@@ -38,6 +38,11 @@ public struct ProbeResults: Sendable, Equatable {
     public var cliErrors: [ProviderKind: String] = [:]
     public var confinement: ConfinementStatus?
     public var projects: Int = 0
+    /// The start-up sync of the real providers' model profiles (ADR 0012); nil when the app
+    /// registers none (tests, UI tests).
+    public var profileSync: ProfileSyncOutcome?
+    /// The stored model profiles, to show which ones are usable after the sync.
+    public var profiles: [ModelProfile] = []
 
     public init(gitPath: String? = nil) {
         self.gitPath = gitPath
@@ -148,6 +153,7 @@ public enum Onboarding {
         case nil:
             items.append(OnboardingItem(id: "sandbox", title: "Schreibschutz für Agenten", status: .unknown, detail: "Noch nicht geprüft."))
         }
+        if let item = profileItem(probes.profileSync, profiles: probes.profiles) { items.append(item) }
         items.append(probes.projects > 0
             ? OnboardingItem(id: "project", title: "Projekt", status: .ok, detail: "\(probes.projects) geöffnet")
             : OnboardingItem(
@@ -155,5 +161,36 @@ public enum Onboarding {
                 remedy: "Öffne ein eigenes, vertrauenswürdiges Git-Repository (⌘O)."
             ))
         return items
+    }
+
+    /// The outcome of the start-up profile sync (ADR 0012 §5): which real models an author or a
+    /// reviewer can use, or why the sync failed. Without a usable profile no author starts and
+    /// the review sheet offers no reviewer, so the reason must be visible here.
+    static func profileItem(_ outcome: ProfileSyncOutcome?, profiles: [ModelProfile]) -> OnboardingItem? {
+        switch outcome {
+        case nil:
+            return nil
+        case .failed(let reason):
+            return OnboardingItem(
+                id: "profiles", title: "Modellprofile", status: .missing, detail: "Abgleich beim Start fehlgeschlagen: \(reason)",
+                remedy: "Ohne Modellprofil startet kein Autor und es gibt keinen Prüfer. Starte KAIORX neu; bleibt der Fehler, notiere diesen Text."
+            )
+        case .synced:
+            let parts = ModelProfileSync.managed.sorted { $0.rawValue < $1.rawValue }.compactMap { provider -> String? in
+                let usable = profiles.filter { $0.provider == provider && $0.isUsable }
+                guard !usable.isEmpty else { return nil }
+                let models = Dictionary(grouping: usable) { "\($0.model), Stufe \($0.tier.rawValue)" }
+                    .sorted { $0.key < $1.key }
+                    .map { key, rows in "\(key) (" + AttemptRole.allCases.filter { role in rows.contains { $0.role == role } }.map(Labels.role).joined(separator: ", ") + ")" }
+                return "\(Labels.provider(provider)): " + models.joined(separator: "; ")
+            }
+            guard !parts.isEmpty else {
+                return OnboardingItem(
+                    id: "profiles", title: "Modellprofile", status: .warning, detail: "Kein nutzbares Modellprofil für Claude oder Codex.",
+                    remedy: "Aufgaben warten mit „Kein passendes Modellprofil“, bis eine live abgenommene Version Modellprofile hat."
+                )
+            }
+            return OnboardingItem(id: "profiles", title: "Modellprofile", status: .ok, detail: parts.joined(separator: " · "))
+        }
     }
 }

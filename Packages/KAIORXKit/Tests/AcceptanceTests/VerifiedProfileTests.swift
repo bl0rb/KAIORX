@@ -34,11 +34,19 @@ import Testing
             #expect(VerifiedModelProfiles.entries.contains { $0.provider == live.provider && $0.version == live.version },
                     "\(live.provider) \(live.version) ohne Modellprofil")
         }
-        // The a265 backfill: what the committed report exercised, as author and reviewer.
-        let models = VerifiedModelProfiles.entries.map { "\($0.provider.rawValue) \($0.version) \($0.model) \($0.roles.map(\.rawValue))" }
-        #expect(models == ["claude 2.1.329 sonnet [\"author\", \"reviewer\"]", "codex 0.170.0 gpt-6.2-sol [\"author\", \"reviewer\"]"])
-        #expect(VerifiedModelProfiles.entries.allSatisfy { VerifiedModelProfiles.verifiedAt($0) == 1_795_132_800_000 })
     }
+
+    /// The a265 backfill (ADR 0012 D1): what the committed report exercised, as author and
+    /// reviewer. Only the entries resting on that report: later owner runs add their own entries
+    /// through `matrix.patch`, proven by `profileProblems`, without touching this test.
+    @Test func theA265BackfillIsWhatItsReportExercised() {
+        let a265 = VerifiedModelProfiles.entries.filter { $0.evidence.reportPath == Self.a265Report }
+        let models = a265.map { "\($0.provider.rawValue) \($0.version) \($0.model) \($0.roles.map(\.rawValue))" }
+        #expect(models == ["claude 2.1.329 sonnet [\"author\", \"reviewer\"]", "codex 0.170.0 gpt-6.2-sol [\"author\", \"reviewer\"]"])
+        #expect(a265.allSatisfy { VerifiedModelProfiles.verifiedAt($0) == 1_795_132_800_000 })
+    }
+
+    static let a265Report = "docs/live-acceptance/20261120-1429-a265/report.json"
 
     @Test func profileIDsAreStableNameBasedAndBoundToTheVersion() throws {
         let entry = try #require(VerifiedModelProfiles.entries.first)
@@ -211,14 +219,25 @@ import Testing
         // The entry the block describes passes the evidence check against its report.
         #expect(f.problems(entry).isEmpty)
 
-        // A second run of the same version replaces the entry and keeps the tier the owner chose.
+        // A second run of the same model and version replaces the entry and keeps the tier the
+        // owner chose (ADR 0012 §6).
         let chosen = proposed.replacingOccurrences(of: "model: \"m\", roles: [.author, .reviewer],\n            tier: .standard",
                                                    with: "model: \"m\", roles: [.author, .reviewer],\n            tier: .intensive")
         #expect(chosen != proposed)
-        let replaced = try propose(chosen, model: "m2")
-        #expect(replaced.components(separatedBy: "version: \"9.0.0\"").count == 2)
-        #expect(replaced.contains("model: \"m2\"") && !replaced.contains("model: \"m\","))
-        #expect(replaced.contains("model: \"m2\", roles: [.author, .reviewer],\n            tier: .intensive"))
+        let rerun = try ProfileProposal.propose(
+            source: chosen, provider: "claude", version: "9.0.0", model: "m", roles: [.author], reportPath: "r2/report.json",
+            reportSHA256: "new-sha", mode: provider.mode, date: "2026-11-21"
+        )
+        #expect(rerun.components(separatedBy: "version: \"9.0.0\"").count == 2)
+        #expect(rerun.contains("model: \"m\", roles: [.author],\n            tier: .intensive"))
+        #expect(rerun.contains("verifiedOn: \"2026-11-21\"") && rerun.contains("reportSHA256: \"new-sha\"") && !rerun.contains("r/report.json"))
+        // Another model of the same version is added beside it, not swapped in.
+        let beside = try propose(chosen, model: "m2")
+        #expect(beside.components(separatedBy: "version: \"9.0.0\"").count == 3)
+        #expect(beside.contains("model: \"m\", roles: [.author, .reviewer],\n            tier: .intensive"))
+        #expect(beside.contains("model: \"m2\", roles: [.author, .reviewer],\n            tier: .standard"))
+        #expect(ProfileProposal.otherModels(source: beside, provider: "claude", version: "9.0.0", model: "m2") == ["m"])
+        #expect(ProfileProposal.otherModels(source: beside, provider: "claude", version: "9.0.1", model: "m2").isEmpty)
 
         // A role whose step failed is not proposed; nothing to propose without a role or marker.
         f.report.providers[0].steps[try #require(f.report.providers[0].steps.firstIndex { $0.id == StepID.read.rawValue })].status = "failed"
@@ -229,6 +248,83 @@ import Testing
         #expect(throws: ProfileProposal.Failure.markerNotFound) {
             try ProfileProposal.propose(source: "", provider: "claude", version: "9.0.0", model: "m", roles: [.author], reportPath: "x", reportSHA256: "x", mode: "x", date: "x")
         }
+    }
+
+    /// The kit's whole proposal for a report (`writeReport`), against the real sources. Finding:
+    /// a rerun on a version that is already `liveVerified` threw in the matrix proposal and left
+    /// no `matrix.patch`, so no stronger model could ever be proposed for that version.
+    @Test func aRunOnAnAlreadyLiveVersionProposesOnlyItsProfile() throws {
+        let compatibility = try String(contentsOfFile: Self.package.appending(path: "Sources/Providers/Compatibility.swift").path(percentEncoded: false), encoding: .utf8)
+        let catalog = try String(contentsOfFile: Self.catalogPath, encoding: .utf8)
+        let claude = try #require(CompatibilityMatrix.entry(for: .claude, version: "2.1.329"))
+        let codex = try #require(CompatibilityMatrix.entry(for: .codex, version: "0.170.0"))
+        let offline = try #require(CompatibilityMatrix.entries.first { $0.provider == .claude && $0.status == .offlineVerified })
+        let root = try temporaryRoot("profile-rerun")
+        let reportPath = "docs/live-acceptance/r2/report.json"
+        func provider(_ kind: ProviderKind, version: String, build: String, model: String, mode: String) -> AcceptanceReport.Provider {
+            AcceptanceReport.Provider(
+                provider: kind.rawValue, mode: mode, model: model, version: version, binarySHA256: build, nativePath: "~/b", signing: [], verdict: "Abo",
+                steps: StepID.allCases.filter { $0 != .parallel }.map {
+                    AcceptanceReport.Step(id: $0.rawValue, title: $0.title, required: $0.required, status: "passed", evidence: [], limitation: nil)
+                },
+                passed: true, restrictions: [], fixtures: []
+            )
+        }
+        func make(_ providers: [AcceptanceReport.Provider]) throws -> (ReportProposal.Result, String) {
+            let report = AcceptanceReport(runID: "r2", date: "2026-11-22", macOS: "x", arch: "arm64", kaiorxCommit: nil, providers: providers, parallel: nil)
+            let data = try report.json()
+            try FileManager.default.createDirectory(atPath: root + "/docs/live-acceptance/r2", withIntermediateDirectories: true)
+            try data.write(to: URL(filePath: root + "/" + reportPath))
+            let sha = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            return (try ReportProposal.make(report: report, reportPath: reportPath, reportSHA256: sha, compatibility: compatibility, profiles: catalog), sha)
+        }
+
+        // `run both` with a stronger Claude model on the live builds of both versions.
+        let (both, sha) = try make([
+            provider(.claude, version: claude.version, build: claude.builds[0], model: "opus", mode: "claudeSubscription"),
+            provider(.codex, version: codex.version, build: codex.builds[0], model: "gpt-6.2-sol", mode: "codexCliManaged"),
+        ])
+        #expect(both.compatibility == compatibility)
+        let proposed = try #require(both.profiles)
+        #expect(both.notes.count == 3)
+        #expect(both.notes.filter { $0.contains("schon liveVerified") }.count == 2)
+        #expect(both.notes.contains { $0.contains("opus kommt neben sonnet") })
+        // opus is added beside sonnet; the sonnet entry stays as it is.
+        let sonnet = try #require(VerifiedModelProfiles.entries.first { $0.provider == .claude && $0.model == "sonnet" })
+        #expect(proposed.contains(#"provider: .claude, version: "2.1.329", model: "sonnet", roles: [.author, .reviewer],"#))
+        #expect(proposed.contains("reportSHA256: \"\(sonnet.evidence.reportSHA256)\", mode: \"claudeSubscription\""))
+        #expect(proposed.contains(#"provider: .claude, version: "2.1.329", model: "opus", roles: [.author, .reviewer],"#))
+        // The same Codex model is replaced in place with the new report, keeping its tier.
+        #expect(proposed.components(separatedBy: #"provider: .codex, version: "0.170.0""#).count == 2)
+        #expect(proposed.components(separatedBy: "reportSHA256: \"\(sha)\"").count == 3)
+        // What the patch adds passes the evidence check against the unchanged matrix.
+        let opus = VerifiedModelEntry(
+            provider: .claude, version: claude.version, model: "opus", roles: [.author, .reviewer], tier: .intensive, effort: nil, typicalTokens: nil,
+            verifiedOn: "2026-11-22", evidence: LiveEvidence(reportPath: reportPath, reportSHA256: sha, mode: "claudeSubscription")
+        )
+        #expect(EvidenceCheck.profileProblems(opus, repositoryRoot: root).isEmpty)
+
+        // An offline version still gets its matrix change and its profile; a live version with
+        // another build gets neither, and neither blocks the other provider.
+        let (mixed, _) = try make([
+            provider(.claude, version: offline.version, build: "new-build", model: "sonnet", mode: "claudeSubscription"),
+            provider(.codex, version: codex.version, build: "another-build", model: "gpt-6.2-sol", mode: "codexCliManaged"),
+        ])
+        #expect(mixed.compatibility.contains("provider: .claude, version: \"\(offline.version)\", status: .liveVerified,"))
+        #expect(mixed.compatibility.contains(#"builds: ["new-build"],"#))
+        #expect(mixed.profiles?.contains("provider: .claude, version: \"\(offline.version)\", model: \"sonnet\",") == true)
+        #expect(mixed.profiles?.components(separatedBy: #"provider: .codex, version: "0.170.0""#).count == 2)
+        #expect(mixed.profiles?.contains("another-build") == false)
+        #expect(mixed.notes.count == 1 && mixed.notes[0].contains("anderes Programm"))
+
+        // A version the matrix does not list: a note, no proposal; no catalog source: matrix only.
+        let (unlisted, _) = try make([provider(.claude, version: "9.9.9", build: "x", model: "sonnet", mode: "claudeSubscription")])
+        #expect(unlisted.compatibility == compatibility && unlisted.profiles == catalog)
+        #expect(unlisted.notes.count == 1 && unlisted.notes[0].contains("nicht als offlineVerified"))
+        let report = AcceptanceReport(runID: "r3", date: "2026-11-22", macOS: "x", arch: "arm64", kaiorxCommit: nil,
+                                      providers: [provider(.claude, version: offline.version, build: "b", model: "sonnet", mode: "claudeSubscription")], parallel: nil)
+        let matrixOnly = try ReportProposal.make(report: report, reportPath: "x", reportSHA256: "y", compatibility: compatibility, profiles: nil)
+        #expect(matrixOnly.profiles == nil && matrixOnly.compatibility != compatibility)
     }
 
     // MARK: Source scan

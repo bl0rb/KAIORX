@@ -10,10 +10,28 @@ import Testing
 
 /// ADR 0012: the real app registers the verified catalog's profiles at start.
 @Suite struct ModelProfileSyncTests {
-    /// The installed builds the owner's acceptance passed (from the matrix, no binary is read).
+    /// The installed build of the newest catalog version the owner's acceptance passed (from the
+    /// matrix, no binary is read).
     static func verified(_ provider: ProviderKind) throws -> BinaryIdentity {
-        let entry = try #require(CompatibilityMatrix.entries.first { $0.provider == provider && $0.status == .liveVerified })
+        let newest = try #require(VerifiedModelProfiles.entries.filter { $0.provider == provider }.max { $0.verifiedOn < $1.verifiedOn })
+        let entry = try #require(CompatibilityMatrix.entries.first { $0.provider == provider && $0.version == newest.version && $0.status == .liveVerified })
         return BinaryIdentity(path: "/bin/\(provider.rawValue)", resolvedPath: "/bin/\(provider.rawValue)", sha256: try #require(entry.builds.first), version: entry.version)
+    }
+
+    /// What the catalog promises for these installed versions: every role of every entry of the
+    /// version, with the entry's date. Derived from the catalog, so a later owner run that adds
+    /// entries through `matrix.patch` does not need this test edited (the a265 values are pinned
+    /// only in `VerifiedProfileTests.theA265BackfillIsWhatItsReportExercised`).
+    static func promised(_ installed: [ProviderKind: BinaryIdentity]) -> [ModelProfileID: (row: String, verifiedAt: Int64?)] {
+        var promised: [ModelProfileID: (row: String, verifiedAt: Int64?)] = [:]
+        for entry in VerifiedModelProfiles.entries where installed[entry.provider]?.version == entry.version {
+            for role in entry.roles {
+                promised[VerifiedModelProfiles.profileID(entry, role: role)] = (
+                    "\(entry.provider.rawValue)|\(role.rawValue)|\(entry.tier.rawValue)|\(entry.model)", VerifiedModelProfiles.verifiedAt(entry)
+                )
+            }
+        }
+        return promised
     }
 
     func start(_ folder: String, _ registration: ProfileRegistration, gate: any CapabilityGate = AutomationGate(channel: .distributed)) async throws -> AppServices {
@@ -30,23 +48,58 @@ import Testing
         let registration = ProfileRegistration.verifiedCatalog(installed: { identities[$0] })
         let services = try await start(folder, registration)
         let usable = try await services.store.modelProfiles().filter(\.isUsable)
+        let promised = Self.promised(identities)
         let rows = usable.map { "\($0.provider.rawValue)|\($0.role.rawValue)|\($0.tier.rawValue)|\($0.model)" }.sorted()
-        #expect(rows == ["claude|author|standard|sonnet", "claude|reviewer|standard|sonnet", "codex|author|standard|gpt-6.2-sol", "codex|reviewer|standard|gpt-6.2-sol"])
-        #expect(usable.allSatisfy { $0.verifiedAt == 1_795_132_800_000 && $0.typicalTokens == nil && $0.effort == nil && $0.contextLimit == nil })
+        #expect(!promised.isEmpty && rows == promised.values.map { $0.row }.sorted())
+        #expect(usable.allSatisfy { promised[$0.id]?.verifiedAt == $0.verifiedAt && $0.verifiedAt != nil })
+        #expect(usable.allSatisfy { $0.typicalTokens == nil && $0.effort == nil && $0.contextLimit == nil })
         guard case .synced(let report)? = services.profileSync else { Issue.record("\(String(describing: services.profileSync))"); return }
-        #expect(report.inserted.count == 4)
-        // What the scheduler and the review sheet look up.
-        #expect(ModelProfile.smallest(usable, provider: .claude, role: .author, atLeast: .fast)?.model == "sonnet")
-        #expect(ReviewerChoice.profile(usable, provider: .codex)?.model == "gpt-6.2-sol")
-        #expect(ReviewerChoice.profile(usable, provider: .claude)?.model == "sonnet")
-        #expect(ModelProfile.smallest(usable, provider: .claude, role: .author, atLeast: .intensive) == nil)
+        let desired = ModelProfileSync.desired(installed: identities)
+        #expect(report.inserted.count == desired.count)
+        // What the scheduler and the review sheet look up: an author and a reviewer of each provider.
+        for provider in [ProviderKind.claude, .codex] {
+            #expect(ModelProfile.smallest(usable, provider: provider, role: .author, atLeast: .fast).map { promised[$0.id] != nil } == true)
+            #expect(ReviewerChoice.profile(usable, provider: provider).map { promised[$0.id] != nil } == true)
+            // Intensive tasks wait until a profile of that tier is accepted (ADR 0012 D3).
+            #expect((ModelProfile.smallest(usable, provider: provider, role: .author, atLeast: .intensive) != nil)
+                    == promised.values.contains { $0.row.hasPrefix("\(provider.rawValue)|author|intensive|") })
+        }
         await AppBootstrap.shutdown(services)
 
         // The next start finds everything in place.
         let again = try await start(folder, registration)
         #expect(again.profileSync == .synced(ModelProfileSyncReport()))
-        #expect(try await again.store.modelProfiles().count == 4)
+        #expect(try await again.store.modelProfiles().count == desired.count)
         await AppBootstrap.shutdown(again)
+    }
+
+    /// Finding: a failed start-up sync was recorded but never shown. The onboarding list now
+    /// names the usable models or the failure's reason.
+    @Test func theOnboardingListShowsTheSyncOutcome() async throws {
+        let identities = [ProviderKind.claude: try Self.verified(.claude), .codex: try Self.verified(.codex)]
+        let services = try await start(try temporaryFolder("profiles-onboarding"), .verifiedCatalog(installed: { identities[$0] }))
+        var probes = ProbeResults(gitPath: "/usr/bin/git")
+        probes.profileSync = services.profileSync
+        probes.profiles = try await services.store.modelProfiles()
+        await AppBootstrap.shutdown(services)
+        let item = try #require(Onboarding.checklist(probes).first { $0.id == "profiles" })
+        #expect(item.status == .ok && item.detail.contains("Claude: ") && item.detail.contains("Codex: "))
+        for row in Self.promised(identities).values {
+            #expect(item.detail.contains(String(row.row.split(separator: "|")[3])), "\(row.row)")
+        }
+        #expect(item.detail.contains("(Autor, Reviewer)"))
+        // The order in the list: after the sandbox check, before the project.
+        let ids = Onboarding.checklist(probes).map(\.id)
+        #expect(ids.firstIndex(of: "profiles").map { $0 == ids.firstIndex(of: "sandbox")! + 1 } == true)
+
+        probes.profileSync = .failed("SQLite busy (5)")
+        let failed = try #require(Onboarding.checklist(probes).first { $0.id == "profiles" })
+        #expect(failed.status == .missing && failed.detail == "Abgleich beim Start fehlgeschlagen: SQLite busy (5)" && failed.remedy != nil)
+        probes.profileSync = .synced(ModelProfileSyncReport())
+        probes.profiles = probes.profiles.map { var disabled = $0; disabled.disabledReason = "catalog:removed"; return disabled }
+        #expect(Onboarding.checklist(probes).first { $0.id == "profiles" }?.status == .warning)
+        probes.profileSync = nil
+        #expect(!Onboarding.checklist(probes).contains { $0.id == "profiles" })
     }
 
     @Test func withoutRegistrationNothingIsRegistered() async throws {
@@ -68,13 +121,17 @@ import Testing
         let distributed = try await start(try temporaryFolder("profiles-dist"), .verifiedCatalog(installed: nil),
                                           gate: AutomationGate(channel: .distributed, sources: sources))
         #expect(calls.withLock { $0 } == 0)
-        #expect(try await distributed.store.modelProfiles().filter(\.isUsable).count == 4)
+        let newest = ModelProfileSync.desired(installed: [:]).filter(\.isUsable)
+        #expect(!newest.isEmpty)
+        #expect(try await distributed.store.modelProfiles().filter(\.isUsable).map(\.id).sorted { $0.uuidString < $1.uuidString }
+                == newest.map(\.id).sorted { $0.uuidString < $1.uuidString })
         await AppBootstrap.shutdown(distributed)
 
         let personal = try await start(try temporaryFolder("profiles-personal"), .verifiedCatalog(installed: nil),
                                        gate: AutomationGate(channel: .personal, sources: sources))
         #expect(calls.withLock { $0 } == 2)
-        #expect(try await personal.store.modelProfiles().filter(\.isUsable).count == 4)
+        #expect(try await personal.store.modelProfiles().filter(\.isUsable).count
+                == ModelProfileSync.desired(installed: [.claude: identity]).filter(\.isUsable).count)
         await AppBootstrap.shutdown(personal)
     }
 
@@ -121,12 +178,30 @@ import Testing
 
     /// A self-updated Claude keeps its profiles usable, so the gate's reason shows.
     @Test func anUnverifiedInstallKeepsTheNewestVerifiedProfiles() throws {
+        let identities = [ProviderKind.claude: try Self.verified(.claude), .codex: try Self.verified(.codex)]
+        let newest = Set(Self.promised(identities).keys)
         var updated = try Self.verified(.claude)
         updated.version = "2.1.330"
         let profiles = ModelProfileSync.desired(installed: [.claude: updated, .codex: try Self.verified(.codex)])
-        #expect(profiles.filter(\.isUsable).count == 4)
+        #expect(!newest.isEmpty && Set(profiles.filter(\.isUsable).map(\.id)) == newest)
         var otherBuild = try Self.verified(.claude)
         otherBuild.sha256 = "another-build"
-        #expect(ModelProfileSync.desired(installed: [.claude: otherBuild]).filter(\.isUsable).count == 4)
+        #expect(Set(ModelProfileSync.desired(installed: [.claude: otherBuild]).filter(\.isUsable).map(\.id)) == newest)
+    }
+
+    /// Finding: with the installation unknown (distributed channel, a failed probe), the newest
+    /// version's profiles are usable even if an older verified build is installed. The profile
+    /// may then name a model that never ran with the installed version; the adapter's model
+    /// check refuses that start instead of running the unverified pair.
+    @Test func aFallbackProfileNeverRunsOnAnotherVerifiedVersion() throws {
+        let entries = [entry("1.0", model: "model-a", on: "2026-11-20"), entry("2.0", model: "model-b", on: "2026-11-21")]
+        let profiles = ModelProfileSync.desired(entries: entries, matrix: [live("1.0", build: "b1"), live("2.0", build: "b2")], installed: [:])
+        let picked = try #require(ModelProfile.smallest(profiles, provider: .claude, role: .author, atLeast: .fast))
+        #expect(picked.model == "model-b")
+        let installed = BinaryIdentity(path: "/c", resolvedPath: "/c", sha256: "b1", version: "1.0")
+        #expect(throws: ProviderError.modelNotLiveVerified(provider: .claude, version: "1.0", model: "model-b")) {
+            try AdapterPolicy().checkModel(.claude, identity: installed, model: picked.model, role: .author, catalog: entries)
+        }
+        try AdapterPolicy().checkModel(.claude, identity: installed, model: "model-a", role: .author, catalog: entries)
     }
 }

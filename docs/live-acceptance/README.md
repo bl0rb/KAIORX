@@ -50,9 +50,9 @@ Packages/KAIORXKit/.build/debug/kaiorx-acceptance run both --model <claude-model
    ```
 
    This copies the report, the redacted recordings and, only if the run passed, `matrix.patch`. Review the copied fixtures before committing them.
-3. **Review the patch.** It changes two files:
-   - `Compatibility.swift`: the matrix entry becomes `liveVerified` with the build and the report.
-   - `VerifiedModelProfiles.swift`: the model the run used, as author and reviewer, with tier `standard` (ADR 0012). The tier is a product setting: you may change it in the patch before committing. Leave the other fields as proposed.
+3. **Review the patch.** It changes up to two files:
+   - `Compatibility.swift`: the matrix entry becomes `liveVerified` with the build and the report. A version that is already `liveVerified` with the same build keeps its entry; the patch then changes only the profiles (the kit says so).
+   - `VerifiedModelProfiles.swift`: the model the run used, as author and reviewer, with tier `standard` (ADR 0012). A rerun of the same model and version replaces its entry and keeps the tier; another model of the same version is added beside the existing one. The tier is a product setting: you may change it in the patch before committing, and you must when the kit notes that another model of the version exists (one model per version, role and tier; for example `intensive` for a stronger model). Leave the other fields as proposed.
 4. **Apply the patch yourself** and commit it together with the report:
 
    ```sh

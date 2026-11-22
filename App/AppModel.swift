@@ -163,6 +163,9 @@ final class AppModel {
         }
         var adjusted = results
         adjusted.projects = state.projects.count
+        // The start-up profile sync (ADR 0012): which models are usable, or why the sync failed.
+        adjusted.profileSync = services.profileSync
+        adjusted.profiles = (try? await services.store.modelProfiles()) ?? []
         let support = (try? AppPaths.supportFolder()) ?? ""
         onboarding = Onboarding.checklist(adjusted, configDirectories: [.claude: support + "/claude-config", .codex: support + "/codex-home"])
     }

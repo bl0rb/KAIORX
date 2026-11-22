@@ -173,6 +173,7 @@ cd ~/kaiorx-e2e
    - „Codex“: „Version 0.170.0, live abgenommen“.
    - „Claude-Anmeldung“ und „Codex-Anmeldung“: „Wird beim ersten Lauf geprüft“, je mit „Befehl kopieren: …“. Das ist normal: KAIORX liest keine Anmeldedaten.
    - „Schreibschutz für Agenten“: „sandbox-exec wirkt.“ (vorher kurz „Noch nicht geprüft.“).
+   - „Modellprofile“: Bereit, „Claude: sonnet, Stufe standard (Autor, Reviewer) · Codex: gpt-6.2-sol, Stufe standard (Autor, Reviewer)“.
    - „Projekt“: „Noch kein Projekt geöffnet.“
 
    Das Onboarding prüft nur die Version, nicht den Build. Die Prüfsumme hast du in 4.2 geprüft.
@@ -195,7 +196,11 @@ cd ~/kaiorx-e2e
    codex|reviewer|standard|gpt-6.2-sol
    ```
 
-   Ist die Ausgabe leer, notiere das als Abweichung: Dann hat der Abgleich beim Start nicht geklappt.
+   Ist die Ausgabe leer, notiere das als Abweichung: Dann hat der Abgleich beim Start nicht geklappt. Den Grund zeigt der Onboarding-Eintrag „Modellprofile“ („Abgleich beim Start fehlgeschlagen: …“); schreibe den Text ab. Das Systemprotokoll hält ihn ebenfalls fest:
+
+   ```sh
+   log show --last 1h --predicate 'subsystem == "dev.kaiorx.KAIORX" AND category == "profiles"'
+   ```
 
 ## 6 Projekt öffnen und vertrauen
 
@@ -543,7 +548,7 @@ Hake ab und trage Zeit und Beobachtung im Protokoll ein. Fett markiert ist der H
 **Start und Projekt**
 
 - [ ] **E5.1** App startet, „Willkommen bei KAIORX“
-- [ ] **E5.2** Onboarding: Git, Claude und Codex „live abgenommen“, Anmeldung „Wird beim ersten Lauf geprüft“, „sandbox-exec wirkt.“
+- [ ] **E5.2** Onboarding: Git, Claude und Codex „live abgenommen“, Anmeldung „Wird beim ersten Lauf geprüft“, „sandbox-exec wirkt.“, „Modellprofile“ bereit
 - [ ] **E5.4** vier Modellprofile: Claude `sonnet` und Codex `gpt-6.2-sol`, je Autor und Prüfer, Stufe `standard`
 - [ ] **E6.1–E6.3** Projekt per „Vertrauen und öffnen“ geöffnet, Return wählte „Nicht öffnen“
 

@@ -93,6 +93,7 @@ public final class CodexAppServerAdapter: AgentAdapter {
         guard let workingDirectory = spec.workingDirectory else { throw ProviderError.missingWorkingDirectory }
         let identity = try await identity.current(configuration.executable, host: host)
         try configuration.policy.check(.codex, identity: identity)
+        try configuration.policy.checkModel(.codex, identity: identity, model: spec.effectiveModel, role: spec.role)
         let temporary = configuration.temporaryRoot + "/" + spec.attemptID.uuidString
         let confinement = configuration.confinement(spec, temporary)
         if confinement == nil, configuration.policy.requiresConfinement { throw ProviderError.confinementRequired }

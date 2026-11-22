@@ -1,6 +1,7 @@
 import Domain
 import Foundation
 import Orchestration
+import os
 import ProcessHost
 import Providers
 import Storage
@@ -208,9 +209,18 @@ public enum AppBootstrap {
                 installed[provider] = await gate.installedIdentity(provider)
             }
         }
-        do { return .synced(try await ModelProfileSync.run(store: store, installed: installed)) }
-        catch { return .failed(String(describing: error)) }
+        let outcome: ProfileSyncOutcome
+        do { outcome = .synced(try await ModelProfileSync.run(store: store, installed: installed)) }
+        catch { outcome = .failed(String(describing: error)) }
+        // The onboarding list shows the outcome; the unified log keeps it for a later diagnosis.
+        switch outcome {
+        case .failed(let reason): profileLog.error("Modellprofil-Abgleich fehlgeschlagen: \(reason, privacy: .public)")
+        case .synced(let report): profileLog.notice("Modellprofile abgeglichen: \(report.inserted.count) neu, \(report.updated.count) nachgeführt, \(report.removed.count) entfernt")
+        }
+        return outcome
     }
+
+    private static let profileLog = Logger(subsystem: "dev.kaiorx.KAIORX", category: "profiles")
 
     /// Quitting: running attempts are stopped (they become `uncertain` only if the stop fails),
     /// terminals hang up, then the store closes.

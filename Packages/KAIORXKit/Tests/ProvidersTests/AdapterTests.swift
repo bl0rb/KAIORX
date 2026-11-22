@@ -128,6 +128,39 @@ func received(_ root: String, _ spec: AttemptSpec) throws -> JSONValue {
             }
         }
     }
+
+    /// ADR 0012: the product runs only a model the live acceptance exercised for exactly the
+    /// binary's version and the attempt's role, whichever profile the scheduler picked.
+    @Test func automaticRunsOnlyUseAModelVerifiedForTheBinarysVersion() throws {
+        for entry in VerifiedModelProfiles.entries {
+            let identity = BinaryIdentity(path: "/x", resolvedPath: "/x", sha256: "", version: entry.version)
+            for role in entry.roles { try AdapterPolicy().checkModel(entry.provider, identity: identity, model: entry.model, role: role) }
+        }
+        let v1 = VerifiedModelEntry(
+            provider: .claude, version: "1.0", model: "model-a", roles: [.author], tier: .standard, effort: nil, typicalTokens: nil,
+            verifiedOn: "2026-11-20", evidence: LiveEvidence(reportPath: "r.json", reportSHA256: "x", mode: "claudeSubscription")
+        )
+        var v2 = v1
+        v2.version = "2.0"
+        v2.model = "model-b"
+        let catalog = [v1, v2]
+        let installed = BinaryIdentity(path: "/x", resolvedPath: "/x", sha256: "b1", version: "1.0")
+        try AdapterPolicy().checkModel(.claude, identity: installed, model: "model-a", role: .author, catalog: catalog)
+        // The newer version's model on the older binary never ran live together.
+        #expect(throws: ProviderError.modelNotLiveVerified(provider: .claude, version: "1.0", model: "model-b")) {
+            try AdapterPolicy().checkModel(.claude, identity: installed, model: "model-b", role: .author, catalog: catalog)
+        }
+        // A role the acceptance did not exercise, and another provider's entry, do not count.
+        #expect(throws: ProviderError.modelNotLiveVerified(provider: .claude, version: "1.0", model: "model-a")) {
+            try AdapterPolicy().checkModel(.claude, identity: installed, model: "model-a", role: .reviewer, catalog: catalog)
+        }
+        #expect(throws: ProviderError.modelNotLiveVerified(provider: .codex, version: "1.0", model: "model-a")) {
+            try AdapterPolicy().checkModel(.codex, identity: installed, model: "model-a", role: .author, catalog: catalog)
+        }
+        // Fixtures and the owner's acceptance (which exercises a model for the first time) are not bound.
+        try AdapterPolicy.fixtureTesting.checkModel(.claude, identity: installed, model: "model-b", role: .author, catalog: catalog)
+        try AdapterPolicy.ownerAcceptance(binarySHA256: "b1").checkModel(.claude, identity: installed, model: "opus", role: .author, catalog: catalog)
+    }
 }
 
 // MARK: Claude Code

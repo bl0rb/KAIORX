@@ -93,6 +93,7 @@ public final class ClaudeCodeAdapter: AgentAdapter {
         let arguments = try ClaudeCommand.arguments(for: spec)
         let identity = try await identity.current(configuration.executable, host: host)
         try configuration.policy.check(.claude, identity: identity)
+        try configuration.policy.checkModel(.claude, identity: identity, model: spec.effectiveModel, role: spec.role)
         let temporary = configuration.temporaryRoot + "/" + spec.attemptID.uuidString
         let confinement = configuration.confinement(spec, temporary)
         if confinement == nil, configuration.policy.requiresConfinement { throw ProviderError.confinementRequired }

@@ -481,7 +481,10 @@ extension Store {
         return try ids.map { try loadConsent(db, $0) }
     }
 
-    /// Records a model profile. `verifiedAt` outside tests comes only from package A.
+    /// Records a model profile by hand: tests, the UI-test seed and the app's UI-test branch only.
+    /// The real providers' profiles (and their `verifiedAt`) come only from
+    /// `syncCatalogModelProfiles`, run by `ModelProfileSync` from the evidence-checked catalog
+    /// (ADR 0012).
     public func registerModelProfile(_ profile: ModelProfile) throws {
         let db = try connection()
         try db.run(

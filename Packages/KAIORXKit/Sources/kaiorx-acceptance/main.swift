@@ -102,38 +102,28 @@ func writeReport(_ folders: RunFolders, state: RunState, context: KitContext) as
     guard let sourcePath = context.compatibilitySource, let source = try? String(contentsOfFile: sourcePath, encoding: .utf8) else { return }
     let sha = json.sha256Hex
     let reportPath = "docs/live-acceptance/\(state.runID)/report.json"
-    let passed = report.providers.filter { $0.passed && $0.version != nil && $0.binarySHA256 != nil }
-    var proposed = source
-    for provider in passed {
-        proposed = try MatrixProposal.propose(
-            source: proposed, provider: provider.provider, version: provider.version!, binarySHA256: provider.binarySHA256!,
-            reportPath: reportPath, reportSHA256: sha, mode: provider.mode
+    let profiles = context.verifiedProfilesSource.flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }
+    if profiles == nil { print("Hinweis: VerifiedModelProfiles.swift nicht gefunden; der Patch schlägt keine Modellprofile vor.") }
+    // The matrix change and the verified model profiles of the same run (ADR 0012), as two files
+    // in one patch. A version that is already liveVerified with this build gets only its profile.
+    let proposal = try ReportProposal.make(report: report, reportPath: reportPath, reportSHA256: sha, compatibility: source, profiles: profiles)
+    for note in proposal.notes { print("Hinweis: \(note)") }
+    var patch = ""
+    if proposal.compatibility != source {
+        patch += try await MatrixProposal.diff(
+            original: source, proposed: proposal.compatibility, label: "Packages/KAIORXKit/Sources/Providers/Compatibility.swift",
+            host: context.host, scratch: folders.temporary
         )
     }
-    guard proposed != source else {
-        print("Keine Matrixänderung: kein Anbieter hat bestanden.")
-        return
+    if let profiles, let proposed = proposal.profiles, proposed != profiles {
+        patch += try await MatrixProposal.diff(
+            original: profiles, proposed: proposed, label: "Packages/KAIORXKit/Sources/Providers/VerifiedModelProfiles.swift",
+            host: context.host, scratch: folders.temporary
+        )
     }
-    var patch = try await MatrixProposal.diff(
-        original: source, proposed: proposed, label: "Packages/KAIORXKit/Sources/Providers/Compatibility.swift", host: context.host, scratch: folders.temporary
-    )
-    // The verified model profiles of the same run (ADR 0012), as a second file in the same patch.
-    if let profilesPath = context.verifiedProfilesSource, let profiles = try? String(contentsOfFile: profilesPath, encoding: .utf8) {
-        var proposedProfiles = profiles
-        for provider in passed {
-            proposedProfiles = try ProfileProposal.propose(
-                source: proposedProfiles, provider: provider.provider, version: provider.version!, model: provider.model,
-                roles: ProfileProposal.roles(provider), reportPath: reportPath, reportSHA256: sha, mode: provider.mode, date: report.date
-            )
-        }
-        if proposedProfiles != profiles {
-            patch += try await MatrixProposal.diff(
-                original: profiles, proposed: proposedProfiles, label: "Packages/KAIORXKit/Sources/Providers/VerifiedModelProfiles.swift",
-                host: context.host, scratch: folders.temporary
-            )
-        }
-    } else {
-        print("Hinweis: VerifiedModelProfiles.swift nicht gefunden; der Patch schlägt keine Modellprofile vor.")
+    guard !patch.isEmpty else {
+        print("Keine Änderung an Matrix oder Modellprofilen vorgeschlagen.")
+        return
     }
     try Data(patch.utf8).write(to: URL(filePath: folders.root + "/matrix.patch"), options: .atomic)
     print("Vorgeschlagene Matrixänderung und Modellprofile: \(folders.root)/matrix.patch (prüfen, selbst anwenden und committen)")

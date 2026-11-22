@@ -16,6 +16,11 @@ import Storage
 ///   not live-verified") instead of "no matching model profile". Safety does not depend on it:
 ///   the gate and `AdapterPolicy` refuse every start of an unverified build.
 ///
+/// The fallback may pick a version other than the installed one when the installation is not
+/// read (distributed channel, a failed probe). A profile of that version may name a model that
+/// never ran with the installed build; `AdapterPolicy.checkModel` refuses such a start at every
+/// launch, so only a model/version/role triple the catalog lists ever runs.
+///
 /// Profiles of other catalog versions get `catalog:otherVersion <version>`; those whose matrix
 /// entry is not `liveVerified` get `catalog:versionNotLiveVerified`.
 public enum ModelProfileSync {
