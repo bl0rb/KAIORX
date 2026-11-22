@@ -174,7 +174,7 @@ struct ChainFixture {
         await f.close()
     }
 
-    @Test func discardGrantsFirstThenSendsThePlanTaskBack() async throws {
+    @Test func discardGrantsAndSendsThePlanTaskBackAtOnce() async throws {
         let f = try await ChainFixture("chain-discard")
         let planTask = PlanTaskDraft(key: "doku", title: "Doku", criteria: ["Leerwert dokumentiert"], writePaths: ["docs/"])
         let seeded = try await UITestSeed.authorResult(
@@ -202,8 +202,10 @@ struct ChainFixture {
         try await f.actions.discardResult(shown)
         let after = try #require(try await f.store.task(task.id))
         #expect(after.state == .needsChanges)
-        let grant = try #require(try await f.store.decisions(task: task.id).last { $0.rule == "userGrant" })
-        #expect(grant.actor == WorkbenchActor.user && grant.evidence["afterOrdinal"] == "1")
+        let grants = try await f.store.decisions(task: task.id).filter { $0.rule == "userGrant" }
+        #expect(grants.count == 1)
+        let grant = try #require(grants.last)
+        #expect(grant.actor == WorkbenchActor.user && grant.evidence["afterOrdinal"] == "1" && grant.outcome == "granted")
         let events = try await f.store.eventHeaders(after: 0, project: f.project, limit: 10_000).filter { $0.taskID == task.id }
         let granted = try #require(events.last { $0.kind == .policyDecided }?.seq)
         let sentBack = try #require(events.last { $0.kind == .taskStateChanged }?.seq)
@@ -278,6 +280,12 @@ struct ChainFixture {
         sheet = DecisionSheet.resolveConflicts(preview, candidate: candidate, task: task, choices: ["KONFLIKT.md": .result])
         #expect(sheet.canApprove && sheet.scope.contains("KONFLIKT.md: Beide neu angelegt – Ergebnis übernehmen"))
         await f.close()
+    }
+
+    /// The store's slot refusal at the reservation (ADR 0011 §8) reads like the sheet's blocker.
+    @Test func aSlotRefusalInTheReservationIsWorded() {
+        #expect(ChainMessages.text(PlanningError.slotsFull(global: true, provider: .codex)) == "Alle Plätze sind belegt.")
+        #expect(ChainMessages.text(PlanningError.slotsFull(global: false, provider: .codex)) == "Alle Plätze des Prüferkontos bei Codex sind belegt.")
     }
 
     @Test func reviewStartsWithBlockersAndEmptyImportsAreRefusedBeforeTheDriver() async throws {

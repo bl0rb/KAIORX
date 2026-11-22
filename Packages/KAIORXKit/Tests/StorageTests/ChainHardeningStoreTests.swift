@@ -8,6 +8,11 @@ extension Store {
     func areaHolderIDs(job: JobID) throws -> Set<TaskID> {
         Set(try areaHolders(try connection(), job: job).map(\.id))
     }
+
+    /// A single integer the query returns (a row count).
+    func testCount(_ sql: String, _ values: [SQLValue] = []) throws -> Int {
+        Int(try connection().query(sql, values) { $0.int(0) }.first ?? 0)
+    }
 }
 
 /// Store checks the candidate chain relies on (ADR 0011 §5, ADR 0005 §6).
@@ -123,5 +128,124 @@ extension Store {
         #expect(try await store.activeAttemptCount(account: nil) == 1)
         #expect(try await store.activeAttemptCount(account: account) == 1)
         #expect(try await store.activeAttemptCount(account: AccountID()) == 0)
+    }
+
+    // MARK: Atomic discard (ADR 0011 §7)
+
+    func grants(_ store: Store, _ task: TaskID) async throws -> [DecisionRecord] {
+        try await store.decisions(task: task).filter { $0.rule == Store.userGrantRule }
+    }
+
+    func lastSeq(_ store: Store) async throws -> Int64 {
+        try await store.events(after: 0, limit: 100_000).last?.seq ?? 0
+    }
+
+    /// Simulates a crash between the grant and the move: the task's move to `needsChanges` fails.
+    static let failingMove = """
+        CREATE TEMP TRIGGER failing_move BEFORE UPDATE OF state ON task WHEN NEW.state = 'needsChanges'
+        BEGIN SELECT RAISE(ABORT, 'crash'); END
+        """
+
+    @Test func discardGrantsAndSendsBackInOneTransaction() async throws {
+        let fixture = try Fixture()
+        let store = try fixture.open()
+        let seed = try await fixture.seed(store)
+        _ = try await authorResult(store, seed)
+        let before = try #require(try await store.task(seed.task))
+        let from = try await lastSeq(store)
+
+        let decision = try await store.discardResult(task: seed.task, expectedVersion: before.version, actor: "user")
+        let after = try #require(try await store.task(seed.task))
+        #expect(after.state == .needsChanges && after.version == before.version + 1)
+        let grants = try await grants(store, seed.task)
+        #expect(grants.count == 1)
+        let grant = try #require(grants.first)
+        #expect(grant.id == decision && grant.outcome == "granted" && grant.actor == "user")
+        #expect(grant.evidence["afterOrdinal"] == "1" && grant.remainingAttempts == 3)
+        let events = try await store.events(after: from, limit: 100).filter { $0.taskID == seed.task }
+        let granted = try #require(events.first { $0.kind == .policyDecided }?.seq)
+        let sentBack = try #require(events.first { $0.kind == .taskStateChanged }?.seq)
+        #expect(granted < sentBack)
+    }
+
+    @Test func aStaleDiscardWritesNothing() async throws {
+        let fixture = try Fixture()
+        let store = try fixture.open()
+        let seed = try await fixture.seed(store)
+        _ = try await authorResult(store, seed)
+        let task = try #require(try await store.task(seed.task))
+        let seq = try await lastSeq(store)
+        await #expect {
+            try await store.discardResult(task: seed.task, expectedVersion: task.version - 1, actor: "user")
+        } throws: { ($0 as? StoreError)?.isVersionConflict == true }
+        #expect(try await grants(store, seed.task).isEmpty)
+        #expect(try await lastSeq(store) == seq)
+        #expect(try await store.task(seed.task) == task)
+    }
+
+    @Test func aDiscardOutsideResultReadyWritesNothing() async throws {
+        let fixture = try Fixture()
+        let store = try fixture.open()
+        let seed = try await fixture.seed(store)
+        _ = try await authorResult(store, seed)
+        try await moveTask(store, seed.task, to: .blocked)
+        let held = try #require(try await store.task(seed.task))
+        let seq = try await lastSeq(store)
+        await #expect(throws: DomainError.invalidTransition(entity: "task", from: "blocked", to: "needsChanges")) {
+            try await store.discardResult(task: seed.task, expectedVersion: held.version, actor: "user")
+        }
+        #expect(try await grants(store, seed.task).isEmpty)
+        #expect(try await lastSeq(store) == seq)
+        #expect(try await store.task(seed.task) == held)
+    }
+
+    @Test func aFailedMoveRollsBackTheGrant() async throws {
+        let fixture = try Fixture()
+        let store = try fixture.open()
+        let seed = try await fixture.seed(store)
+        _ = try await authorResult(store, seed)
+        let task = try #require(try await store.task(seed.task))
+        let seq = try await lastSeq(store)
+        try await store.rawExecute(Self.failingMove)
+        await #expect(throws: (any Error).self) {
+            try await store.discardResult(task: seed.task, expectedVersion: task.version, actor: "user")
+        }
+        #expect(try await grants(store, seed.task).isEmpty)
+        #expect(try await store.events(after: seq, limit: 100).isEmpty)
+        #expect(try await store.task(seed.task) == task)
+
+        try await store.rawExecute("DROP TRIGGER failing_move")
+        try await store.discardResult(task: seed.task, expectedVersion: task.version, actor: "user")
+        #expect(try await grants(store, seed.task).count == 1)
+        #expect(try await store.task(seed.task)?.state == .needsChanges)
+    }
+
+    @Test func grantAttemptsIsOneTransaction() async throws {
+        let fixture = try Fixture()
+        let store = try fixture.open()
+        let seed = try await fixture.seed(store)
+        _ = try await authorResult(store, seed)
+        try await store.setWaitReason(seed.task, WaitReason(.userDecision))
+        let waiting = try #require(try await store.task(seed.task))
+        #expect(waiting.waitReason != nil)
+
+        // Clearing the wait reason fails: the decision is not kept either.
+        try await store.rawExecute("""
+            CREATE TEMP TRIGGER failing_clear BEFORE UPDATE OF wait_reason ON task WHEN NEW.wait_reason IS NULL
+            BEGIN SELECT RAISE(ABORT, 'crash'); END
+            """)
+        await #expect(throws: (any Error).self) { try await store.grantAttempts(task: seed.task, tier: .intensive, actor: "user") }
+        #expect(try await grants(store, seed.task).isEmpty)
+        #expect(try await store.task(seed.task) == waiting)
+        try await store.rawExecute("DROP TRIGGER failing_clear")
+
+        let from = try await lastSeq(store)
+        try await store.grantAttempts(task: seed.task, tier: .intensive, actor: "user")
+        let after = try #require(try await store.task(seed.task))
+        #expect(after.waitReason == nil && after.version == waiting.version && after.state == waiting.state)
+        let grant = try #require(try await grants(store, seed.task).first)
+        #expect(grant.evidence == ["afterOrdinal": "1", "tier": CapabilityTier.intensive.rawValue] && grant.outcome == "granted")
+        let kinds = try await store.events(after: from, limit: 100).map(\.kind)
+        #expect(kinds == [.policyDecided, .taskReady])
     }
 }

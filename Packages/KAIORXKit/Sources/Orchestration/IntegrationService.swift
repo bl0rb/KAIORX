@@ -311,8 +311,12 @@ public actor IntegrationService {
 
     /// Starts a read-only review of exactly the candidate's commit at another provider than the
     /// author's (for a revert: the author of the reverted change). Collect it with
-    /// `collectReview` once the attempt has finished.
-    public func startReview(_ id: CandidateID, provider: ProviderKind, model: String, criteria: String) async throws -> AttemptID {
+    /// `collectReview` once the attempt has finished. With `limits`, the store refuses the
+    /// reservation when every slot is taken (`PlanningError.slotsFull`, ADR 0011 §8); the
+    /// prepared reviewer worktree is then removed.
+    public func startReview(
+        _ id: CandidateID, provider: ProviderKind, model: String, criteria: String, limits: SchedulerLimits? = nil
+    ) async throws -> AttemptID {
         let candidate = try await candidate(id, in: [.reviewing])
         guard let commit = candidate.candidateOID, let task = candidate.taskID else { throw IntegrationError.candidateWithoutTask(id) }
         try await requireTaskInVerification(candidate)
@@ -354,7 +358,7 @@ public actor IntegrationService {
             let result = try await coordinator.start(StartRequest(
                 taskID: task, projectID: candidate.projectID, role: .reviewer, provider: provider, modelProfile: "review",
                 model: model, workingDirectory: path, prompt: prompt,
-                accountID: reviewerConsent?.draft.accountID, consentID: reviewerConsent?.id
+                accountID: reviewerConsent?.draft.accountID, consentID: reviewerConsent?.id, reviewerSlots: limits
             ))
             switch result {
             case .started(let attempt), .alreadyRequested(let attempt):

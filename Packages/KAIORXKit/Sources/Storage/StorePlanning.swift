@@ -23,6 +23,8 @@ public enum PlanningError: Error, Equatable, Sendable {
     case jobClosed(JobID, JobState)
     /// The user's quota block or revocation stops this account.
     case accountBlocked(AccountID)
+    /// Every slot is taken, globally or for the reviewer's account (ADR 0005 §6, ADR 0011 §8).
+    case slotsFull(global: Bool, provider: ProviderKind)
     /// A plan task's review needs a valid reviewer consent for its provider.
     case noReviewerConsent(ProviderKind)
 }
@@ -1003,6 +1005,54 @@ extension Store {
             db, kind: .policyDecided, projectID: project, taskID: taskID?.uuidString, attemptID: attemptID?.uuidString,
             payload: Canonical.encode(["decisionID": id.uuidString, "rule": rule, "outcome": outcome, "actor": actor]), dedupKey: nil, now: now
         )
+        return id
+    }
+
+    /// The scheduler's grant rule; the latest such decision is the one that counts.
+    public static let userGrantRule = "userGrant"
+
+    /// The user's grant: the attempt count starts afresh after the task's latest author attempt,
+    /// optionally at a higher tier; clears the wait reason. One transaction.
+    @discardableResult
+    public func grantAttempts(task: TaskID, tier: CapabilityTier? = nil, actor: String) throws -> DecisionID {
+        let db = try connection()
+        let now = currentTime()
+        return try db.transaction { try grantAttempts(db, try loadTask(db, task), tier: tier, actor: actor, now: now) }
+    }
+
+    /// Discards the result a `resultReady` task waits with (ADR 0011 §7): the grant and the move
+    /// to `needsChanges` in one transaction. Writes nothing unless the task is still at
+    /// `expectedVersion` and `resultReady`; the move follows the rules of `Command(.transitionTask)`.
+    @discardableResult
+    public func discardResult(task id: TaskID, expectedVersion: Int, actor: String) throws -> DecisionID {
+        let db = try connection()
+        let now = currentTime()
+        return try db.transaction {
+            let task = try loadTask(db, id)
+            try checkVersion(entity: "task", id: id.uuidString, expected: expectedVersion, actual: task.record.version)
+            guard task.record.state == .resultReady else {
+                throw DomainError.invalidTransition(
+                    entity: TaskState.entityName, from: task.record.state.rawValue, to: TaskState.needsChanges.rawValue
+                )
+            }
+            let decision = try grantAttempts(db, task, tier: nil, actor: actor, now: now)
+            try transitionTask(db, id, to: .needsChanges, expectedVersion: expectedVersion, now: now)
+            return decision
+        }
+    }
+
+    func grantAttempts(_ db: SQLiteConnection, _ task: LoadedTask, tier: CapabilityTier?, actor: String, now: Int64) throws -> DecisionID {
+        let ordinal = try db.query(
+            "SELECT COALESCE(MAX(ordinal), 0) FROM attempt WHERE task_id = ? AND role = 'author'", [.text(task.record.id.uuidString)]
+        ) { $0.int(0) }.first ?? 0
+        var evidence = ["afterOrdinal": String(ordinal)]
+        if let tier { evidence["tier"] = tier.rawValue }
+        let id = try recordDecision(
+            db, projectID: task.projectID, jobID: task.record.jobID, taskID: task.record.id, attemptID: nil, account: nil,
+            rule: Self.userGrantRule, evidence: evidence, outcome: "granted", actor: actor, remaining: Router.maxAuthorAttempts,
+            alternative: nil, now: now
+        )
+        try setWaitReason(db, task.record, nil, now: now)
         return id
     }
 

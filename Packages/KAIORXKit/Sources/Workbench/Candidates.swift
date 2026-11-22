@@ -95,6 +95,7 @@ public enum ChainMessages {
         case PlanningError.noReviewerConsent(let provider): "Für \(Labels.provider(provider)) fehlt die Zustimmung als Prüfer."
         case StoreError.activeReviewerExists: "Für diese Aufgabe läuft schon ein Review."
         case PlanningError.accountBlocked: "Das Prüferkonto ist gesperrt."
+        case PlanningError.slotsFull(let global, let provider): Labels.reviewBlocker(.slotsFull(global: global), provider: provider) + "."
         case MemoryError.candidateContentPurged: "Die Inhalte des Autors wurden vergessen; dieser Kandidat bekommt kein neues Review."
         case ChainActionError.notAPlanTask:
             "Nur Aufgaben aus einem Plan lassen sich neu bearbeiten."
@@ -175,20 +176,21 @@ extension WorkbenchActions {
         try await requireChain().acceptEmpty(shown)
     }
 
-    /// Discards the shown result: grant first, then `needsChanges`; the attempt count restarts
-    /// (ADR 0011 §7). Runs through the chain under the task's lock (`CandidateChain.discard`),
-    /// which checks the shown state again and voids the grant if the task cannot move.
+    /// Discards the shown result: the grant and `needsChanges` in one transaction, so the
+    /// attempt count restarts (ADR 0011 §7); nothing is voided any more. Runs through the chain
+    /// under the task's lock (`CandidateChain.discard`), which checks the shown state again.
     /// Offered for plan tasks only (the scheduler only takes plan tasks).
     public func discardResult(_ shown: ShownResult) async throws {
         let chain = try requireChain()
-        guard let scheduler = services.scheduler else { throw ActionError.unavailable("Scheduler") }
+        // Only the scheduler picks the task up again.
+        guard services.scheduler != nil else { throw ActionError.unavailable("Scheduler") }
         switch shown.check {
         case .notApplicable, .candidate: throw ChainActionError.nothingToDecide(shown.task)
         default: break
         }
         let task = try await requireTask(shown.task)
         guard task.planKey != nil else { throw ChainActionError.notAPlanTask(task.id) }
-        try await chain.discard(shown) { try await scheduler.grant($0, actor: WorkbenchActor.user) }
+        try await chain.discard(shown, actor: WorkbenchActor.user)
     }
 
     /// Clears the task's build backoff, so the driver tries again on its next pass.
