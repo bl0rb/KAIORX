@@ -727,13 +727,15 @@ extension Store {
             )
         }
         // Candidate events (state changes with test summaries in their reason, test and review
-        // results) carry no attempt: their payloads go by the candidate they name.
+        // results) carry no attempt: their payloads go by the candidate or attempt they name (a
+        // user's discard reason names the attempt it is about).
         let candidateEvents = try db.query(
             """
             SELECT e.seq, e.payload_id FROM event e JOIN artifact p ON p.id = e.payload_id
             WHERE e.attempt_id IS NULL AND (
                 json_extract(CAST(p.inline_content AS TEXT), '$.entityID') IN (SELECT id FROM candidate WHERE author_attempt_id IN (SELECT value FROM json_each(?1)))
-                OR json_extract(CAST(p.inline_content AS TEXT), '$.candidateID') IN (SELECT id FROM candidate WHERE author_attempt_id IN (SELECT value FROM json_each(?1))))
+                OR json_extract(CAST(p.inline_content AS TEXT), '$.candidateID') IN (SELECT id FROM candidate WHERE author_attempt_id IN (SELECT value FROM json_each(?1)))
+                OR json_extract(CAST(p.inline_content AS TEXT), '$.attemptID') IN (SELECT value FROM json_each(?1)))
             """,
             [.text(attJSON)]
         ) { ($0.int(0), try $0.requiredText(1)) }

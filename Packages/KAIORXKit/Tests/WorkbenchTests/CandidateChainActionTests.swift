@@ -192,6 +192,7 @@ struct ChainFixture {
         let sheet = DecisionSheet.resultDecision(shown, task: task, writeArea: .paths(["docs/"]), issue: nil)
         #expect(sheet.title == "Ergebnis verwerfen" && sheet.canApprove && sheet.result == shown)
         #expect(sheet.scope.contains("Verworfen: NOTIZ.md – außerhalb des Schreibbereichs") && sheet.scope.contains("Die Zählung der Versuche beginnt neu."))
+        #expect(sheet.scope.contains("Ein Grund ist freiwillig; er geht mit der Aufgabe an den nächsten Autor, außer er sieht nach einem Geheimnis aus."))
 
         // A stale sheet grants nothing.
         var stale = shown
@@ -199,9 +200,15 @@ struct ChainFixture {
         await #expect(throws: ChainError.shownStateChanged) { try await f.actions.discardResult(stale) }
         #expect(try await f.store.decisions(task: task.id).allSatisfy { $0.rule != "userGrant" })
 
-        try await f.actions.discardResult(shown)
+        try await f.actions.discardResult(shown, reason: "zu breit")
         let after = try #require(try await f.store.task(task.id))
         #expect(after.state == .needsChanges)
+        // The reason is stored with the move, as the user's, and goes to the next author.
+        let move = try #require(try await f.store.events(after: 0, limit: 10_000).last { $0.taskID == task.id && $0.kind == .taskStateChanged })
+        let data = try #require(move.payload)
+        let payload = try #require(try JSONSerialization.jsonObject(with: data) as? [String: String])
+        #expect(payload["reason"] == "zu breit" && payload["actor"] == WorkbenchActor.user && payload["to"] == "needsChanges")
+        #expect(try await f.store.reworkReason(task: task.id)?.text == "zu breit")
         let grant = try #require(try await f.store.decisions(task: task.id).last { $0.rule == "userGrant" })
         #expect(grant.actor == WorkbenchActor.user && grant.evidence["afterOrdinal"] == "1")
         let events = try await f.store.eventHeaders(after: 0, project: f.project, limit: 10_000).filter { $0.taskID == task.id }
@@ -371,6 +378,22 @@ struct ChainFixture {
         #expect(contained.title == "Schon enthalten" && contained.scope.contains("Integrationsstand: tip2"))
         #expect(contained.approveLabel == "Als erledigt annehmen" && contained.rejectLabel == "Nicht annehmen")
         #expect(!DecisionSheet.emptyResult(shown(.buildable(resultOID: "x")), task: task).canApprove)
+
+        // ADR 0011 §10: a superseded candidate's result already contained after a rebuild.
+        var past = task
+        past.state = .awaitingMerge
+        let containedShown = shown(.supersededContained(tip: "tip3"))
+        let rebuilt = DecisionSheet.resultDecision(containedShown, task: past, writeArea: .wholeProject, issue: .containedAfterRebuild)
+        #expect(rebuilt.title == "Nach Neubau schon enthalten" && rebuilt.scope.contains("Integrationsstand: tip3") && rebuilt.canApprove)
+        #expect(rebuilt.scope.contains("Ergebniscommit: abc123") && rebuilt.scope.contains("Der ersetzte Kandidat wird nicht veröffentlicht."))
+        #expect(rebuilt.approveLabel == "Als erledigt annehmen" && rebuilt.ifRejected.contains("kein neuer Kandidat"))
+        #expect(rebuilt.result == containedShown)
+        var held = past
+        held.state = .blocked
+        #expect(DecisionSheet.emptyResult(shown(.supersededContained(tip: "tip3")), task: held).blockers == ["Aufgabe angehalten"])
+        #expect(!DecisionSheet.discardResult(shown(.supersededContained(tip: "tip3")), task: past, issue: nil).canApprove)
+        #expect(PendingDecisions.needsUser(.supersededContained(tip: "t")))
+        #expect(Labels.result(.supersededContained(tip: "t"), issue: nil).text == "Nach Neubau schon im Integrationsstand enthalten")
     }
 
     @Test func aDiscardSaysTheCountRestartsAndMayUseQuota() {
@@ -467,6 +490,24 @@ struct ChainFixture {
         #expect(shown.check == .empty)
         try await f.actions.acceptEmptyResult(shown)
         #expect(try await f.store.task(seeded.task)?.state == .integrated)
+        await f.close()
+    }
+
+    @Test func aContainedRebuildIsAcceptedThroughTheActions() async throws {
+        let f = try await ChainFixture("chain-driver-contained-rebuild")
+        let seeded = try await UITestSeed.containedAfterRebuild(services: f.services, project: f.project, title: "Schon enthalten")
+        #expect(seeded.candidate.state == .superseded)
+        #expect(try await f.store.task(seeded.task)?.state == .awaitingMerge)
+        let chain = try #require(f.services.chain)
+        #expect(await chain.step().issues[seeded.task] == .containedAfterRebuild)
+        let (shown, issue) = try await f.actions.resultCheck(seeded.task)
+        let commit = try #require(seeded.candidate.candidateOID)
+        #expect(shown.check == .supersededContained(tip: commit) && issue == .containedAfterRebuild)
+        await #expect(throws: ChainActionError.nothingToDecide(seeded.task)) { try await f.actions.discardResult(shown) }
+        try await f.actions.acceptEmptyResult(shown)
+        let done = try #require(try await f.store.task(seeded.task))
+        #expect(done.state == .integrated && done.integratedOID == seeded.candidate.candidateOID)
+        #expect(await chain.issue(seeded.task) == nil)
         await f.close()
     }
 

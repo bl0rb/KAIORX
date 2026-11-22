@@ -125,7 +125,7 @@ struct ResultBox: View {
         switch shown.check {
         case .rejectedOnly, .undeclared, .planTaskMissing: return true
         case .buildable, .awaitingSeal: return canRetry
-        case .notApplicable, .empty, .contained, .candidate: return false
+        case .notApplicable, .empty, .contained, .supersededContained, .candidate: return false
         }
     }
 
@@ -176,6 +176,8 @@ struct ChainIssueNote: View {
     let task: TaskRecord
     @State private var issue: ChainIssue?
 
+    private var held: Bool { task.state == .blocked }
+
     private var shown: ChainIssue? {
         guard let issue else { return nil }
         if case .collectFailed = issue, let candidate = model.candidate(for: task.id), [.reviewing, .accepted].contains(candidate.state) {
@@ -195,6 +197,18 @@ struct ChainIssueNote: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Kandidatenkette: \(Labels.chainIssue(shown))")
                     .accessibilityIdentifier("chainIssue")
+                if case .containedAfterRebuild = shown, model.services?.chain != nil {
+                    // The decision itself is the result sheet (ADR 0011 §10): it shows the
+                    // integration state that already contains the result before anything happens.
+                    HStack {
+                        Spacer()
+                        Button("Als erledigt annehmen …") { model.sheet = .result(task.id) }
+                            .disabled(held)
+                            .help(held ? "Aufgabe angehalten" : "Öffnet die Entscheidung, die Aufgabe ohne neuen Kandidaten als erledigt anzunehmen.")
+                            .accessibilityHint("Zeigt den Integrationsstand, der das Ergebnis schon enthält, bevor du entscheidest.")
+                            .accessibilityIdentifier("acceptContained")
+                    }
+                }
             }
         }
         .task(id: "\(task.id.uuidString)|\(task.version)|\(model.chainRevision)") {
@@ -218,6 +232,8 @@ struct ResultSheet: View {
     @State private var working = false
     @State private var outcome: Outcome?
     @State private var planTask = false
+    /// The user's optional reason for a discard; it goes to the next author.
+    @State private var reason = ""
 
     enum Mode { case build, accept, discard }
 
@@ -261,6 +277,14 @@ struct ResultSheet: View {
                 }
             } else {
                 if let sheet { DecisionSheetContent(sheet: sheet) } else if problem == nil { ProgressView() }
+                if mode == .discard, sheet != nil {
+                    // No `onSubmit`: Return keeps reaching only the safe choice.
+                    TextField("Grund (freiwillig)", text: $reason, axis: .vertical)
+                        .lineLimit(2...5)
+                        .accessibilityLabel("Grund für das Verwerfen")
+                        .accessibilityHint("Geht mit der Aufgabe an den nächsten Autor.")
+                        .accessibilityIdentifier("discardReason")
+                }
                 if let problem { SheetOutcome(text: problem, failed: true) }
                 HStack {
                     if working { ProgressView().controlSize(.small) }
@@ -304,7 +328,7 @@ struct ResultSheet: View {
                 if case .empty = shown.check, let job = record?.jobID { tip = try? await store.integrationTip(job: job) }
                 switch shown.check {
                 case .undeclared: mode = .build
-                case .empty, .contained: mode = .accept
+                case .empty, .contained, .supersededContained: mode = .accept
                 default: mode = .discard
                 }
                 sheet = .resultDecision(shown, task: record, writeArea: area, issue: issue, tip: tip)
@@ -333,7 +357,7 @@ struct ResultSheet: View {
                     try await actions.acceptEmptyResult(shown)
                     outcome = .accepted
                 case .discard:
-                    try await actions.discardResult(shown)
+                    try await actions.discardResult(shown, reason: reason)
                     outcome = .discarded
                 }
             } catch {

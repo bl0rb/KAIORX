@@ -52,6 +52,37 @@ import Testing
         await f.close()
     }
 
+    /// ADR 0011 §10: past `resultReady`, only a superseded result already contained is a result
+    /// decision; a failed rebuild or an open candidate is not.
+    @Test func aContainedRebuildIsAPendingDecisionPastResultReady() async throws {
+        let f = try await ChainFixture("chain-ui-contained-rebuild")
+        let chain = try #require(f.services.chain)
+        let contained = try await UITestSeed.containedAfterRebuild(services: f.services, project: f.project, title: "Schon enthalten")
+        let (_, verifying, _) = try await UITestSeed.builtCandidate(services: f.services, project: f.project, title: "Gebaut")
+        var pending = try await f.pending { try await chain.check($0) }
+        #expect(pending.contains(.result(contained.task)))
+        #expect(!pending.contains(.result(verifying)))
+        // A verifying task without an open candidate whose rebuild failed: no result decision.
+        let state = try await Projector(store: f.store).load()
+        let open = try #require(state.openCandidate(of: verifying))
+        _ = try await f.store.transitionCandidate(open.id, to: .superseded, reason: "target moved", onlyFrom: [.built])
+        #expect(try await f.store.task(verifying)?.state == .verifying)
+        pending = try await PendingDecisions.collect(
+            try await Projector(store: f.store).load(), project: f.project, gate: { _ in [] }, openFindings: { _ in false },
+            resultCheck: { $0 == verifying ? .notApplicable : try await chain.check($0) }, chainIssue: { $0 == verifying ? .buildFailed("x") : nil }
+        )
+        #expect(pending.contains(.result(contained.task)) && !pending.contains(.result(verifying)))
+        // An awaiting task with an open accepted candidate: its decision is the publication.
+        let (_, waiting, candidate) = try await UITestSeed.builtCandidate(services: f.services, project: f.project, title: "Wartet")
+        for (from, to) in [(CandidateState.built, CandidateState.testing), (.testing, .reviewing), (.reviewing, .accepted)] {
+            _ = try await f.store.transitionCandidate(candidate.id, to: to, onlyFrom: [from])
+        }
+        #expect(try await f.store.task(waiting)?.state == .awaitingMerge)
+        pending = try await f.pending { _ in .supersededContained(tip: "t") }
+        #expect(!pending.contains(.result(waiting)))
+        await f.close()
+    }
+
     @Test func aRefusedCollectIsShownAndOffersANewReview() async throws {
         let f = try await ChainFixture("chain-ui-collect")
         let (_, task, candidate) = try await UITestSeed.builtCandidate(services: f.services, project: f.project, title: "Leerwert")
@@ -130,9 +161,17 @@ import Testing
         let reason = WaitReason(.userDecision, "rework")
         #expect(try await f.pending().contains(.task(seeded.task, reason)))
         #expect(Labels.wait(reason).text == "Wartet auf deine Freigabe zur Nacharbeit")
-        let sheet = DecisionSheet.moreAttempts(waiting, reason: reason)
+        let rework = try #require(try await f.store.reworkReason(task: seeded.task))
+        let sheet = DecisionSheet.moreAttempts(waiting, reason: reason, rework: rework)
         #expect(sheet.title == "Nacharbeit erlauben" && sheet.approveLabel == "Nacharbeit erlauben" && sheet.canApprove)
         #expect(sheet.scope.contains { $0.contains("Kandidat abgelehnt") })
+        // The user's reason goes to the next author, and the sheet says so (ADR 0011, revises §9.6).
+        #expect(sheet.scope.contains("Dein Grund geht an den nächsten Autor: „passt nicht“"))
+        #expect(sheet.scope.allSatisfy { !$0.contains("geht nicht an den Autor") })
+        #expect(DecisionSheet.moreAttempts(waiting, reason: reason).scope.contains("Es liegt kein Grund von dir vor; der Autor bekommt die Aufgabe wie beim ersten Lauf."))
+        let secret = ReworkReason(source: .discarded, attemptID: AttemptID(), text: "password = geheim1234", at: 1)
+        #expect(DecisionSheet.rework(waiting, reason: secret).scope.contains("Dein Grund sieht nach einem Geheimnis aus und geht nicht an den Autor."))
+        #expect(DecisionSheet.rejectCandidate(candidate, task: waiting).scope.contains("Die Begründung geht an den nächsten Autor dieser Aufgabe."))
         #expect(sheet.scope.allSatisfy { !$0.contains("Startfehler") })
         // The other user decisions keep their reasons; an unknown one claims no cause.
         #expect(DecisionSheet.moreAttempts(waiting, reason: WaitReason(.userDecision, "startRetries")).scope.contains("Grund des Halts: Wiederholte Startfehler"))

@@ -661,6 +661,30 @@ public actor Store {
         )
     }
 
+    /// The user discards the task's result (ADR 0011 §7): `resultReady` → `needsChanges` with the
+    /// user's optional reason, in one transaction. The reason lives only in the event's purgeable
+    /// payload, next to `actor` and the attempt it is about, so the next author gets it
+    /// (`reworkReason`) and a forget removes it with that attempt's content (ADR 0006 §7). A
+    /// reason about an attempt already forgotten is stored as `purgedText`.
+    public func discardResult(task id: TaskID, expectedVersion: Int, attempt: AttemptID, reason: String?, actor: String) throws {
+        let db = try connection()
+        let now = clock()
+        try db.transaction {
+            let task = try loadTask(db, id)
+            try checkVersion(entity: "task", id: id.uuidString, expected: expectedVersion, actual: task.record.version)
+            guard task.record.state == .resultReady, task.record.currentAttemptID == attempt else {
+                throw StoreError.notFound(entity: "result", id: attempt.uuidString)
+            }
+            try checkTaskCommand(db, task, to: .needsChanges)
+            var text = reason?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if text?.isEmpty == true { text = nil }
+            let purged = try db.query("SELECT content_purged_at FROM attempt WHERE id = ?", [.text(attempt.uuidString)]) { $0.optionalInt(0) }
+                .first ?? nil
+            if purged != nil, text != nil { text = Self.purgedText }
+            try changeTaskState(db, task, to: .needsChanges, reason: text, now: now, actor: actor, attemptID: attempt.uuidString)
+        }
+    }
+
     // MARK: Helpers
 
     struct StateChange: Encodable {
@@ -668,6 +692,11 @@ public actor Store {
         var from: String
         var to: String
         var reason: String?
+        /// Set only on the user's own move (a rejection, a discard): its reason may go to the next
+        /// author (`reworkReason`). Absent otherwise, so earlier payloads keep their bytes.
+        var actor: String? = nil
+        /// The author attempt the user's move is about; the forget purges by it (ADR 0006 §7).
+        var attemptID: String? = nil
     }
 
     struct LoadedTask {
@@ -722,7 +751,9 @@ public actor Store {
     }
 
     /// Validates, applies and journals a task transition, keeping the resume state of side states.
-    func changeTaskState(_ db: SQLiteConnection, _ task: LoadedTask, to target: TaskState, reason: String?, now: Int64) throws {
+    func changeTaskState(
+        _ db: SQLiteConnection, _ task: LoadedTask, to target: TaskState, reason: String?, now: Int64, actor: String? = nil, attemptID: String? = nil
+    ) throws {
         let current = task.record.state
         try current.validateTransition(to: target, resumeState: task.record.resumeState)
         let resume = current.resumeState(after: target, current: task.record.resumeState)
@@ -732,7 +763,9 @@ public actor Store {
         )
         try appendEvent(
             db, kind: .taskStateChanged, projectID: task.projectID, taskID: task.record.id.uuidString, attemptID: nil,
-            payload: Canonical.encode(StateChange(entityID: task.record.id.uuidString, from: current.rawValue, to: target.rawValue, reason: reason)),
+            payload: Canonical.encode(StateChange(
+                entityID: task.record.id.uuidString, from: current.rawValue, to: target.rawValue, reason: reason, actor: actor, attemptID: attemptID
+            )),
             dedupKey: nil, now: now
         )
         if target == .ready || target == .needsChanges || (target.isTerminal && target != .integrated) {

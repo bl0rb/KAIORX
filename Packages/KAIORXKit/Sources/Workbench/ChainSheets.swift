@@ -8,13 +8,13 @@ import Storage
 /// showed, so an action on a changed state is refused.
 extension DecisionSheet {
     /// The sheet for a task's result, chosen by what the check found: undeclared paths, an
-    /// empty or already contained result, or else discarding it.
+    /// empty or already contained result (also after a rebuild), or else discarding it.
     public static func resultDecision(
         _ shown: ShownResult, task: TaskRecord?, writeArea: ResultWriteArea, issue: ChainIssue?, tip: String? = nil
     ) -> DecisionSheet {
         switch shown.check {
         case .undeclared: undeclaredPaths(shown, task: task, writeArea: writeArea)
-        case .empty, .contained: emptyResult(shown, task: task, tip: tip)
+        case .empty, .contained, .supersededContained: emptyResult(shown, task: task, tip: tip)
         default: discardResult(shown, task: task, issue: issue)
         }
     }
@@ -44,23 +44,29 @@ extension DecisionSheet {
     public static func emptyResult(_ shown: ShownResult, task: TaskRecord?, tip: String? = nil) -> DecisionSheet {
         var title = "Leeres Ergebnis"
         var state = tip
+        var extra: [String] = []
+        var ifRejected = "Die Aufgabe bleibt mit ihrem Ergebnis stehen und hält ihren Schreibbereich, bis du entscheidest."
         var blockers = heldBlockers(task)
         switch shown.check {
         case .empty: break
         case .contained(let contained):
             title = "Schon enthalten"
             state = contained
+        case .supersededContained(let contained):
+            title = "Nach Neubau schon enthalten"
+            state = contained
+            extra = ["Ergebniscommit: \(shown.resultOID ?? "–")", "Der ersetzte Kandidat wird nicht veröffentlicht."]
+            ifRejected = "Die Aufgabe bleibt in der Prüfung stehen und hält ihren Schreibbereich, bis du entscheidest; es wird kein neuer Kandidat gebaut."
         default: blockers.append("Das Ergebnis ist weder leer noch im Integrationsstand enthalten.")
         }
         var sheet = DecisionSheet(
             title: title,
             action: "Die Aufgabe ohne Änderung als erledigt annehmen.",
-            scope: [
-                "Aufgabe: \(task?.title ?? "–")",
+            scope: ["Aufgabe: \(task?.title ?? "–")"] + extra + [
                 state.map { "Integrationsstand: \($0)" } ?? "Integrationsstand: unverändert",
                 "Es wird nichts veröffentlicht; dein Checkout und deine Branches bleiben unverändert.",
             ],
-            ifRejected: "Die Aufgabe bleibt mit ihrem Ergebnis stehen und hält ihren Schreibbereich, bis du entscheidest.",
+            ifRejected: ifRejected,
             approveLabel: "Als erledigt annehmen", rejectLabel: "Nicht annehmen", reported: nil, blockers: blockers, shown: nil
         )
         sheet.result = shown
@@ -78,11 +84,14 @@ extension DecisionSheet {
         }
         scope += rejectedLines(shown)
         if let issue { scope.append(Labels.chainIssue(issue)) }
-        scope += ["Die Zählung der Versuche beginnt neu.", "Ein neuer Lauf kann Kontingent verbrauchen."]
+        scope += [
+            "Ein Grund ist freiwillig; er geht mit der Aufgabe an den nächsten Autor, außer er sieht nach einem Geheimnis aus.",
+            "Die Zählung der Versuche beginnt neu.", "Ein neuer Lauf kann Kontingent verbrauchen.",
+        ]
         var blockers = heldBlockers(task)
         if let task, task.planKey == nil { blockers.append("Nur Aufgaben aus einem Plan lassen sich neu bearbeiten.") }
         switch shown.check {
-        case .notApplicable, .candidate: blockers.append("Für dieses Ergebnis ist gerade nichts zu entscheiden.")
+        case .notApplicable, .candidate, .supersededContained: blockers.append("Für dieses Ergebnis ist gerade nichts zu entscheiden.")
         default: break
         }
         var sheet = DecisionSheet(

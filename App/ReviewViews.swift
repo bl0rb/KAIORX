@@ -70,7 +70,9 @@ struct DecisionView: View {
                 consentDrafts = model.consentProviders.map { WorkbenchActions.consentDraft(project: project.id, provider: $0) }
                 sheet = DecisionSheet.consent(consentDrafts)
             } else if reason.kind == .userDecision {
-                sheet = DecisionSheet.moreAttempts(task, reason: reason)
+                // The user's own reason the next author gets, shown before the grant.
+                let rework = reason.detail == "rework" ? (try? await services.store.reworkReason(task: id)) ?? nil : nil
+                sheet = DecisionSheet.moreAttempts(task, reason: reason, rework: rework)
             } else {
                 let planned = try? await services.store.plannedTask(id)
                 sheet = DecisionSheet.start(task, provider: nil, writePaths: planned?.writePaths ?? [])
@@ -127,7 +129,7 @@ struct RejectSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Kandidat ablehnen").font(.headline)
-            Text("Die Aufgabe geht zurück zur Überarbeitung; Freigaben dieses Kandidaten werden widerrufen.")
+            Text("Die Aufgabe geht zurück zur Überarbeitung; Freigaben dieses Kandidaten werden widerrufen. Die Begründung geht an den nächsten Autor dieser Aufgabe.")
             TextField("Begründung", text: $reason, axis: .vertical).lineLimit(3...6).accessibilityIdentifier("rejectReason")
             HStack {
                 Spacer()

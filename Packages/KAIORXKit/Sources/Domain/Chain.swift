@@ -24,6 +24,11 @@ public enum ResultCheck: Sendable, Equatable {
     case buildable(resultOID: String)
     /// The result already has an open candidate.
     case candidate(CandidateID)
+    /// The task is past its result (`verifying`/`awaitingMerge`), has no open candidate, a candidate of
+    /// its current result was superseded (none published or rejected), and the integration state `tip`
+    /// already contains the result: a rebuild builds nothing; only the user accepts it as done
+    /// (ADR 0011 §10).
+    case supersededContained(tip: String)
 }
 
 /// Why the driver could not move a task on; shown in the task until it clears.
@@ -32,7 +37,8 @@ public enum ChainIssue: Sendable, Equatable {
     case buildFailed(String)
     case collectFailed(String)
     case planTaskMissing
-    /// A rebuild found the result already contained; `acceptEmptyResult` needs `resultReady`.
+    /// A rebuild found the result already contained; the user may accept it as done
+    /// (`ResultCheck.supersededContained`).
     case containedAfterRebuild
 }
 
@@ -64,6 +70,30 @@ public struct ShownResult: Sendable, Equatable {
         self.resultOID = resultOID
         self.rejected = rejected
         self.check = check
+    }
+}
+
+/// The user's own reason for sending a task's last result back (ADR 0011, rework reason): a
+/// rejection of a candidate built from it, or a discard of it. It goes into the next author
+/// prompt; automatic rejections never yield one.
+public struct ReworkReason: Sendable, Equatable {
+    public enum Source: Sendable, Equatable {
+        case rejected(CandidateID)
+        case discarded
+    }
+
+    public var source: Source
+    /// The author attempt whose result the reason is about.
+    public var attemptID: AttemptID
+    public var text: String
+    /// When the user gave it (store clock).
+    public var at: Int64
+
+    public init(source: Source, attemptID: AttemptID, text: String, at: Int64) {
+        self.source = source
+        self.attemptID = attemptID
+        self.text = text
+        self.at = at
     }
 }
 

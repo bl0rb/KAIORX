@@ -170,7 +170,7 @@ extension WorkbenchActions {
         try await requireChain().buildConfirmed(shown)
     }
 
-    /// Accepts the shown empty or already contained result as done.
+    /// Accepts the shown empty or already contained result (also after a rebuild) as done.
     public func acceptEmptyResult(_ shown: ShownResult) async throws {
         try await requireChain().acceptEmpty(shown)
     }
@@ -178,17 +178,18 @@ extension WorkbenchActions {
     /// Discards the shown result: grant first, then `needsChanges`; the attempt count restarts
     /// (ADR 0011 §7). Runs through the chain under the task's lock (`CandidateChain.discard`),
     /// which checks the shown state again and voids the grant if the task cannot move.
-    /// Offered for plan tasks only (the scheduler only takes plan tasks).
-    public func discardResult(_ shown: ShownResult) async throws {
+    /// Offered for plan tasks only (the scheduler only takes plan tasks). The optional `reason`
+    /// goes to the next author unless it looks like a secret (`ReworkPrompt`).
+    public func discardResult(_ shown: ShownResult, reason: String? = nil) async throws {
         let chain = try requireChain()
         guard let scheduler = services.scheduler else { throw ActionError.unavailable("Scheduler") }
         switch shown.check {
-        case .notApplicable, .candidate: throw ChainActionError.nothingToDecide(shown.task)
+        case .notApplicable, .candidate, .supersededContained: throw ChainActionError.nothingToDecide(shown.task)
         default: break
         }
         let task = try await requireTask(shown.task)
         guard task.planKey != nil else { throw ChainActionError.notAPlanTask(task.id) }
-        try await chain.discard(shown) { try await scheduler.grant($0, actor: WorkbenchActor.user) }
+        try await chain.discard(shown, reason: reason, actor: WorkbenchActor.user) { try await scheduler.grant($0, actor: WorkbenchActor.user) }
     }
 
     /// Clears the task's build backoff, so the driver tries again on its next pass.

@@ -8,6 +8,11 @@ extension Store {
     func areaHolderIDs(job: JobID) throws -> Set<TaskID> {
         Set(try areaHolders(try connection(), job: job).map(\.id))
     }
+
+    /// Changes a row outside every flow, to put the store into a state the API cannot reach.
+    func chainHardeningRun(_ sql: String, _ values: [SQLValue] = []) throws {
+        try connection().run(sql, values)
+    }
 }
 
 /// Store checks the candidate chain relies on (ADR 0011 §5, ADR 0005 §6).
@@ -110,6 +115,80 @@ extension Store {
         // Ended, it lets go.
         try await moveTask(store, seed.task, to: .cancelled)
         #expect(try await store.areaHolderIDs(job: seed.job).isEmpty)
+    }
+
+    /// ADR 0011 §10: a superseded candidate's result the integration state already contains is
+    /// integrated only by the user, only past a superseded candidate of exactly the current
+    /// result, and only at the integration state the store knows.
+    @Test func aContainedResultIsAcceptedOnlyPastASupersededCandidate() async throws {
+        let fixture = try Fixture()
+        let store = try fixture.open()
+        let seed = try await fixture.seed(store)
+        let tip = String(repeating: "d", count: 40)
+        try await store.chainHardeningRun("UPDATE job SET base_oid = ? WHERE id = ?", [.text(tip), .text(seed.job.uuidString)])
+        #expect(try await store.integrationTip(job: seed.job) == tip)
+        func accept(_ task: TaskID, author: AttemptID, oid: String = tip, version: Int? = nil) async throws {
+            let current = try #require(try await store.task(task)).version
+            try await store.acceptContainedResult(task, expectedVersion: version ?? current, authorAttempt: author, integratedOID: oid)
+        }
+        func refused(_ task: TaskID, author: AttemptID, oid: String = tip) async throws {
+            let state = try #require(try await store.task(task)).state
+            await #expect(throws: PlanningError.emptyResultNotAcceptable(task, state)) { try await accept(task, author: author, oid: oid) }
+        }
+
+        // From `verifying`: still the result, an open candidate, then a superseded one.
+        let author = try await authorResult(store, seed)
+        try await refused(seed.task, author: author)
+        let first = try await candidate(store, seed, author: author, oid: Self.candidateOID)
+        try await refused(seed.task, author: author)
+        _ = try await store.transitionCandidate(first.id, to: .superseded, reason: "target moved", onlyFrom: [.built])
+        #expect(try await store.task(seed.task)?.state == .verifying)
+        try await refused(seed.task, author: author, oid: String(repeating: "e", count: 40))
+        try await refused(seed.task, author: AttemptID())
+        let version = try #require(try await store.task(seed.task)).version
+        await #expect(throws: StoreError.versionConflict(entity: "task", id: seed.task.uuidString, expected: version - 1, actual: version)) {
+            try await accept(seed.task, author: author, version: version - 1)
+        }
+        // Held, it is refused; released, it is accepted through `awaitingMerge`.
+        try await moveTask(store, seed.task, to: .blocked)
+        try await refused(seed.task, author: author)
+        try await moveTask(store, seed.task, to: .verifying)
+        let verifying = try #require(try await store.task(seed.task))
+        try await accept(seed.task, author: author)
+        let done = try #require(try await store.task(seed.task))
+        #expect(done.state == .integrated && done.version == verifying.version + 2 && done.integratedOID == tip)
+
+        // From `awaitingMerge`: one transition.
+        let second = Seed(project: seed.project, job: seed.job, task: try await fixture.readyTask(store, job: seed.job))
+        let secondAuthor = try await authorResult(store, second)
+        let accepted = try await candidate(store, second, author: secondAuthor, oid: Self.candidateOID)
+        for (from, to) in [(CandidateState.built, CandidateState.testing), (.testing, .reviewing), (.reviewing, .accepted), (.accepted, .superseded)] {
+            _ = try await store.transitionCandidate(accepted.id, to: to, onlyFrom: [from])
+        }
+        let waiting = try #require(try await store.task(second.task))
+        #expect(waiting.state == .awaitingMerge)
+        try await accept(second.task, author: secondAuthor)
+        let merged = try #require(try await store.task(second.task))
+        #expect(merged.state == .integrated && merged.version == waiting.version + 1 && merged.integratedOID == tip)
+
+        // A candidate of the result that ended the chain (rejected, published) refuses it.
+        let third = Seed(project: seed.project, job: seed.job, task: try await fixture.readyTask(store, job: seed.job))
+        let thirdAuthor = try await authorResult(store, third)
+        let rejected = try await candidate(store, third, author: thirdAuthor, oid: Self.candidateOID)
+        try await moveTask(store, third.task, to: .blocked)
+        _ = try await store.transitionCandidate(rejected.id, to: .rejected, reason: "nein", onlyFrom: [.built])
+        try await moveTask(store, third.task, to: .verifying)
+        // No superseded candidate at all.
+        try await refused(third.task, author: thirdAuthor)
+        let superseded = try await candidate(store, third, author: thirdAuthor, oid: Self.candidateOID)
+        _ = try await store.transitionCandidate(superseded.id, to: .superseded, reason: "target moved", onlyFrom: [.built])
+        try await refused(third.task, author: thirdAuthor)
+        try await store.chainHardeningRun("UPDATE candidate SET state = 'published' WHERE id = ?", [.text(rejected.id.uuidString)])
+        try await refused(third.task, author: thirdAuthor)
+        // Without the ended candidate it is accepted.
+        try await store.chainHardeningRun("UPDATE candidate SET state = 'superseded' WHERE id = ?", [.text(rejected.id.uuidString)])
+        try await accept(third.task, author: thirdAuthor)
+        #expect(try await store.task(third.task)?.state == .integrated)
     }
 
     @Test func activeAttemptsAreCountedGloballyAndPerAccount() async throws {

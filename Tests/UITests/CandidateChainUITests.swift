@@ -254,6 +254,46 @@ final class CandidateChainUITests: XCTestCase {
         XCTAssertTrue(approve.waitForExistence(timeout: 20), "the candidate cannot be approved")
     }
 
+    /// A rebuild that finds the result already in the integration state offers „Als erledigt
+    /// annehmen“ (ADR 0011 §10); Return never takes it, the explicit approval does.
+    func testAContainedRebuildIsAcceptedAsDone() {
+        launch(seed: "containedAfterRebuild")
+        let issue = element("chainIssue")
+        XCTAssertTrue(issue.waitForExistence(timeout: 30), "the rebuild's issue is not shown")
+        XCTAssertTrue(waitForLabel(issue, containing: "schon im Integrationsstand enthalten", timeout: 10))
+        let accept = app.buttons["acceptContained"]
+        XCTAssertTrue(accept.waitForExistence(timeout: 10))
+
+        accept.click()
+        XCTAssertTrue(text(containing: "Nach Neubau schon enthalten").waitForExistence(timeout: 10))
+        assertReturnDoesNotApprove()
+        XCTAssertFalse(waitForLabel(element("taskStatus"), containing: "Integriert", timeout: 2))
+
+        accept.click()
+        XCTAssertTrue(text(containing: "Nach Neubau schon enthalten").waitForExistence(timeout: 10))
+        approveWhenEnabled()
+        XCTAssertTrue(waitForLabel(element("sheetResult"), containing: "als erledigt angenommen", timeout: 20))
+        app.buttons["resultDone"].click()
+        XCTAssertTrue(waitForLabel(element("taskStatus"), containing: "Integriert", timeout: 20))
+        XCTAssertTrue(issue.waitForNonExistence(timeout: 10))
+    }
+
+    /// Discarding takes an optional reason for the next author.
+    func testDiscardWithAReason() {
+        launch(seed: "undeclared")
+        let status = element("resultStatus")
+        XCTAssertTrue(status.waitForExistence(timeout: 30))
+        let discard = app.buttons["discardResult"]
+        XCTAssertTrue(discard.waitForExistence(timeout: 10))
+        discard.click()
+        let reason = element("discardReason")
+        XCTAssertTrue(reason.waitForExistence(timeout: 10))
+        reason.click()
+        reason.typeText("zu breit")
+        approveWhenEnabled()
+        XCTAssertTrue(waitForLabel(element("sheetResult"), containing: "Ergebnis verworfen", timeout: 20))
+    }
+
     /// Return never approves in the result sheets: neither the build of undeclared paths nor
     /// discarding the result.
     func testReturnNeverApproves() {
@@ -270,6 +310,17 @@ final class CandidateChainUITests: XCTestCase {
         discard.click()
         XCTAssertTrue(text(containing: "Die Zählung der Versuche beginnt neu").waitForExistence(timeout: 10))
         assertReturnDoesNotApprove()
+        // Return in the optional reason field does not discard either.
+        discard.click()
+        let reason = element("discardReason")
+        XCTAssertTrue(reason.waitForExistence(timeout: 10))
+        reason.click()
+        reason.typeText("zu breit")
+        app.typeKey(.return, modifierFlags: [])
+        XCTAssertFalse(element("sheetResult").waitForExistence(timeout: 2), "Return in the reason field discarded")
+        XCTAssertTrue(waitForLabel(element("taskStatus"), containing: "Ergebnis liegt vor", timeout: 5))
+        app.buttons["decisionReject"].click()
+        XCTAssertTrue(app.buttons["decisionApprove"].waitForNonExistence(timeout: 5))
         // Escape takes the same safe choice.
         discard.click()
         XCTAssertTrue(text(containing: "Die Zählung der Versuche beginnt neu").waitForExistence(timeout: 10))

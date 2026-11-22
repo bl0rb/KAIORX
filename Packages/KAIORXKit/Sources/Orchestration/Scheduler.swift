@@ -227,6 +227,9 @@ public actor Scheduler {
             try await wait(task, WaitReason(anyConsent ? .profileMissing : .consent, anyConsent ? tier.rawValue : "none"), decision: decision, report: &report)
             return
         }
+        // The user's reason for sending the last result back goes into the prompt (ADR 0011);
+        // the spec digest covers it, and `launch` checks it again before the turn.
+        let rework = try await store.reworkReason(task: task.id)
         var firstWait: WaitReason?
         for (consent, profile) in options {
             // An independent reviewer must be possible before the author starts.
@@ -241,7 +244,7 @@ public actor Scheduler {
                 continue
             }
             let reviewProfile = ReviewerChoice.profile(profiles, provider: reviewer.draft.provider)
-            var spec = makeSpec(c, task: task, profile: profile, decision: decision, failure: counted.last?.1)
+            var spec = makeSpec(c, task: task, profile: profile, decision: decision, failure: counted.last?.1, rework: rework)
             if memory != nil { spec.memoryManifestID = MemoryManifestID() }
             let reservation = ScheduledReservation(
                 attemptID: spec.attemptID, taskID: task.id, planID: c.planID, consentID: consent.id, profile: profile, tier: profile.tier,
@@ -257,7 +260,7 @@ public actor Scheduler {
                 continue
             case .reserved(let attempt):
                 report.reserved.append(attempt)
-                try await launch(attempt, spec: spec, job: c.job, reviewer: reviewer.draft.provider, planned: c.planned)
+                try await launch(attempt, spec: spec, job: c.job, reviewer: reviewer.draft.provider, planned: c.planned, rework: rework)
                 return
             }
         }
@@ -272,9 +275,17 @@ public actor Scheduler {
     }
 
     /// Prepares the attempt's worktree at its recorded base and starts it. A failure before the
-    /// turn cancels the reservation; the task returns to `ready` for a spaced retry.
-    private func launch(_ attempt: AttemptID, spec: AttemptSpec, job: JobRecord, reviewer: ProviderKind, planned: PlannedTask) async throws {
+    /// turn cancels the reservation; the task returns to `ready` for a spaced retry. The rework
+    /// reason the prompt carries is read again first: a forget between the read and the
+    /// reservation did not include this attempt, so a changed reason never starts it.
+    private func launch(
+        _ attempt: AttemptID, spec: AttemptSpec, job: JobRecord, reviewer: ProviderKind, planned: PlannedTask, rework: ReworkReason?
+    ) async throws {
         guard let record = try await store.attempt(attempt), let base = record.baseOID else { return }
+        if try await store.reworkReason(task: record.taskID) != rework {
+            try await failBeforeTurn(attempt, errorClass: "reworkChanged")
+            return
+        }
         let tree: WorktreeRecord
         do {
             tree = try await workspace.prepareWorktree(projectID: job.projectID, attemptID: attempt, kind: .author, base: base)
@@ -325,7 +336,7 @@ public actor Scheduler {
 
     // MARK: History
 
-    static let technicalStartFailures: Set<String> = ["startFailed", "adapterUnavailable", "worktreeFailed", "memoryRefused"]
+    static let technicalStartFailures: Set<String> = ["startFailed", "adapterUnavailable", "worktreeFailed", "memoryRefused", "reworkChanged"]
 
     static func isTechnicalStartFailure(_ attempt: AttemptRecord) -> Bool {
         attempt.state == .failed && attempt.startedAt == nil && technicalStartFailures.contains(attempt.errorClass ?? "")
@@ -377,10 +388,13 @@ public actor Scheduler {
         return "providerFailed"
     }
 
-    private func makeSpec(_ c: Candidate, task: TaskRecord, profile: ModelProfile, decision: TierDecision, failure: String?) -> AttemptSpec {
+    private func makeSpec(
+        _ c: Candidate, task: TaskRecord, profile: ModelProfile, decision: TierDecision, failure: String?, rework: ReworkReason?
+    ) -> AttemptSpec {
         let d = c.planned.draft
         var lines = ["Task: \(d.title)", "Goal: \(d.goal)", "Acceptance criteria:"] + d.criteria.map { "- \($0)" }
         if let writes = d.writePaths { lines.append("You may change only: \(writes.joined(separator: ", "))") }
+        lines += ReworkPrompt.lines(rework)
         if case .repair = decision.outcome { lines.append("This is a repair attempt after a failed check.") }
         if let failure { lines.append("Report of the last failed check:\n\(failure)") }
         if case .escalate = decision.outcome { lines.append("Earlier attempts failed the same way; this attempt runs on a stronger profile.") }

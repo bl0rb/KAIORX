@@ -875,6 +875,125 @@ struct ChainHarness {
         #expect(grants.last?.outcome == "voided")
         #expect(grants.last?.evidence["afterOrdinal"] == "0")
         #expect(grants.last?.evidence["voids"] == grants.first?.id.uuidString)
+        // The failed move left no discard event behind: nothing for the next author.
+        let moves = try await h.store.events(after: 0, limit: 10_000).filter { $0.taskID == task && $0.kind == .taskStateChanged }
+        #expect(!moves.contains { String(decoding: $0.payload ?? Data(), as: UTF8.self).contains("\"actor\"") })
+        #expect(try await h.store.reworkReason(task: task) == nil)
+    }
+
+    /// A's candidate accepted (the task waits in `awaitingMerge`), then superseded because the
+    /// integration ref moved to the candidate's own commit: the integration state contains the
+    /// result. Returns the task and that commit.
+    private func containedAfterRebuild(_ h: ChainHarness, _ chain: CandidateChain) async throws -> (TaskID, String) {
+        let candidate = try await h.reviewingCandidate(chain)
+        let task = try #require(candidate.taskID)
+        _ = try await h.store.transitionCandidate(candidate.id, to: .accepted, onlyFrom: [.reviewing])
+        #expect(try await h.store.task(task)?.state == .awaitingMerge)
+        let commit = try #require(candidate.candidateOID)
+        try await h.moveTarget(to: commit)
+        _ = try await h.store.transitionCandidate(candidate.id, to: .superseded, reason: "target moved", onlyFrom: [.accepted])
+        return (task, commit)
+    }
+
+    // 29: a rebuild that finds the result contained is offered to the user, never automatic.
+    @Test func aContainedRebuildIsAcceptedAsDoneFromAwaitingMerge() async throws {
+        let h = try await ChainHarness()
+        let chain = h.chain()
+        let (task, commit) = try await containedAfterRebuild(h, chain)
+        let report = await chain.step()
+        #expect(report.issues[task] == .containedAfterRebuild)
+        #expect(report.built.isEmpty)
+        #expect(try await h.store.task(task)?.state == .awaitingMerge)
+        #expect(try await chain.check(task) == .supersededContained(tip: commit))
+
+        let shown = try await h.shown(chain, task)
+        var stale = shown
+        stale.check = .supersededContained(tip: "x")
+        await #expect(throws: ChainError.shownStateChanged) { try await chain.acceptEmpty(stale) }
+        try await chain.acceptEmpty(shown)
+        let done = try #require(try await h.store.task(task))
+        #expect(done.state == .integrated && done.integratedOID == commit)
+        #expect(await chain.issue(task) == nil)
+        let merges = try await h.merges()
+        #expect(await chain.step().built.isEmpty)
+        #expect(try await h.merges() == merges)
+    }
+
+    // 30: after a race the task may still be in `verifying`; it passes `awaitingMerge`.
+    @Test func aContainedRebuildFromVerifyingPassesAwaitingMerge() async throws {
+        let h = try await ChainHarness()
+        try await h.activate([planTask("A", writes: ["src/A"])])
+        let (task, _, _) = try await h.runPlanned("A", "mkdir -p src/A && echo x > src/A/f")
+        let chain = h.chain()
+        let built = try #require(await chain.step().built.first)
+        let candidate = try #require(try await h.store.candidate(built))
+        let commit = try #require(candidate.candidateOID)
+        try await h.moveTarget(to: commit)
+        _ = try await h.store.transitionCandidate(candidate.id, to: .superseded, reason: "target moved", onlyFrom: [.built])
+        #expect(try await h.store.task(task)?.state == .verifying)
+        #expect(await chain.step().issues[task] == .containedAfterRebuild)
+        let shown = try await h.shown(chain, task)
+        #expect(shown.check == .supersededContained(tip: commit))
+        let before = try await h.store.events(after: 0, limit: 10_000).last?.seq ?? 0
+        try await chain.acceptEmpty(shown)
+        #expect(try await h.store.task(task)?.state == .integrated)
+        struct Move: Decodable { var from: String; var to: String; var reason: String? }
+        let moves = try await h.store.events(after: before, limit: 10_000)
+            .filter { $0.taskID == task && $0.kind == .taskStateChanged }
+            .map { try JSONDecoder().decode(Move.self, from: try #require($0.payload)) }
+        #expect(moves.map { "\($0.from)>\($0.to)" } == ["verifying>awaitingMerge", "awaitingMerge>integrated"])
+        #expect(moves.allSatisfy { $0.reason == "contained result accepted" })
+    }
+
+    // 31: the acceptance is bound to the shown task version, result and integration state.
+    @Test func aContainedAcceptIsBoundToTheShownState() async throws {
+        let h = try await ChainHarness()
+        let chain = h.chain()
+        let (task, _) = try await containedAfterRebuild(h, chain)
+        _ = await chain.step()
+        // The integration state moves on after the sheet showed it.
+        var shown = try await h.shown(chain, task)
+        try await h.advanceTarget("echo z > z.txt")
+        await #expect(throws: ChainError.shownStateChanged) { try await chain.acceptEmpty(shown) }
+        #expect(try await h.store.task(task)?.state == .awaitingMerge)
+        // The user holds the task after the sheet showed it.
+        shown = try await h.shown(chain, task)
+        guard case .supersededContained = shown.check else { Issue.record("\(shown.check)"); return }
+        try await h.store.execute(Command(.transitionTask(id: task, to: .blocked, expectedVersion: shown.taskVersion)))
+        await #expect(throws: ChainError.shownStateChanged) { try await chain.acceptEmpty(shown) }
+        #expect(try await chain.check(task) == .notApplicable)
+        let held = try #require(try await h.store.task(task))
+        try await h.store.execute(Command(.transitionTask(id: task, to: .awaitingMerge, expectedVersion: held.version)))
+        // It is accepted, never discarded.
+        shown = try await h.shown(chain, task)
+        await #expect(throws: ChainError.shownStateChanged) { try await chain.discard(shown) { _ in } }
+        // Racing the driver: the accept wins or finds the task busy; nothing is built either way.
+        h.clock.advance(CandidateChain.backoffCap)
+        async let pass = chain.step()
+        let accepted: Bool
+        do {
+            try await chain.acceptEmpty(shown)
+            accepted = true
+        } catch ChainError.busy(task) {
+            accepted = false
+        }
+        let report = await pass
+        #expect(report.built.isEmpty)
+        #expect(try await h.candidates().count == 1)
+        if accepted { #expect(try await h.store.task(task)?.state == .integrated) }
+    }
+
+    // 32: the offer is derived from stored facts: it is there again after a restart.
+    @Test func aContainedRebuildIsOfferedAgainAfterARestart() async throws {
+        var h = try await ChainHarness()
+        let (task, commit) = try await containedAfterRebuild(h, h.chain())
+        #expect(await h.chain().step().issues[task] == .containedAfterRebuild)
+        try await h.restart()
+        let chain = h.chain()
+        #expect(try await chain.check(task) == .supersededContained(tip: commit))
+        #expect(await chain.step().issues[task] == .containedAfterRebuild)
+        try await chain.acceptEmpty(try await h.shown(chain, task))
+        #expect(try await h.store.task(task)?.state == .integrated)
     }
 
     /// A result writing two paths the integration state also wrote: a conflicted candidate.

@@ -56,6 +56,31 @@ public enum UITestSeed {
         return (seeded.job, seeded.task, candidate)
     }
 
+    /// A built candidate taken to `accepted` (the task waits in `awaitingMerge`), then superseded
+    /// because the integration ref moved to the candidate's own commit through the journal: the
+    /// integration state already contains the result, so the driver's rebuild finds nothing to
+    /// build (`containedAfterRebuild`, ADR 0011 §10). No evidence is recorded; nothing is published.
+    public static func containedAfterRebuild(
+        services: AppServices, project: ProjectID, title: String
+    ) async throws -> (job: JobID, task: TaskID, candidate: CandidateRecord) {
+        guard let workspace = services.workspace, let git = services.git else { throw ActionError.unavailable("Git") }
+        let store = services.store
+        let seeded = try await builtCandidate(services: services, project: project, title: title)
+        let candidate = seeded.candidate
+        guard let commit = candidate.candidateOID else { throw ActionError.unknown("candidate") }
+        for (from, to) in [(CandidateState.built, CandidateState.testing), (.testing, .reviewing), (.reviewing, .accepted)] {
+            _ = try await store.transitionCandidate(candidate.id, to: to, onlyFrom: [from])
+        }
+        guard let old = try await store.integrationTip(job: seeded.job) else { throw ActionError.unknown("integration") }
+        let operation = try await store.prepareRefUpdate(
+            projectID: project, worktreeID: nil, ref: candidate.targetRef, expectedOld: old, desiredNew: commit
+        )
+        try await git.updateRef(candidate.targetRef, to: commit, expectedOld: old, in: try await workspace.attach(project))
+        try await store.completeGitOperation(operation, as: .applied)
+        let superseded = try await store.transitionCandidate(candidate.id, to: .superseded, reason: "target moved", onlyFrom: [.accepted])
+        return (seeded.job, seeded.task, superseded)
+    }
+
     /// A sealed plan-task result with one change inside its write area (`docs/`) and one outside
     /// (`NOTIZ.md`): the seal dropped the outside path, so building needs the user's confirmation.
     public static func undeclared(

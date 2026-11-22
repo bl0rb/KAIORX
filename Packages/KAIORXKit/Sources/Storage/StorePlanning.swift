@@ -345,6 +345,46 @@ extension Store {
         }
     }
 
+    /// A superseded candidate's result that the integration state already contains, accepted by the
+    /// user as done (ADR 0011 §10): integrated at `integratedOID` without a candidate. From
+    /// `verifying` the task passes `awaitingMerge` in the same transaction (existing transitions only).
+    public func acceptContainedResult(_ taskID: TaskID, expectedVersion: Int, authorAttempt: AttemptID, integratedOID: String) throws {
+        let db = try connection()
+        let now = currentTime()
+        try db.transaction {
+            var task = try loadTask(db, taskID)
+            try checkVersion(entity: "task", id: taskID.uuidString, expected: expectedVersion, actual: task.record.version)
+            let state = task.record.state
+            guard state == .verifying || state == .awaitingMerge, task.record.currentAttemptID == authorAttempt else {
+                throw PlanningError.emptyResultNotAcceptable(taskID, state)
+            }
+            let t = SQLValue.text(taskID.uuidString), a = SQLValue.text(authorAttempt.uuidString)
+            let open = try db.query(
+                "SELECT 1 FROM candidate WHERE task_id = ? AND state NOT IN ('published', 'rejected', 'superseded') LIMIT 1", [t]
+            ) { $0.int(0) }
+            // Mirrors the driver's rebuild (`CandidateChain.rebuildPass`): a superseded candidate of
+            // this result, and none that ended the chain for it.
+            let superseded = try db.query(
+                "SELECT 1 FROM candidate WHERE task_id = ? AND author_attempt_id = ? AND kind = 'implementation' AND state = 'superseded' LIMIT 1",
+                [t, a]
+            ) { $0.int(0) }
+            let ended = try db.query(
+                "SELECT 1 FROM candidate WHERE task_id = ? AND author_attempt_id = ? AND state IN ('published', 'rejected') LIMIT 1", [t, a]
+            ) { $0.int(0) }
+            guard open.isEmpty, !superseded.isEmpty, ended.isEmpty,
+                  try integrationTip(db, try loadJob(db, task.record.jobID)) == integratedOID else {
+                throw PlanningError.emptyResultNotAcceptable(taskID, state)
+            }
+            let reason = "contained result accepted"
+            if state == .verifying {
+                try changeTaskState(db, task, to: .awaitingMerge, reason: reason, now: now)
+                task = try loadTask(db, taskID)
+            }
+            try db.run("UPDATE task SET integrated_oid = ? WHERE id = ?", [.text(integratedOID), t])
+            try changeTaskState(db, task, to: .integrated, reason: reason, now: now)
+        }
+    }
+
     /// Risk and named test profile of a task in its job's current plan; nil outside a plan.
     public func plannedTask(_ taskID: TaskID) throws -> (risk: PlanTaskRisk, testProfile: String?, writePaths: [String]?)? {
         let db = try connection()
