@@ -1,0 +1,362 @@
+{
+  "arch" : "arm64",
+  "date" : "2026-11-20",
+  "macOS" : "Version 27.2.1 (Build 26B131)",
+  "parallel" : {
+    "evidence" : [
+
+    ],
+    "id" : "parallel",
+    "limitation" : "Anmeldung entspricht nicht mehr dem geprüften Abo-Konto",
+    "required" : false,
+    "status" : "skipped",
+    "title" : "Zwei Anbieter gleichzeitig"
+  },
+  "providers" : [
+    {
+      "binarySHA256" : "8c1729568b19cdadedd0a978bf692f9f279ef554c8a333c4e132b94fd8725550",
+      "fixtures" : [
+        "claude-2.1.329-auth.jsonl",
+        "claude-2.1.329-cancel.jsonl",
+        "claude-2.1.329-revoke.jsonl"
+      ],
+      "mode" : "claudeSubscription",
+      "model" : "sonnet",
+      "nativePath" : "~/.local/share/claude/versions/2.1.329",
+      "passed" : true,
+      "provider" : "claude",
+      "restrictions" : [
+        "Kontingent beobachten: Erschöpfung des Kontingents wird nicht absichtlich herbeigeführt",
+        "Falsches Konto: Kein zweites Konto geprüft"
+      ],
+      "signing" : [
+        "Identifier=com.anthropic.claude-code",
+        "Format=Mach-O thin (arm64)",
+        "Authority=Developer ID Application: Anthropic PBC (Q6L2SF6YDW)",
+        "Authority=Developer ID Certification Authority",
+        "Authority=Apple Root CA",
+        "TeamIdentifier=Q6L2SF6YDW"
+      ],
+      "steps" : [
+        {
+          "evidence" : [
+            "Version 2.1.329, SHA-256 8c1729568b19cdad…",
+            "Matrix: offlineVerified",
+            "Identifier=com.anthropic.claude-code",
+            "Format=Mach-O thin (arm64)",
+            "Authority=Developer ID Application: Anthropic PBC (Q6L2SF6YDW)",
+            "Authority=Developer ID Certification Authority",
+            "Authority=Apple Root CA",
+            "TeamIdentifier=Q6L2SF6YDW",
+            "Signatur gültig",
+            "Alle 14 Startoptionen in --help",
+            "OS-Isolation wirksam"
+          ],
+          "id" : "identify",
+          "required" : true,
+          "status" : "passed",
+          "title" : "Programm identifizieren"
+        },
+        {
+          "evidence" : [
+            "Urteil: Abo (max)",
+            "Aufzeichnung: claude-2.1.329-auth.jsonl",
+            "Konto vom Kontoinhaber bestätigt"
+          ],
+          "id" : "auth",
+          "required" : true,
+          "status" : "passed",
+          "title" : "Anmeldung und Plan prüfen"
+        },
+        {
+          "evidence" : [
+            "Vom Benutzer bestätigt (Seite: nutzung)"
+          ],
+          "id" : "billing",
+          "required" : true,
+          "status" : "passed",
+          "title" : "Abrechnung bestätigen"
+        },
+        {
+          "evidence" : [
+            "Benutzerordner verborgen: ja",
+            "Ereignisse: 18",
+            "Endstatus: succeeded",
+            "Gestartet: true",
+            "Kennwort genannt: true",
+            "Ordner unverändert: true",
+            "Aufzeichnung verworfen: privater Wert nach Redaktion (Benutzername in Zeile 21, stream_event: event.delta.partial_json)"
+          ],
+          "id" : "read",
+          "required" : true,
+          "status" : "passed",
+          "title" : "Lesender Auftrag"
+        },
+        {
+          "evidence" : [
+            "Nachbar-Repository lesen: verweigert",
+            "Ziel eines Links nach außen lesen: verweigert",
+            "Git-Metadaten schreiben: verweigert",
+            "Außerhalb des Arbeitsordners schreiben: verweigert",
+            "Eigene Konfiguration ändern: verweigert",
+            "KAIORX-Daten lesen: verweigert",
+            "Benutzerordner lesen: verweigert",
+            "Agent gab keinen geschützten Inhalt aus",
+            "Aufzeichnung verworfen: privater Wert nach Redaktion (Benutzername in Zeile 16, stream_event: event.delta.partial_json)"
+          ],
+          "id" : "isolation",
+          "required" : true,
+          "status" : "passed",
+          "title" : "Isolation prüfen"
+        },
+        {
+          "evidence" : [
+            "Abgedeckt durch den lesenden Auftrag, der mit verborgenem Benutzerordner läuft"
+          ],
+          "id" : "hiddenHome",
+          "required" : false,
+          "status" : "passed",
+          "title" : "Lesender Auftrag mit verborgenem Benutzerordner"
+        },
+        {
+          "evidence" : [
+            "Erlaubte Datei: geschrieben",
+            "Datei außerhalb: verweigert",
+            "Übriger Arbeitsordner unverändert: true",
+            "Git-Metadaten unverändert: true",
+            "Fremder Hook ausgeführt: false",
+            "Endstatus: succeeded",
+            "Aufzeichnung verworfen: privater Wert nach Redaktion (Benutzername in Zeile 8, stream_event: event.delta.partial_json)"
+          ],
+          "id" : "author",
+          "required" : true,
+          "status" : "passed",
+          "title" : "Schreibender Auftrag"
+        },
+        {
+          "evidence" : [
+            "Endstatus: offen (ungeklärt)",
+            "Prozesse übrig: 0",
+            "Ohne Bestätigung: der Versuch wäre im Produkt ungeklärt"
+          ],
+          "id" : "cancel",
+          "required" : true,
+          "status" : "passed",
+          "title" : "Abbruch"
+        },
+        {
+          "evidence" : [
+            "Keine Kontingentsignale beobachtet"
+          ],
+          "id" : "quota",
+          "limitation" : "Erschöpfung des Kontingents wird nicht absichtlich herbeigeführt",
+          "required" : false,
+          "status" : "skipped",
+          "title" : "Kontingent beobachten"
+        },
+        {
+          "evidence" : [
+            "Urteil nach Widerruf: nicht angemeldet",
+            "Start verweigert: true"
+          ],
+          "id" : "revoke",
+          "required" : true,
+          "status" : "passed",
+          "title" : "Widerruf der Anmeldung"
+        },
+        {
+          "evidence" : [
+
+          ],
+          "id" : "wrongAccount",
+          "limitation" : "Kein zweites Konto geprüft",
+          "required" : false,
+          "status" : "skipped",
+          "title" : "Falsches Konto"
+        }
+      ],
+      "verdict" : "Abo (max)",
+      "version" : "2.1.329"
+    },
+    {
+      "binarySHA256" : "9248cfeebec9b4cc3034d5114caab10fbf426cbfa79dba410c5fa1b72762abd6",
+      "fixtures" : [
+        "codex-0.170.0-auth-stderr.log",
+        "codex-0.170.0-auth.jsonl",
+        "codex-0.170.0-read-stderr.log",
+        "codex-0.170.0-read.jsonl",
+        "codex-0.170.0-isolation-stderr.log",
+        "codex-0.170.0-isolation.jsonl",
+        "codex-0.170.0-author-stderr.log",
+        "codex-0.170.0-author.jsonl",
+        "codex-0.170.0-cancel-stderr.log",
+        "codex-0.170.0-cancel.jsonl",
+        "codex-0.170.0-revoke-stderr.log",
+        "codex-0.170.0-revoke.jsonl"
+      ],
+      "mode" : "codexCliManaged",
+      "model" : "gpt-6.2-sol",
+      "nativePath" : "~/.nvm/versions/node/v24.15.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex",
+      "passed" : true,
+      "provider" : "codex",
+      "restrictions" : [
+        "Kontingent beobachten: Erschöpfung des Kontingents wird nicht absichtlich herbeigeführt",
+        "Falsches Konto: Kein zweites Konto geprüft"
+      ],
+      "signing" : [
+        "Identifier=codex",
+        "Format=Mach-O thin (arm64)",
+        "Authority=Developer ID Application: OpenAI OpCo, LLC (2DC432GLL2)",
+        "Authority=Developer ID Certification Authority",
+        "Authority=Apple Root CA",
+        "TeamIdentifier=2DC432GLL2"
+      ],
+      "steps" : [
+        {
+          "evidence" : [
+            "Version 0.170.0, SHA-256 9248cfeebec9b4cc…",
+            "Matrix: offlineVerified",
+            "Identifier=codex",
+            "Format=Mach-O thin (arm64)",
+            "Authority=Developer ID Application: OpenAI OpCo, LLC (2DC432GLL2)",
+            "Authority=Developer ID Certification Authority",
+            "Authority=Apple Root CA",
+            "TeamIdentifier=2DC432GLL2",
+            "Signatur gültig",
+            "Protokollschema unverändert",
+            "OS-Isolation wirksam"
+          ],
+          "id" : "identify",
+          "required" : true,
+          "status" : "passed",
+          "title" : "Programm identifizieren"
+        },
+        {
+          "evidence" : [
+            "Urteil: Abo (plus)",
+            "Aufzeichnung: codex-0.170.0-auth.jsonl",
+            "Konto vom Kontoinhaber bestätigt",
+            "Fehlerausgabe: codex-0.170.0-auth-stderr.log"
+          ],
+          "id" : "auth",
+          "required" : true,
+          "status" : "passed",
+          "title" : "Anmeldung und Plan prüfen"
+        },
+        {
+          "evidence" : [
+            "Vom Benutzer bestätigt (Seite: nutzung)"
+          ],
+          "id" : "billing",
+          "required" : true,
+          "status" : "passed",
+          "title" : "Abrechnung bestätigen"
+        },
+        {
+          "evidence" : [
+            "Benutzerordner verborgen: ja",
+            "Ereignisse: 36",
+            "Endstatus: succeeded",
+            "Aufzeichnung: codex-0.170.0-read.jsonl",
+            "Gestartet: true",
+            "Kennwort genannt: true",
+            "Ordner unverändert: true",
+            "Fehlerausgabe: codex-0.170.0-read-stderr.log"
+          ],
+          "id" : "read",
+          "required" : true,
+          "status" : "passed",
+          "title" : "Lesender Auftrag"
+        },
+        {
+          "evidence" : [
+            "Nachbar-Repository lesen: verweigert",
+            "Ziel eines Links nach außen lesen: verweigert",
+            "Git-Metadaten schreiben: verweigert",
+            "Außerhalb des Arbeitsordners schreiben: verweigert",
+            "Eigene Konfiguration ändern: verweigert",
+            "KAIORX-Daten lesen: verweigert",
+            "Benutzerordner lesen: verweigert",
+            "Agent gab keinen geschützten Inhalt aus",
+            "Fehlerausgabe: codex-0.170.0-isolation-stderr.log"
+          ],
+          "id" : "isolation",
+          "required" : true,
+          "status" : "passed",
+          "title" : "Isolation prüfen"
+        },
+        {
+          "evidence" : [
+            "Abgedeckt durch den lesenden Auftrag, der mit verborgenem Benutzerordner läuft"
+          ],
+          "id" : "hiddenHome",
+          "required" : false,
+          "status" : "passed",
+          "title" : "Lesender Auftrag mit verborgenem Benutzerordner"
+        },
+        {
+          "evidence" : [
+            "Erlaubte Datei: geschrieben",
+            "Datei außerhalb: verweigert",
+            "Übriger Arbeitsordner unverändert: true",
+            "Git-Metadaten unverändert: true",
+            "Fremder Hook ausgeführt: false",
+            "Endstatus: succeeded",
+            "Aufzeichnung: codex-0.170.0-author.jsonl",
+            "Fehlerausgabe: codex-0.170.0-author-stderr.log"
+          ],
+          "id" : "author",
+          "required" : true,
+          "status" : "passed",
+          "title" : "Schreibender Auftrag"
+        },
+        {
+          "evidence" : [
+            "Endstatus: cancelled",
+            "Prozesse übrig: 0",
+            "Fehlerausgabe: codex-0.170.0-cancel-stderr.log"
+          ],
+          "id" : "cancel",
+          "required" : true,
+          "status" : "passed",
+          "title" : "Abbruch"
+        },
+        {
+          "evidence" : [
+            "Beobachtet: rateLimits, rateLimit"
+          ],
+          "id" : "quota",
+          "limitation" : "Erschöpfung des Kontingents wird nicht absichtlich herbeigeführt",
+          "required" : false,
+          "status" : "passed",
+          "title" : "Kontingent beobachten"
+        },
+        {
+          "evidence" : [
+            "Urteil nach Widerruf: nicht angemeldet",
+            "Start verweigert: true",
+            "Fehlerausgabe: codex-0.170.0-revoke-stderr.log"
+          ],
+          "id" : "revoke",
+          "required" : true,
+          "status" : "passed",
+          "title" : "Widerruf der Anmeldung"
+        },
+        {
+          "evidence" : [
+
+          ],
+          "id" : "wrongAccount",
+          "limitation" : "Kein zweites Konto geprüft",
+          "required" : false,
+          "status" : "skipped",
+          "title" : "Falsches Konto"
+        }
+      ],
+      "verdict" : "Abo (plus)",
+      "version" : "0.170.0"
+    }
+  ],
+  "runID" : "20261120-1429-a265",
+  "schemaVersion" : 1
+}

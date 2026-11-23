@@ -1,0 +1,635 @@
+import AppKit
+import Domain
+import Foundation
+import Observation
+import Orchestration
+import ProcessHost
+import Providers
+import Storage
+import Workbench
+import Workspace
+
+/// The app's state on the main actor: what the windows show, refreshed by a projection pump
+/// that runs off the main actor and publishes at most every 100 ms (critical changes at once).
+@MainActor @Observable
+final class AppModel {
+    enum Phase: Equatable {
+        case starting
+        case recovery(StartupIssue, [BackupInfo])
+        case ready
+    }
+
+    var phase: Phase = .starting
+    var state = WorkspaceState()
+    var onboarding: [OnboardingItem] = []
+    /// The latest model profile sync (ADR 0012): the one at start, then the user's re-check.
+    var profileSync: ProfileSyncOutcome?
+    /// A re-check („Einrichtung prüfen …“) is running.
+    var isChecking = false
+    /// The user's login checks („Anmeldung prüfen“, ADR 0013), per provider.
+    var logins: [ProviderKind: LoginCheck] = [:]
+    /// The latest probe with its profile and project details; the checklist is rebuilt from it.
+    private var lastProbe: ProbeResults?
+    /// A check asked for while one was running (for example „Fertig“ after a login): runs next.
+    private var loginRecheck: Set<ProviderKind> = []
+    /// The sheet the login terminal was opened from („Einrichtung prüfen …“), shown again after it.
+    var sheetAfterLogin: ActiveSheet?
+    var pending: [PendingDecision] = []
+    var selectedProject: ProjectID?
+    var selectedJob: JobID?
+    var selectedTask: TaskID?
+    var monitorFilter = MonitorFilter()
+    var errorMessage: String?
+    var sheet: ActiveSheet?
+    var pendingTerminalRequests: [TerminalRequest] = []
+    var restartNeeded = false
+    /// Counts test profile changes (ADR 0010); views showing profiles reload on a new value.
+    var testProfileRevision = 0
+    /// Counts passes of the candidate chain that changed something (ADR 0011); views showing a
+    /// result or a review reload on a new value.
+    var chainRevision = 0
+    /// What the candidate chain's last pass with a change did (volatile, not projected).
+    var chainReport = ChainReport()
+
+    enum ActiveSheet: Identifiable, Equatable {
+        case trustProject(String)
+        case newJob(ProjectID)
+        case decision(PendingDecision)
+        case reject(CandidateID)
+        case testProfiles(ProjectID)
+        case deliver(JobID)
+        case revert(CandidateID)
+        /// The decision on a task's result; `discard` opens it as „Ergebnis verwerfen“.
+        case result(TaskID, discard: Bool = false)
+        case resolveConflicts(CandidateID)
+        case startReview(CandidateID)
+        case importReview(CandidateID)
+        /// The onboarding checks with „Erneut prüfen“ (ADR 0012 D7), reachable from the menu.
+        case setupCheck
+        /// The login terminal for a provider's own configuration folder (ADR 0013).
+        case login(ProviderKind)
+
+        var id: String {
+            switch self {
+            case .trustProject(let path): "trust:\(path)"
+            case .newJob(let id): "job:\(id.uuidString)"
+            case .decision(let decision): "decision:\(decision.id)"
+            case .reject(let id): "reject:\(id.uuidString)"
+            case .testProfiles(let id): "testProfiles:\(id.uuidString)"
+            case .deliver(let id): "deliver:\(id.uuidString)"
+            case .revert(let id): "revert:\(id.uuidString)"
+            case .result(let id, let discard): "result:\(id.uuidString)\(discard ? ":discard" : "")"
+            case .resolveConflicts(let id): "conflicts:\(id.uuidString)"
+            case .startReview(let id): "review:\(id.uuidString)"
+            case .importReview(let id): "import:\(id.uuidString)"
+            case .setupCheck: "setupCheck"
+            case .login(let provider): "login:\(provider.rawValue)"
+            }
+        }
+    }
+
+    private(set) var services: AppServices?
+    var actions: WorkbenchActions? { services.map(WorkbenchActions.init) }
+    private var pump: Task<Void, Never>?
+    private var ticker: Task<Void, Never>?
+    private var chainLoop: Task<Void, Never>?
+    private var coalescer = Coalescer(interval: 100)
+    private var batcher = AnnouncementBatcher()
+    private var latest: WorkspaceState?
+    let launch = LaunchMode.current
+
+    // MARK: Start
+
+    func start() async {
+        guard phase == .starting, services == nil else { return }
+        let configuration: AppConfiguration
+        do { configuration = try launch.configuration() } catch {
+            phase = .recovery(.storeFailed(String(describing: error)), [])
+            return
+        }
+        switch await AppBootstrap.start(configuration) {
+        case .recovery(let issue, let backups):
+            phase = .recovery(issue, backups)
+        case .ready(let services):
+            self.services = services
+            profileSync = services.profileSync
+            if launch.isUITest { await seedForUITests(services.store) }
+            var seeded = launch.seed == "candidate" ? await seedCandidateForUITests(services) : nil
+            var fixtureJob: JobID?
+            #if DEBUG
+            if launch.isUITest, launch.fixture == "published" { fixtureJob = await seedPublishedJob(services) }
+            if launch.isUITest, seeded == nil, let seed = launch.seed { seeded = await seedChainForUITests(services, seed: seed) }
+            #endif
+            let projector = Projector(store: services.store)
+            if let loaded = try? await projector.load() { state = loaded }
+            selectedProject = state.projects.values.sorted { $0.createdAt < $1.createdAt }.first?.id
+            if let seeded {
+                selectedJob = seeded.job
+                selectedTask = seeded.task
+            } else if let fixtureJob {
+                selectedJob = fixtureJob
+            }
+            phase = .ready
+            startPump(projector)
+            startTicker()
+            // After the seeds: a seeded result is sealed by the seed, never by a racing pass.
+            startChainLoop()
+            await refreshDecisions()
+            Task { await self.probe() }
+        }
+    }
+
+    /// UI tests: a temporary Git repository to open, and model profiles for the two fake
+    /// providers (consent still comes from the sheet).
+    private func seedForUITests(_ store: Store) async {
+        if let repo = launch.uiTestRepository, !FileManager.default.fileExists(atPath: repo + "/.git"), let git = GitRunner.locate() {
+            try? FileManager.default.createDirectory(atPath: repo, withIntermediateDirectories: true)
+            let script = "\(git) init -q -b main && printf 'Hallo\\n' > README.md && mkdir -p src && printf 'let a = 1\\n' > src/a.swift && \(git) add -A && \(git) commit -qm start"
+            _ = try? await services?.agents.run(LaunchSpec(
+                executable: "/bin/sh", arguments: ["-c", script], workingDirectory: repo,
+                environment: ["PATH": "/usr/bin:/bin", "HOME": repo, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+                              "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@example.invalid", "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@example.invalid"],
+                timeout: .seconds(30)
+            ))
+        }
+        for tier in CapabilityTier.allCases {
+            try? await store.registerModelProfile(ModelProfile(provider: .fake, role: .author, tier: tier, model: "fake-\(tier.rawValue)", typicalTokens: 1_000, verifiedAt: 1))
+        }
+        try? await store.registerModelProfile(ModelProfile(provider: .codex, role: .reviewer, tier: .fast, model: "fake-reviewer", typicalTokens: 500, verifiedAt: 1))
+    }
+
+    /// UI tests with `KAIORX_UITEST_SEED=candidate`: the fixture repository opened and a built
+    /// candidate in it (no provider run), so the test reaches the candidate review directly.
+    private func seedCandidateForUITests(_ services: AppServices) async -> (job: JobID, task: TaskID)? {
+        guard let repo = launch.uiTestRepository else { return nil }
+        let actions = WorkbenchActions(services: services)
+        guard let project = try? await actions.openProject(at: repo),
+              let seeded = try? await UITestSeed.builtCandidate(services: services, project: project, title: "Leerwert prüfen") else { return nil }
+        return (seeded.job, seeded.task)
+    }
+
+    /// Local probes only (`--version`, sandbox check); never a login or a model call.
+    func probe() async {
+        guard let services else { return }
+        let scratch = URL(filePath: services.configuration.workspaceRoot).appending(path: "probe")
+        try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        let results: ProbeResults
+        if let folder = launch.fakeCLIFolder {
+            // UI tests with fake CLIs: the real probe, but only on the fakes (never a real binary).
+            results = await Onboarding.probe(host: services.agents, scratch: scratch, projects: state.projects.count) { UITestCLIs.path($0, in: folder) }
+        } else if launch.isUITest {
+            results = ProbeResults(gitPath: GitRunner.locate())
+        } else {
+            results = await Onboarding.probe(host: services.agents, scratch: scratch, projects: state.projects.count)
+        }
+        // A fresh sandbox check is the automatic gate's latest probe result too (ADR 0009).
+        if let gate = services.configuration.gate as? AutomationGate, let confinement = results.confinement {
+            await gate.record(confinement: confinement)
+        }
+        var adjusted = results
+        adjusted.projects = state.projects.count
+        // The latest profile sync (ADR 0012): which models are usable, or why the sync failed.
+        adjusted.profileSync = profileSync
+        adjusted.profiles = (try? await services.store.modelProfiles()) ?? []
+        lastProbe = adjusted
+        rebuildChecklist()
+    }
+
+    private func rebuildChecklist() {
+        guard var probes = lastProbe else { return }
+        probes.logins = logins
+        onboarding = Onboarding.checklist(probes, configDirectories: [.claude: configDirectory(.claude), .codex: configDirectory(.codex)])
+    }
+
+    /// KAIORX' own configuration folder of a provider (the adapters never use `~/.claude` or
+    /// `~/.codex`); in UI tests below the test folder.
+    func configDirectory(_ provider: ProviderKind) -> String {
+        let base = launch.uiTestFolder ?? (try? AppPaths.supportFolder()) ?? ""
+        return base + (provider == .claude ? "/claude-config" : "/codex-home")
+    }
+
+    /// „Anmeldung prüfen“ (ADR 0013): reads the login state now (no inference, no login); a
+    /// subscription lets a task waiting for the login start at the next tick.
+    func checkLogin(_ provider: ProviderKind) async {
+        guard let services else { return }
+        // A running check may have read before a login just finished: check once more after it.
+        if logins[provider] == .checking {
+            loginRecheck.insert(provider)
+            return
+        }
+        repeat {
+            loginRecheck.remove(provider)
+            logins[provider] = .checking
+            rebuildChecklist()
+            logins[provider] = await ProviderLogin.check(provider, services: services)
+            rebuildChecklist()
+        } while loginRecheck.contains(provider)
+        if let item = onboarding.first(where: { $0.login == provider }) { Accessibility.announce("\(item.title): \(item.detail)") }
+    }
+
+    /// The login terminal's command: the CLI the app runs (the accepted build), in KAIORX' own
+    /// folder. In UI tests only the fake CLIs, never a real binary.
+    func loginSpec(_ provider: ProviderKind) async -> TerminalSpec? {
+        let directory = configDirectory(provider)
+        try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let executable: String?
+        if let folder = launch.fakeCLIFolder {
+            executable = UITestCLIs.path(provider, in: folder)
+        } else if launch.isUITest {
+            executable = nil
+        } else {
+            // Choosing the accepted build hashes the kept versions: off the main actor.
+            executable = await Task.detached { Onboarding.locate(provider, preferVerified: true) }.value
+        }
+        return executable.flatMap { ProviderLogin.terminalSpec(provider, executable: $0, configDirectory: directory) }
+    }
+
+    /// The user's re-check (ADR 0012 D7): the model profiles are synced again, so after a CLI
+    /// update the installed version's profiles become usable without a restart; then the local
+    /// probes run again. Never a login or a model call.
+    func recheck() async {
+        guard let services, !isChecking else { return }
+        isChecking = true
+        defer { isChecking = false }
+        if let outcome = await AppBootstrap.resyncProfiles(services) { profileSync = outcome }
+        await probe()
+        Accessibility.announce("Einrichtung geprüft")
+    }
+
+    private func startPump(_ projector: Projector) {
+        pump = Task.detached(priority: .userInitiated) { [weak self] in
+            while !Task.isCancelled {
+                if let delta = try? await projector.step() {
+                    await self?.receive(delta)
+                } else {
+                    await self?.idle()
+                }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+    }
+
+    private func now() -> Int64 { services?.configuration.clock() ?? Int64(Date().timeIntervalSince1970 * 1000) }
+
+    private func receive(_ delta: ProjectionDelta) async {
+        latest = delta.state
+        if coalescer.change(at: now(), critical: delta.critical, visible: true) { await publish() }
+        // Spoken also while output streams, at most once per batch interval.
+        if let text = batcher.flush(at: now()) { Accessibility.announce(text) }
+    }
+
+    private func idle() async {
+        if coalescer.tick(at: now(), visible: true) { await publish() }
+        if let text = batcher.flush(at: now()) { Accessibility.announce(text) }
+    }
+
+    private func publish() async {
+        guard let latest else { return }
+        batcher.add(Announcements.changes(from: state, to: latest))
+        state = latest
+        await refreshDecisions()
+        if onboarding.contains(where: { $0.id == "project" && $0.status != .ok }) && !state.projects.isEmpty { await probe() }
+    }
+
+    /// The scheduler works on its own; the user's explicit decisions still go through actions.
+    private func startTicker() {
+        guard let scheduler = services?.scheduler else { return }
+        ticker = Task.detached(priority: .utility) {
+            while !Task.isCancelled {
+                _ = try? await scheduler.tick()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    /// The candidate chain's host-only steps (seal, build, rebuild, collect, clean up; ADR 0011)
+    /// run in their own loop, so a long merge never delays a scheduler tick.
+    private func startChainLoop() {
+        guard let chain = services?.chain else { return }
+        chainLoop = Task.detached(priority: .utility) { [weak self] in
+            while !Task.isCancelled {
+                let report = await chain.step()
+                await self?.receive(report)
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private func receive(_ report: ChainReport) async {
+        guard report != ChainReport() else { return }
+        chainReport = report
+        chainRevision += 1
+        await refreshDecisions()
+    }
+
+    private var decisionGeneration = 0
+    /// The chain's result checks (Git calls), reused per task while nothing they read changed.
+    private let resultChecks = ResultCheckCache()
+
+    /// Rebuilds the pending decisions from the current state; a refresh that finishes after a
+    /// newer one started is dropped, so an older state never overwrites a newer list.
+    func refreshDecisions() async {
+        guard let services else { return }
+        decisionGeneration += 1
+        let generation = decisionGeneration
+        let integration = services.integration
+        let chain = services.chain
+        let state = state
+        await resultChecks.keep(only: Set(state.tasks.keys))
+        // A lookup that fails for one task or candidate drops only that entry (`collect`); should
+        // the whole collection fail, the last list stays instead of an empty one.
+        guard let collected = try? await PendingDecisions.collect(
+            state, project: nil,
+            gate: { id in try await integration?.gateItems(id) ?? [.noCommit] },
+            openFindings: { id in
+                let findings = try await services.store.findings(candidate: id)
+                return findings.contains { $0.severity.needsDecision && $0.disposition == .open }
+            },
+            resultCheck: resultChecks.lookup(state: state, store: services.store, chain: chain),
+            chainIssue: { id in await chain?.issue(id) }
+        ) else { return }
+        if generation == decisionGeneration { pending = collected }
+    }
+
+    /// At most a few terminal requests wait; repeats are dropped, so a program cannot flood the window.
+    func queueTerminalRequest(_ request: TerminalRequest) {
+        guard !pendingTerminalRequests.contains(request), pendingTerminalRequests.count < 3 else { return }
+        if case .copyToClipboard(let text) = request, text.utf8.count > 1 << 20 { return }
+        pendingTerminalRequests.append(request)
+    }
+
+    func shutdown() async {
+        pump?.cancel()
+        ticker?.cancel()
+        chainLoop?.cancel()
+        if let services { await AppBootstrap.shutdown(services) }
+    }
+
+    // MARK: Intents
+
+    func perform(_ work: @escaping (WorkbenchActions) async throws -> Void) {
+        guard let actions else { return }
+        Task {
+            do { try await work(actions) } catch { self.errorMessage = Self.describe(error) }
+            await self.refreshDecisions()
+        }
+    }
+
+    /// Opens the sheet (or the place) where a pending decision is taken.
+    func open(_ decision: PendingDecision) {
+        switch decision {
+        case .publish, .task, .uncertain, .findings: sheet = .decision(decision)
+        case .result(let task):
+            show(task: task)
+            sheet = .result(task)
+        case .conflicts(let candidate):
+            show(task: state.candidates[candidate]?.taskID)
+            sheet = .resolveConflicts(candidate)
+        case .review(let candidate):
+            show(task: state.candidates[candidate]?.taskID)
+            sheet = .startReview(candidate)
+        case .tests(let candidate):
+            // No sheet: „Tests ausführen“ in the candidate view runs the confirmed profile (ADR 0010).
+            show(task: state.candidates[candidate]?.taskID)
+        }
+    }
+
+    /// Selects a task and its job, so the detail view shows it.
+    func show(task: TaskID?) {
+        guard let task, let record = state.tasks[task] else { return }
+        if selectedJob != record.jobID { selectedJob = record.jobID }
+        selectedTask = task
+    }
+
+    func requestOpenProject() {
+        if let path = launch.uiTestRepository {
+            sheet = .trustProject(path)
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Öffnen"
+        panel.message = "Wähle ein eigenes Git-Repository."
+        if panel.runModal() == .OK, let url = panel.url { sheet = .trustProject(url.path(percentEncoded: false)) }
+    }
+
+    func openTrusted(_ path: String) {
+        perform { actions in
+            let id = try await actions.openProject(at: path)
+            await MainActor.run { self.selectedProject = id }
+        }
+    }
+
+    func stageRestore(_ backup: BackupInfo) {
+        guard let path = (try? launch.configuration())?.databasePath else { return }
+        do {
+            try AppBootstrap.stageRestore(backup, database: path)
+            restartNeeded = true
+        } catch {
+            errorMessage = Self.describe(error)
+        }
+    }
+
+    static func describe(_ error: any Error) -> String {
+        switch error {
+        case IntegrationError.shownStateChanged: "Der Kandidat hat sich geändert. Bitte neu entscheiden."
+        case IntegrationStoreError.approvalExpired: "Die Freigabe ist abgelaufen. Bitte neu freigeben."
+        case IntegrationError.reasonRequired: "Bitte gib eine Begründung an."
+        case IntegrationError.targetMoved: "Das Integrationsziel hat sich bewegt; der Kandidat ist ersetzt."
+        case ActionError.notARepository: "Der Ordner ist kein unterstütztes Git-Repository."
+        case ActionError.notAFolder: "Der Ordner existiert nicht."
+        case RestoreError.predatesForget: "Diese Sicherung ist älter als eine Löschung und wird nicht wiederhergestellt."
+        case let error as TestProfileError: Labels.testProfileError(error)
+        case TestProfileStoreError.digestChanged: "Das Testprofil hat sich geändert. Bitte die neue Fassung prüfen und bestätigen."
+        case TestProfileStoreError.invalid(let issues): issues.map(Labels.testProfileIssue).joined(separator: " ")
+        // The candidate chain's texts; they fall back to the integration texts, then to the raw error.
+        default: ChainMessages.text(error)
+        }
+    }
+
+    // MARK: Lookups for views
+
+    var projects: [ProjectRecord] { state.projects.values.sorted { ($0.createdAt, $0.name) < ($1.createdAt, $1.name) } }
+
+    func jobs(of project: ProjectID) -> [JobRecord] { state.jobs(of: project) }
+
+    func goal(of job: JobRecord) -> String { "Auftrag \(job.id.uuidString.prefix(6))" }
+
+    func candidate(for task: TaskID) -> CandidateRecord? {
+        state.candidates.values.filter { $0.taskID == task }.max { ($0.createdAt, $0.id.uuidString) < ($1.createdAt, $1.id.uuidString) }
+    }
+
+    func project(of task: TaskRecord) -> ProjectRecord? { state.jobs[task.jobID].flatMap { state.projects[$0.projectID] } }
+}
+
+/// How the app was launched: normally, or for UI tests with a temporary database, a temporary
+/// Git repository and the fake adapter (never the real CLIs).
+struct LaunchMode: Sendable {
+    let isUITest: Bool
+    let uiTestFolder: String?
+    let fakeScript: String
+    /// What a UI test starts with besides the fixture repository (`candidate`: a built candidate).
+    var seed: String? = nil
+    /// A prepared state for one UI test (`KAIORX_UITEST_FIXTURE`), for example `published`.
+    var fixture: String? = nil
+    /// `KAIORX_UITEST_CLIS=1`: fake `claude` and `codex` scripts for the onboarding and the login
+    /// buttons (ADR 0013); without it UI tests see no CLI at all.
+    var fakeCLIs = false
+
+    var fakeCLIFolder: String? { fakeCLIs ? uiTestFolder.map { $0 + "/clis" } : nil }
+
+    static let current: LaunchMode = {
+        let arguments = ProcessInfo.processInfo.arguments
+        let environment = ProcessInfo.processInfo.environment
+        #if DEBUG
+        let requested = arguments.contains("-KAIORXUITest")
+        #else
+        // Release builds never switch to the test configuration.
+        let requested = false
+        #endif
+        guard requested else { return LaunchMode(isUITest: false, uiTestFolder: nil, fakeScript: "success") }
+        let folder = environment["KAIORX_UITEST_FOLDER"] ?? NSTemporaryDirectory() + "kaiorx-uitest-\(UUID().uuidString)"
+        return LaunchMode(
+            isUITest: true, uiTestFolder: folder, fakeScript: environment["KAIORX_UITEST_SCRIPT"] ?? "success", seed: environment["KAIORX_UITEST_SEED"],
+            fixture: environment["KAIORX_UITEST_FIXTURE"], fakeCLIs: environment["KAIORX_UITEST_CLIS"] == "1"
+        )
+    }()
+
+    var uiTestRepository: String? { uiTestFolder.map { $0 + "/repo" } }
+
+    func configuration() throws -> AppConfiguration {
+        if let folder = uiTestFolder {
+            try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+            let script = fakeScript
+            let repository = uiTestRepository
+            var configuration = AppConfiguration(
+                databasePath: folder + "/kaiorx.sqlite", workspaceRoot: folder + "/workspace",
+                // Author and reviewer must differ: the fake provider writes, a second fake reviews.
+                adapters: { _ in [
+                    FakeAdapter(provider: .fake) { spec in UITestScripts.author(script, spec: spec) },
+                    FakeAdapter(provider: .codex) { spec in UITestScripts.reviewer(spec, script: script, repository: repository) },
+                ] },
+                gate: UITestGate()
+            )
+            if let clis = fakeCLIFolder {
+                try UITestCLIs.install(in: clis)
+                configuration.loginCheck = { provider in await UITestCLIs.check(provider, in: clis, configRoot: folder) }
+            }
+            return configuration
+        }
+        // The build's channel (Info.plist, per build configuration; unknown means distributed)
+        // decides whether any real provider may run without the user's start (ADR 0009).
+        return try AppConfiguration.standard(adapters: { host in RealAdapters.make(host: host) }, channel: .current())
+    }
+}
+
+/// Fake `claude` and `codex` for UI tests of the onboarding and the login buttons (ADR 0013).
+/// They answer `--version` like the accepted builds; „logging in“ leaves a marker in the
+/// configuration folder, which the login check reads. No real binary is ever started.
+enum UITestCLIs {
+    static func path(_ provider: ProviderKind, in folder: String) -> String? {
+        switch provider {
+        case .claude: folder + "/claude"
+        case .codex: folder + "/codex"
+        case .fake: nil
+        }
+    }
+
+    static func install(in folder: String) throws {
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        let claude = """
+        #!/bin/sh
+        case "$1" in
+          --version) echo "2.1.329 (Claude Code)" ;;
+          auth) if [ -f "$CLAUDE_CONFIG_DIR/angemeldet" ]; then echo '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max"}'; else echo '{"loggedIn":false}'; fi ;;
+          *) [ "$DISABLE_AUTOUPDATER" = 1 ] && : > "$CLAUDE_CONFIG_DIR/angemeldet"; echo "Testanmeldung erledigt."; while :; do sleep 1; done ;;
+        esac
+        """
+        let codex = """
+        #!/bin/sh
+        case "$1" in
+          --version) echo "codex-cli 0.170.0" ;;
+          login) : > "$CODEX_HOME/angemeldet"; echo "Testanmeldung erledigt." ;;
+        esac
+        """
+        for (name, text) in [("claude", claude), ("codex", codex)] {
+            let path = folder + "/" + name
+            try text.write(toFile: path, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+        }
+    }
+
+    /// Claude through the product's parser of `claude auth status --json`; Codex by its marker.
+    static func check(_ provider: ProviderKind, in folder: String, configRoot: String) async -> SubscriptionVerdict? {
+        switch provider {
+        case .claude:
+            guard let executable = path(.claude, in: folder) else { return nil }
+            let config = configRoot + "/claude-config"
+            guard let result = try? await ProcessHost().run(LaunchSpec(
+                executable: executable, arguments: ["auth", "status", "--json"], workingDirectory: folder,
+                environment: ["PATH": "/usr/bin:/bin", "CLAUDE_CONFIG_DIR": config], outputLimit: 4096, timeout: .seconds(10)
+            )) else { return .unclear("Testprogramm lief nicht") }
+            let code: Int32 = if case .exited(let value) = result.termination { value } else { -1 }
+            return ClaudeAuthStatus(output: result.stdout.text, exitCode: code).verdict
+        case .codex:
+            return FileManager.default.fileExists(atPath: configRoot + "/codex-home/angemeldet") ? .subscription(plan: "plus") : .signedOut
+        case .fake:
+            return nil
+        }
+    }
+}
+
+/// The fake providers' behaviour in UI tests. Nothing here starts a process.
+enum UITestScripts {
+    /// `hang` waits for a cancel; `writes` leaves `src/neu.swift` in the author's worktree, so the
+    /// candidate chain has a change to seal and build; anything else succeeds without a change.
+    static func author(_ script: String, spec: AttemptSpec) -> FakeScript {
+        switch script {
+        case "hang": return .waitsForCancel
+        case "writes":
+            if let directory = spec.workingDirectory {
+                let file = URL(filePath: directory).appending(path: "src/neu.swift")
+                try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? "let neu = 2\n".write(to: file, atomically: true, encoding: .utf8)
+            }
+            return .success()
+        default: return .success()
+        }
+    }
+
+    /// The independent reviewer approves the candidate its prompt names
+    /// („Review candidate <oid> …“); any other run just succeeds. With `refuseCollect` its start
+    /// also moves the repository's `.git` to `.git-weg`, so the chain cannot read the candidate's
+    /// changes and refuses to collect the finished review until the UI test moves it back.
+    static func reviewer(_ spec: AttemptSpec, script: String = "success", repository: String? = nil) -> FakeScript {
+        let words = spec.prompt.split(separator: " ", maxSplits: 3)
+        guard words.count >= 3, words[0] == "Review", words[1] == "candidate" else { return .success() }
+        if script == "refuseCollect", let repository {
+            try? FileManager.default.moveItem(atPath: repository + "/.git", toPath: repository + "/.git-weg")
+        }
+        let oid = String(words[2])
+        let verdict = #"```json\#n{"candidateOID": "\#(oid)", "verdict": "approve", "summary": "ok", "findings": []}\#n```"#
+        return FakeScript(steps: [
+            .emit(.started(sessionID: "uitest-review")), .emit(.messageFinal(itemID: "r", text: verdict)), .emit(.completed(.succeeded)),
+        ])
+    }
+}
+
+/// UI tests may run the fake provider automatically.
+struct UITestGate: CapabilityGate {
+    func allowsAutomatic(_ provider: ProviderKind) async -> Bool { provider == .fake || provider == .codex }
+    func accessRestored(_ provider: ProviderKind, account: AccountID) async -> Bool { true }
+}
+
+/// The real adapters for CLIs that are installed, each under the product confinement
+/// (`ProviderAdapters`). Automatic runs pass the `AutomationGate` first: channel, live-verified
+/// installed build, effective confinement and a subscription verdict (ADR 0003, ADR 0009).
+enum RealAdapters {
+    static func make(host: ProcessHost) -> [any AgentAdapter] {
+        guard let support = try? AppPaths.supportFolder() else { return [] }
+        // The accepted build, also when `claude` links to a newer one (ADR 0013).
+        return ProviderAdapters.make(host: host, support: support) { Onboarding.locate($0, preferVerified: true) }
+    }
+}

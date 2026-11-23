@@ -1,0 +1,217 @@
+import Domain
+import Foundation
+import ProcessHost
+import Providers
+import Workspace
+
+/// One onboarding check: one status and one way to fix it (Plan/macos-und-git.md: missing tools
+/// and an expired login each have a visible remedy).
+public struct OnboardingItem: Sendable, Equatable, Identifiable {
+    public enum Status: String, Sendable, Equatable {
+        case ok, warning, missing, unknown
+    }
+
+    public var id: String
+    public var title: String
+    public var status: Status
+    public var detail: String
+    /// What the user can do; nil when nothing is needed.
+    public var remedy: String?
+    /// A command the user may copy and run themselves in their own terminal (never run by KAIORX).
+    public var command: String?
+    /// A login row: the app offers „Im Terminal anmelden …“ and „Anmeldung prüfen“ (ADR 0013).
+    public var login: ProviderKind?
+
+    public var label: StatusLabel {
+        switch status {
+        case .ok: StatusLabel("Bereit", "checkmark.circle", .success)
+        case .warning: StatusLabel("Eingeschränkt", "exclamationmark.triangle", .warning)
+        case .missing: StatusLabel("Fehlt", "xmark.circle", .failure)
+        case .unknown: StatusLabel("Wird beim ersten Lauf geprüft", "questionmark.circle", .neutral)
+        }
+    }
+}
+
+/// What the local probes found. Probes only read versions (`--version`) and test the sandbox;
+/// they never log in or run a model (CLAUDE.md).
+public struct ProbeResults: Sendable, Equatable {
+    public var gitPath: String?
+    public var clis: [ProviderKind: BinaryIdentity] = [:]
+    public var cliErrors: [ProviderKind: String] = [:]
+    /// The build the command links to when the app runs another, accepted one (ADR 0013).
+    public var linked: [ProviderKind: String] = [:]
+    /// The login checks the user asked for („Anmeldung prüfen“); missing means not checked yet.
+    public var logins: [ProviderKind: LoginCheck] = [:]
+    public var confinement: ConfinementStatus?
+    public var projects: Int = 0
+    /// The latest sync of the real providers' model profiles (ADR 0012: at start or on the
+    /// user's re-check); nil when the app registers none (tests, UI tests).
+    public var profileSync: ProfileSyncOutcome?
+    /// The stored model profiles, to show which ones are usable after the sync.
+    public var profiles: [ModelProfile] = []
+
+    public init(gitPath: String? = nil) {
+        self.gitPath = gitPath
+    }
+}
+
+public enum Onboarding {
+    /// Where the provider CLIs are usually installed; the first executable match wins. Node
+    /// version managers (nvm) put `codex` under `~/.nvm/versions/node/<v>/bin`, newest first.
+    public static func candidatePaths(_ provider: ProviderKind, home: String = NSHomeDirectory()) -> [String] {
+        let name = provider == .claude ? "claude" : "codex"
+        var paths = ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)", "\(home)/.local/bin/\(name)", "\(home)/.npm-global/bin/\(name)"]
+        if provider == .claude { paths.append("\(home)/.claude/local/claude") }
+        let nvm = home + "/.nvm/versions/node"
+        let versions = ((try? FileManager.default.contentsOfDirectory(atPath: nvm)) ?? [])
+            .sorted { $0.compare($1, options: .numeric) == .orderedDescending }
+        paths += versions.map { "\(nvm)/\($0)/bin/\(name)" }
+        return paths
+    }
+
+    /// The native executable of the first installed CLI (an npm launcher resolves to its
+    /// vendored binary, which the adapters can start without Node). With `preferVerified` (the
+    /// app, ADR 0013) a kept, live-accepted Claude build replaces an unaccepted linked one; the
+    /// owner's acceptance kit keeps the default and tests exactly the linked build.
+    public static func locate(_ provider: ProviderKind, home: String = NSHomeDirectory(), preferVerified: Bool = false) -> String? {
+        for path in candidatePaths(provider, home: home) where FileManager.default.isExecutableFile(atPath: path) {
+            if let native = try? NativeBinary.resolve(path) { return preferVerified ? VerifiedInstall.prefer(native, provider: provider) : native }
+        }
+        return nil
+    }
+
+    /// Runs the local probes: Git, `--version` of each CLI found, the sandbox check. The CLIs are
+    /// the ones the app runs (`locate(…, preferVerified: true)`); `linked` names the one the
+    /// command itself points at when that differs. `locate` replaces the search (UI tests).
+    public static func probe(
+        host: ProcessHost, scratch: URL, home: String = NSHomeDirectory(), projects: Int, locate: (@Sendable (ProviderKind) -> String?)? = nil
+    ) async -> ProbeResults {
+        var results = ProbeResults(gitPath: GitRunner.locate())
+        for provider in [ProviderKind.claude, .codex] {
+            let path: String?
+            if let locate {
+                path = locate(provider)
+            } else {
+                path = Self.locate(provider, home: home, preferVerified: true)
+                let linked = Self.locate(provider, home: home)
+                if let linked, linked != path { results.linked[provider] = linked }
+            }
+            guard let path else { continue }
+            do { results.clis[provider] = try await BinaryIdentity.probe(path, host: host) }
+            catch { results.cliErrors[provider] = String(describing: error) }
+        }
+        results.confinement = await Confinement.probe(host: host, scratch: scratch)
+        results.projects = projects
+        return results
+    }
+
+    /// The command that logs in for KAIORX's own CLI configuration folders (the adapters do not
+    /// use `~/.claude` or `~/.codex`, ADR 0003). The user runs it in their own terminal.
+    public static func loginCommand(_ provider: ProviderKind, configDirectory: String?) -> String {
+        let quoted = configDirectory.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        switch provider {
+        case .claude: return quoted.map { "DISABLE_AUTOUPDATER=1 CLAUDE_CONFIG_DIR=\($0) claude" } ?? "DISABLE_AUTOUPDATER=1 claude"
+        case .codex: return quoted.map { "CODEX_HOME=\($0) codex login" } ?? "codex login"
+        case .fake: return ""
+        }
+    }
+
+    /// The checklist from the probe results; `configDirectories` are the adapters' own folders.
+    public static func checklist(_ probes: ProbeResults, configDirectories: [ProviderKind: String] = [:]) -> [OnboardingItem] {
+        var items: [OnboardingItem] = []
+        items.append(probes.gitPath.map {
+            OnboardingItem(id: "git", title: "Git", status: .ok, detail: $0)
+        } ?? OnboardingItem(
+            id: "git", title: "Git", status: .missing, detail: "Git wurde nicht gefunden.",
+            remedy: "Installiere die Command Line Tools und starte KAIORX neu.", command: "xcode-select --install"
+        ))
+        for provider in [ProviderKind.claude, .codex] {
+            let name = Labels.provider(provider)
+            let binary = provider == .claude ? "claude" : "codex"
+            if let identity = probes.clis[provider] {
+                let entry = CompatibilityMatrix.entry(for: provider, version: identity.version)
+                switch entry?.status {
+                case .liveVerified:
+                    items.append(OnboardingItem(id: binary, title: name, status: .ok, detail: "Version \(identity.version), live abgenommen"))
+                case .offlineVerified:
+                    items.append(OnboardingItem(
+                        id: binary, title: name, status: .warning, detail: "Version \(identity.version), offline geprüft",
+                        remedy: "Automatik gesperrt bis zur Live-Abnahme durch den Kontoinhaber. Manuelle Übergabe bleibt möglich."
+                    ))
+                case nil:
+                    items.append(OnboardingItem(
+                        id: binary, title: name, status: .warning, detail: "Version \(identity.version) ist nicht in der Kompatibilitätsliste",
+                        remedy: "Automatik gesperrt. Installiere eine geprüfte Version oder nutze die manuelle Übergabe."
+                    ))
+                }
+                if let linked = probes.linked[provider] {
+                    let last = items.count - 1
+                    items[last].detail += ". \(binary) zeigt auf einen anderen Build (\(URL(filePath: linked).lastPathComponent)); KAIORX nutzt den abgenommenen"
+                }
+                items.append(ProviderLogin.item(
+                    provider, check: probes.logins[provider], command: loginCommand(provider, configDirectory: configDirectories[provider])
+                ))
+            } else if let error = probes.cliErrors[provider] {
+                items.append(OnboardingItem(
+                    id: binary, title: name, status: .missing, detail: "Gefunden, aber die Versionsabfrage schlug fehl: \(error)",
+                    remedy: "Prüfe die Installation im Terminal.", command: "\(binary) --version"
+                ))
+            } else {
+                items.append(OnboardingItem(
+                    id: binary, title: name, status: .missing, detail: "Nicht installiert oder nicht gefunden.",
+                    remedy: "Installiere \(name) und starte KAIORX neu. Bereits erzeugte Diffs bleiben erreichbar."
+                ))
+            }
+        }
+        switch probes.confinement {
+        case .effective:
+            items.append(OnboardingItem(id: "sandbox", title: "Schreibschutz für Agenten", status: .ok, detail: "sandbox-exec wirkt."))
+        case .unavailable(let reason):
+            items.append(OnboardingItem(
+                id: "sandbox", title: "Schreibschutz für Agenten", status: .missing, detail: reason,
+                remedy: "Ohne wirksamen Schreibschutz starten keine automatischen Läufe."
+            ))
+        case nil:
+            items.append(OnboardingItem(id: "sandbox", title: "Schreibschutz für Agenten", status: .unknown, detail: "Noch nicht geprüft."))
+        }
+        if let item = profileItem(probes.profileSync, profiles: probes.profiles) { items.append(item) }
+        items.append(probes.projects > 0
+            ? OnboardingItem(id: "project", title: "Projekt", status: .ok, detail: "\(probes.projects) geöffnet")
+            : OnboardingItem(
+                id: "project", title: "Projekt", status: .missing, detail: "Noch kein Projekt geöffnet.",
+                remedy: "Öffne ein eigenes, vertrauenswürdiges Git-Repository (⌘O)."
+            ))
+        return items
+    }
+
+    /// The outcome of the latest profile sync (ADR 0012 §5): which real models an author or a
+    /// reviewer can use, or why the sync failed. Without a usable profile no author starts and
+    /// the review sheet offers no reviewer, so the reason must be visible here.
+    static func profileItem(_ outcome: ProfileSyncOutcome?, profiles: [ModelProfile]) -> OnboardingItem? {
+        switch outcome {
+        case nil:
+            return nil
+        case .failed(let reason):
+            return OnboardingItem(
+                id: "profiles", title: "Modellprofile", status: .missing, detail: "Abgleich fehlgeschlagen: \(reason)",
+                remedy: "Ohne Modellprofil startet kein Autor und es gibt keinen Prüfer. Prüfe erneut („Einrichtung prüfen …“) oder starte KAIORX neu; bleibt der Fehler, notiere diesen Text."
+            )
+        case .synced:
+            let parts = ModelProfileSync.managed.sorted { $0.rawValue < $1.rawValue }.compactMap { provider -> String? in
+                let usable = profiles.filter { $0.provider == provider && $0.isUsable }
+                guard !usable.isEmpty else { return nil }
+                let models = Dictionary(grouping: usable) { "\($0.model), Stufe \($0.tier.rawValue)" }
+                    .sorted { $0.key < $1.key }
+                    .map { key, rows in "\(key) (" + AttemptRole.allCases.filter { role in rows.contains { $0.role == role } }.map(Labels.role).joined(separator: ", ") + ")" }
+                return "\(Labels.provider(provider)): " + models.joined(separator: "; ")
+            }
+            guard !parts.isEmpty else {
+                return OnboardingItem(
+                    id: "profiles", title: "Modellprofile", status: .warning, detail: "Kein nutzbares Modellprofil für Claude oder Codex.",
+                    remedy: "Aufgaben warten mit „Kein passendes Modellprofil“, bis eine live abgenommene Version Modellprofile hat."
+                )
+            }
+            return OnboardingItem(id: "profiles", title: "Modellprofile", status: .ok, detail: parts.joined(separator: " · "))
+        }
+    }
+}
