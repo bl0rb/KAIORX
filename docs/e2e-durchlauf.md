@@ -3,7 +3,8 @@
 Anleitung für den Kontoinhaber. Sie führt einmal durch die ganze Kette in der App: Projekt, Testprofil, Auftrag, Zustimmung, automatischer Autorenlauf, Versiegeln und Bauen, Tests, Review beim anderen Anbieter, Freigabe, Veröffentlichung und Lieferbranch. Dabei laufen der **echte Claude Code** und der **echte Codex** im **Debug-Build** der App.
 
 - **Stand:** Branch `feat/live-kit-package-a` mit den Modellprofilen aus der Live-Abnahme, ADR 0009, 0010, 0011 und 0012.
-- **Wer:** nur der Kontoinhaber, von Hand, auf dem eigenen Mac. Claude Code, Codex, Skripte und CI führen diese Schritte nicht aus (`CLAUDE.md`).
+- **Wer:** nur der Kontoinhaber, von Hand, auf dem eigenen Mac. Claude Code, Codex und CI führen diese Schritte nicht aus (`CLAUDE.md`).
+- **Hilfsskript:** `scripts/e2e-durchlauf.sh` erledigt die Vorbereitung und die Prüfungen im Terminal (Kasten unten). Du tippst es selbst in Terminal.app; aus Claude Code, Codex, CI oder ohne Terminal lehnt es ab. Es ruft kein Modell auf, meldet nirgends an und startet die App nicht.
 - **Dauer:** Hauptweg etwa 60 bis 90 Minuten, die optionalen Teile je 15 bis 30 Minuten.
 - **Wozu:** Der Durchlauf ist die Datenquelle für die Nachweise von I.1, I.3 und I.4 (`Plan/paket-i.md`, Stufe 0.7). Die Daten bleiben deshalb in der echten Datenbank.
 
@@ -11,6 +12,21 @@ Anleitung für den Kontoinhaber. Sie führt einmal durch die ganze Kette in der 
 >
 > - Hat sich Claude oder Codex selbst aktualisiert, bleiben die Profile nutzbar. Die Aufgabe wartet dann mit „Wartet auf deinen Start: … nicht live abgenommen“, nicht mit „Kein passendes Modellprofil“. Dann brauchst du zuerst eine neue Live-Abnahme; nach dem Commit ihres Patches startest du KAIORX neu.
 > - Nur Aufgaben der Stufe `intensive` (oder eine Eskalation dorthin) warten mit „Kein passendes Modellprofil“: Für diese Stufe ist noch kein Modell abgenommen.
+
+## 0 Hilfsskript
+
+Im KAIORX-Repository, in Terminal.app:
+
+| Befehl | Wann | Was es tut |
+|---|---|---|
+| `scripts/e2e-durchlauf.sh vorbereiten` | vor dem Start | Protokoll anlegen (1), Debug-Build mit Kanalprüfung (4.1), Version **und** Build beider Programme mit derselben Prüfung wie die App, Sandbox, Anmeldestatus mit ersetzten E-Mail-Adressen (4.2), Wegwerf-Repository (4.3), Speicher und laufende App (4.4), Vorher-Stand (4.5) |
+| `scripts/e2e-durchlauf.sh profile` | nach dem Start der App (E5.4) | die vier nutzbaren Modellprofile, nur lesend |
+| `scripts/e2e-durchlauf.sh nachher` | nach Schritt 16 | E15.3, E16.3 und E17.1: Refs, `hallo.txt` im Integrationsstand und im Lieferbranch, Worktrees, Checkout unverändert |
+| `scripts/e2e-durchlauf.sh bericht` | bei Abweichungen | Angaben aus Abschnitt 19 (Codes, Git-Zustand, Versionen) nach `~/kaiorx-e2e-bericht.txt`, mit `~` statt Benutzerordner und ohne E-Mail-Adressen; lies die Datei vor dem Weitergeben |
+
+- Jede Zeile beginnt mit `OK` oder `FEHLT`; am Ende steht, was fehlt. Ein erneuter Aufruf überschreibt weder Protokoll noch Repository noch Vorher-Stand.
+- Die Anmeldung beurteilst du selbst an der Ausgabe (Abo bzw. ChatGPT); das Skript meldet nicht an.
+- Die Schritte in der App (ab 5) bleiben Handarbeit. Die Befehle in den folgenden Abschnitten sind dieselben Prüfungen zum Nachlesen oder für den Fall, dass das Skript abbricht.
 
 ## 1 Protokoll führen
 
