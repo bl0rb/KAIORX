@@ -187,6 +187,9 @@ public enum FixturePrograms {
                 finish_turn('interrupted');
             }
         }
+        # The end of standard input stops the server like SIGINT does; both say goodbye on standard
+        # error, so the last line does not depend on which arrives first.
+        print STDERR "closing";
         exit 0;
         """
     }
