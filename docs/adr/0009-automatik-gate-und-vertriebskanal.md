@@ -1,6 +1,6 @@
 # ADR 0009 · Automatik-Gate und Vertriebskanal
 
-**Status:** vorgeschlagen, 21. November 2026; Abnahme durch den Kontoinhaber offen · **Betrifft:** `Plan/paket-i.md` Stufe 0.1, Paket A, ADR 0003 §1, ADR 0005 §7 und §10, ADR 0008 §2
+**Status:** angenommen, 23. November 2026, vom Kontoinhaber (vorgeschlagen 21. November 2026) · **Betrifft:** `Plan/paket-i.md` Stufe 0.1, Paket A, ADR 0003 §1, ADR 0005 §7 und §10, ADR 0008 §2
 
 ## Kontext
 

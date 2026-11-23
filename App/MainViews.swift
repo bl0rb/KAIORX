@@ -56,6 +56,7 @@ struct RootView: View {
             case .resolveConflicts(let candidate): ResolveConflictsSheet(candidate: candidate)
             case .startReview(let candidate): StartReviewSheet(candidate: candidate)
             case .importReview(let candidate): ImportReviewSheet(candidate: candidate)
+            case .setupCheck: SetupCheckSheet()
             }
         }
         .alert("Hinweis", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
@@ -250,6 +251,25 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Willkommen bei KAIORX").font(.title).accessibilityAddTraits(.isHeader)
             Text("KAIORX arbeitet nur in eigenen, vertrauenswürdigen Git-Repositories. Dein Checkout bleibt unverändert.")
+            OnboardingChecklist()
+            HStack {
+                RecheckButton()
+                Button("Projekt öffnen …") { model.requestOpenProject() }
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("onboardingOpenProject")
+            }
+        }
+        .padding()
+        .frame(maxWidth: 560, alignment: .leading)
+    }
+}
+
+/// The onboarding checks, one row each with its remedy.
+struct OnboardingChecklist: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
             ForEach(model.onboarding) { item in
                 HStack(alignment: .top) {
                     StatusBadge(label: item.label).labelStyle(.iconOnly).frame(width: 24)
@@ -269,12 +289,47 @@ struct OnboardingView: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("onboarding-\(item.id)")
             }
-            Button("Projekt öffnen …") { model.requestOpenProject() }
-                .keyboardShortcut(.defaultAction)
-                .accessibilityIdentifier("onboardingOpenProject")
+        }
+    }
+}
+
+/// Runs the checks again and syncs the model profiles (ADR 0012 D7): after a CLI update no
+/// restart is needed.
+struct RecheckButton: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button("Erneut prüfen") { Task { await model.recheck() } }
+                .disabled(model.isChecking)
+                .accessibilityIdentifier("recheckSetup")
+            if model.isChecking {
+                ProgressView().controlSize(.small).accessibilityLabel("Wird geprüft")
+            }
+        }
+    }
+}
+
+/// „Einrichtung prüfen …“: the onboarding checks at any time, also with projects open.
+struct SetupCheckSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Einrichtung prüfen").font(.headline).accessibilityAddTraits(.isHeader)
+            Text("Prüft Git, die installierten Programme und den Schreibschutz und gleicht die Modellprofile ab. Nach einem Update von Claude Code oder Codex ist so kein Neustart nötig.")
+                .foregroundStyle(.secondary)
+            OnboardingChecklist()
+            HStack {
+                RecheckButton()
+                Spacer()
+                Button("Schließen") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("closeSetupCheck")
+            }
         }
         .padding()
-        .frame(maxWidth: 560, alignment: .leading)
+        .frame(width: 560, alignment: .leading)
     }
 }
 

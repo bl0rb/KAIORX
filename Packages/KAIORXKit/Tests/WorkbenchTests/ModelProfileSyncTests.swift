@@ -94,7 +94,8 @@ import Testing
 
         probes.profileSync = .failed("SQLite busy (5)")
         let failed = try #require(Onboarding.checklist(probes).first { $0.id == "profiles" })
-        #expect(failed.status == .missing && failed.detail == "Abgleich beim Start fehlgeschlagen: SQLite busy (5)" && failed.remedy != nil)
+        #expect(failed.status == .missing && failed.detail == "Abgleich fehlgeschlagen: SQLite busy (5)")
+        #expect(failed.remedy?.contains("Einrichtung prüfen") == true)
         probes.profileSync = .synced(ModelProfileSyncReport())
         probes.profiles = probes.profiles.map { var disabled = $0; disabled.disabledReason = "catalog:removed"; return disabled }
         #expect(Onboarding.checklist(probes).first { $0.id == "profiles" }?.status == .warning)
@@ -105,7 +106,36 @@ import Testing
     @Test func withoutRegistrationNothingIsRegistered() async throws {
         let services = try await start(try temporaryFolder("profiles-none"), .none)
         #expect(services.profileSync == nil)
+        #expect(await AppBootstrap.resyncProfiles(services) == nil)
         #expect(try await services.store.modelProfiles().isEmpty)
+        await AppBootstrap.shutdown(services)
+    }
+
+    /// ADR 0012 D7: the user's re-check reads the installed builds again and syncs like a start,
+    /// so profiles a start left disabled become usable without a restart.
+    @Test func theReCheckReadsTheInstallationAgainAndSyncsLikeAStart() async throws {
+        let identities = [ProviderKind.claude: try Self.verified(.claude), .codex: try Self.verified(.codex)]
+        let reads = Mutex(0)
+        let registration = ProfileRegistration.verifiedCatalog(installed: { provider in
+            reads.withLock { $0 += 1 }
+            return identities[provider]
+        })
+        let services = try await start(try temporaryFolder("profiles-recheck"), registration)
+        let desired = ModelProfileSync.desired(installed: identities)
+        #expect(reads.withLock { $0 } == 2)
+
+        // What a start leaves when another catalog version was active (say, before a CLI update).
+        let stale = desired.map { var profile = $0; profile.disabledReason = "catalog:otherVersion 0.0.1"; return profile }
+        _ = try await services.store.syncCatalogModelProfiles(stale, managed: ModelProfileSync.managed)
+        #expect(try await services.store.modelProfiles().filter(\.isUsable).isEmpty)
+
+        guard case .synced(let report)? = await AppBootstrap.resyncProfiles(services) else { Issue.record("no sync"); return }
+        #expect(reads.withLock { $0 } == 4)
+        #expect(report.inserted.isEmpty && report.removed.isEmpty)
+        #expect(Set(report.updated) == Set(desired.map(\.id)))
+        #expect(Set(try await services.store.modelProfiles().filter(\.isUsable).map(\.id)) == Set(desired.filter(\.isUsable).map(\.id)))
+        // Twice gives the same result.
+        #expect(await AppBootstrap.resyncProfiles(services) == .synced(ModelProfileSyncReport()))
         await AppBootstrap.shutdown(services)
     }
 

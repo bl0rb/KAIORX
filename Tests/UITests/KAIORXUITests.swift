@@ -62,6 +62,30 @@ final class KAIORXUITests: XCTestCase {
         openProject()
     }
 
+    /// ADR 0012 D7: „Einrichtung prüfen …“ shows the checks with a project open and runs them
+    /// again (with the profile sync) without a restart.
+    func testTheSetupCheckRunsAgainWithAProjectOpen() {
+        launch()
+        openProject()
+        for name in ["Ablage", "File"] where app.menuBarItems[name].exists {
+            app.menuBarItems[name].click()
+            break
+        }
+        let menuItem = app.menuItems["Einrichtung prüfen …"]
+        XCTAssertTrue(menuItem.waitForExistence(timeout: 5), "no menu item")
+        menuItem.click()
+        let recheck = app.buttons["recheckSetup"]
+        XCTAssertTrue(recheck.waitForExistence(timeout: 5), "no setup check sheet")
+        XCTAssertTrue(app.descendants(matching: .any)["onboarding-project"].waitForExistence(timeout: 10))
+        recheck.click()
+        let done = NSPredicate(format: "isEnabled == true")
+        expectation(for: done, evaluatedWith: recheck)
+        waitForExpectations(timeout: 30)
+        XCTAssertTrue(app.descendants(matching: .any)["onboarding-project"].exists)
+        app.buttons["closeSetupCheck"].click()
+        XCTAssertTrue(recheck.waitForNonExistence(timeout: 5), "the sheet stayed open")
+    }
+
     func testConsentIsAskedAndTheRunStarts() {
         launch()
         openProject()

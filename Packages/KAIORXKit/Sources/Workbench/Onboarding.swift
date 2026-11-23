@@ -38,8 +38,8 @@ public struct ProbeResults: Sendable, Equatable {
     public var cliErrors: [ProviderKind: String] = [:]
     public var confinement: ConfinementStatus?
     public var projects: Int = 0
-    /// The start-up sync of the real providers' model profiles (ADR 0012); nil when the app
-    /// registers none (tests, UI tests).
+    /// The latest sync of the real providers' model profiles (ADR 0012: at start or on the
+    /// user's re-check); nil when the app registers none (tests, UI tests).
     public var profileSync: ProfileSyncOutcome?
     /// The stored model profiles, to show which ones are usable after the sync.
     public var profiles: [ModelProfile] = []
@@ -163,7 +163,7 @@ public enum Onboarding {
         return items
     }
 
-    /// The outcome of the start-up profile sync (ADR 0012 §5): which real models an author or a
+    /// The outcome of the latest profile sync (ADR 0012 §5): which real models an author or a
     /// reviewer can use, or why the sync failed. Without a usable profile no author starts and
     /// the review sheet offers no reviewer, so the reason must be visible here.
     static func profileItem(_ outcome: ProfileSyncOutcome?, profiles: [ModelProfile]) -> OnboardingItem? {
@@ -172,8 +172,8 @@ public enum Onboarding {
             return nil
         case .failed(let reason):
             return OnboardingItem(
-                id: "profiles", title: "Modellprofile", status: .missing, detail: "Abgleich beim Start fehlgeschlagen: \(reason)",
-                remedy: "Ohne Modellprofil startet kein Autor und es gibt keinen Prüfer. Starte KAIORX neu; bleibt der Fehler, notiere diesen Text."
+                id: "profiles", title: "Modellprofile", status: .missing, detail: "Abgleich fehlgeschlagen: \(reason)",
+                remedy: "Ohne Modellprofil startet kein Autor und es gibt keinen Prüfer. Prüfe erneut („Einrichtung prüfen …“) oder starte KAIORX neu; bleibt der Fehler, notiere diesen Text."
             )
         case .synced:
             let parts = ModelProfileSync.managed.sorted { $0.rawValue < $1.rawValue }.compactMap { provider -> String? in

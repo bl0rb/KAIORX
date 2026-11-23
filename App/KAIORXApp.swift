@@ -26,6 +26,8 @@ struct KAIORXApp: App {
                 Button("Testprofile …") { if let project = model.selectedProject { model.sheet = .testProfiles(project) } }
                     .keyboardShortcut("t", modifiers: [.command, .option])
                     .disabled(model.selectedProject == nil)
+                Button("Einrichtung prüfen …") { model.sheet = .setupCheck }
+                    .disabled(model.phase != .ready)
             }
             CommandMenu("Lauf") {
                 Button("Ausgewählten Lauf abbrechen") { model.cancelSelected() }

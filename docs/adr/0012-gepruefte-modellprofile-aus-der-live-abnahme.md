@@ -1,6 +1,6 @@
 # ADR 0012 · Geprüfte Modellprofile aus der Live-Abnahme
 
-**Status:** vorgeschlagen, 22. November 2026, nach Review überarbeitet am selben Tag (§5 Modellbindung, §6 Vorschlag je Modell, Anzeige im Onboarding); Abnahme durch den Kontoinhaber offen (Standardwerte D1 bis D8 unten) · **Betrifft:** ADR 0005 §8, ADR 0008 §8, ADR 0003, ADR 0009, `CLAUDE.md`, `Plan/laufzeitvertrag.md` (`model_profile`)
+**Status:** vorgeschlagen, 22. November 2026, nach Review überarbeitet am selben Tag (§5 Modellbindung, §6 Vorschlag je Modell, Anzeige im Onboarding); angenommen am 23. November 2026 vom Kontoinhaber: D1 bis D6 und D8 wie unten, D7 geändert (Abgleich zusätzlich bei der erneuten Prüfung, „Einrichtung prüfen …“) · **Betrifft:** ADR 0005 §8, ADR 0008 §8, ADR 0003, ADR 0009, `CLAUDE.md`, `Plan/laufzeitvertrag.md` (`model_profile`)
 
 ## Kontext
 
@@ -46,9 +46,9 @@ Feststellungen, die den Entwurf bestimmen:
    - **D5:** Ist der installierte Build nicht abgenommen, bleiben die Profile der neuesten abgenommenen Version nutzbar. So zeigt die Aufgabe den genauen Grund des Gates („Die installierte Version Claude 2.1.330 ist nicht live abgenommen“) statt „Kein passendes Modellprofil“. Die Sicherheit hängt nicht daran: Gate und `AdapterPolicy` verweigern jeden Start eines nicht abgenommenen Builds.
    - **Konfiguration:** `AppConfiguration.profileRegistration`, Standard `.none` (Unit-Tests, UI-Tests und Bench behalten ihre Attrappen). `AppConfiguration.standard` setzt `.verifiedCatalog(installed: nil)`. Ohne eigene Quelle fragt die App ihr `AutomationGate` (`installedIdentity`): Es nutzt den Versionsabgleich, den der Adapter für seine Starts zwischenspeichert, und liest im vertriebenen Kanal ohne Freigabe nichts über die Installation (ADR 0009 §3).
    - **Start:** `AppBootstrap` gleicht direkt nach `gate.prepare` ab, bevor Scheduler und Kette entstehen. Ein Fehler ist nicht fatal; er steht in `AppServices.profileSync`, und die App startet. Zweimal ausgeführt gibt es dasselbe Ergebnis.
-   - **D7:** Abgeglichen wird nur beim Start der App. Nach einem CLI-Update startet der Kontoinhaber die App neu.
+   - **D7 (bei der Abnahme geändert):** Abgeglichen wird beim Start der App und bei jeder erneuten Prüfung durch den Benutzer (`AppBootstrap.resyncProfiles`, derselbe Abgleich wie beim Start). Die Prüfliste des Onboardings hat dafür den Knopf „Erneut prüfen“; weil sie nur ohne offenes Projekt erscheint, zeigt der Menübefehl „Einrichtung prüfen …“ sie jederzeit als Blatt mit demselben Knopf. Der installierte Build wird dabei neu gelesen (der Zwischenspeicher hängt an der Dateisignatur). Nach einem CLI-Update reicht also „Erneut prüfen“; ein Neustart ist nicht nötig. Ein laufender Versuch behält sein Profil.
    - **Modell an Version gebunden.** Die Auswahl der aktiven Version kennt die Installation nicht immer: Im vertriebenen Kanal liest die App nichts, und eine Versionsabfrage kann beim Start scheitern. Dann können die Profile einer neueren Katalogversion nutzbar sein, obwohl ein älterer, ebenfalls abgenommener Build installiert ist. `AdapterPolicy.checkModel` prüft deshalb bei jedem Start im Produkt (Gate `liveVerified`), dass `VerifiedModelProfiles` genau dieses Modell für die Version des gestarteten Programms und die Rolle des Versuchs nennt; sonst `ProviderError.modelNotLiveVerified`. So läuft nie ein Paar aus Modell und Version, das nicht live geprüft wurde, unabhängig davon, welches Profil der Scheduler wählte. Kit (Gate `ownerAcceptance`, es prüft ein Modell erstmals) und Fixtures sind ausgenommen.
-   - **Sichtbar:** Das Onboarding zeigt den Eintrag „Modellprofile“: die nutzbaren Modelle je Anbieter mit Stufe und Rollen, „Kein nutzbares Modellprofil“ als Warnung oder bei einem Fehler „Abgleich beim Start fehlgeschlagen: <Grund>“. Das Ergebnis steht zusätzlich im Systemprotokoll (Subsystem `dev.kaiorx.KAIORX`, Kategorie `profiles`).
+   - **Sichtbar:** Das Onboarding zeigt den Eintrag „Modellprofile“: die nutzbaren Modelle je Anbieter mit Stufe und Rollen, „Kein nutzbares Modellprofil“ als Warnung oder bei einem Fehler „Abgleich fehlgeschlagen: <Grund>“, jeweils für den letzten Abgleich (Start oder erneute Prüfung). Das Ergebnis steht zusätzlich im Systemprotokoll (Subsystem `dev.kaiorx.KAIORX`, Kategorie `profiles`).
 
 6. **Künftige Läufe schlagen die Einträge vor (D8).** `ProfileProposal.propose` ist eine reine Textfunktion wie `MatrixProposal`. Der Schlüssel ist (Anbieter, Version, Modell):
    - Ein erneuter Lauf mit demselben Modell und derselben Version ersetzt dessen Eintrag mit dem neuen Bericht; die gewählte Stufe bleibt.
@@ -67,7 +67,7 @@ Feststellungen, die den Entwurf bestimmen:
 - **D4** Typische Tokens nil (50.000 reserviert, als unsicher markiert). Alternative: etwa 65.000 aus der Codex-Aufzeichnung.
 - **D5** Ist der installierte Build nicht abgenommen, bleiben die Profile der neuesten abgenommenen Version nutzbar, damit der genaue Grund des Gates erscheint. Alternative: sperren mit `catalog:installedNotVerified`; dann erscheint „Kein passendes Modellprofil“.
 - **D6** Effort und Kontextgrenze nil, wie abgenommen.
-- **D7** Abgleich nur beim Start der App; nach einem CLI-Update neu starten. Alternative: zusätzlich bei der erneuten Prüfung im Onboarding.
+- **D7** Abgleich nur beim Start der App; nach einem CLI-Update neu starten. Alternative: zusätzlich bei der erneuten Prüfung im Onboarding. **Gewählt (23. November 2026): die Alternative**, erreichbar auch über „Einrichtung prüfen …“ (§5).
 - **D8** Das Kit schlägt die Stufe `standard` vor; der Kontoinhaber darf sie im Patch vor dem Commit ändern. Die Stufe ist kein Beleg.
 
 ## Abweichungen von früheren Entscheidungen
@@ -80,7 +80,7 @@ Feststellungen, die den Entwurf bestimmen:
 
 ## Folgen
 
-- Neu: `VerifiedModelEntry`, `VerifiedModelProfiles`, `AdapterPolicy.checkModel`, `ProviderError.modelNotLiveVerified` (Providers), `StepID.exercisedRole`, `EvidenceCheck.profileProblems`, `ProfileProposal`, `MatrixProposal.state`, `ReportProposal` (Acceptance), der Onboarding-Eintrag „Modellprofile“, `Store.syncCatalogModelProfiles`, `ModelProfileSyncReport` (Storage), `ModelProfileSync`, `ProfileRegistration`, `ProfileSyncOutcome`, `AppServices.profileSync` (Workbench), `AutomationGate.installedIdentity` (Orchestration).
+- Neu: `VerifiedModelEntry`, `VerifiedModelProfiles`, `AdapterPolicy.checkModel`, `ProviderError.modelNotLiveVerified` (Providers), `StepID.exercisedRole`, `EvidenceCheck.profileProblems`, `ProfileProposal`, `MatrixProposal.state`, `ReportProposal` (Acceptance), der Onboarding-Eintrag „Modellprofile“, `Store.syncCatalogModelProfiles`, `ModelProfileSyncReport` (Storage), `ModelProfileSync`, `ProfileRegistration`, `ProfileSyncOutcome`, `AppServices.profileSync`, `AppBootstrap.resyncProfiles` (Workbench), `AutomationGate.installedIdentity` (Orchestration), in der App das Blatt „Einrichtung prüfen …“ mit „Erneut prüfen“ (D7).
 - Ein Quelltext-Test hält `registerModelProfile(` im Store, im UI-Test-Seed und im UI-Test-Zweig der App, `syncCatalogModelProfiles(` in `ModelProfileSync` und `ModelProfileSync.run(` im Start der App.
 - Auf einer echten Datenbank stehen nach dem Start vier nutzbare Profile: Claude `sonnet` und Codex `gpt-6.2-sol`, je als Autor und Prüfer, Stufe `standard`. Ein Autor kann starten, und das Review-Blatt bietet den anderen Anbieter an.
 - Nicht verändert: Gate, Zustimmungen, Budgets. Ein Benutzerstart braucht weiter einen live abgenommenen, isolierten Build und jetzt zusätzlich ein Modell, das der Katalog für genau diese Version und Rolle nennt.

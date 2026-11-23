@@ -22,6 +22,10 @@ final class AppModel {
     var phase: Phase = .starting
     var state = WorkspaceState()
     var onboarding: [OnboardingItem] = []
+    /// The latest model profile sync (ADR 0012): the one at start, then the user's re-check.
+    var profileSync: ProfileSyncOutcome?
+    /// A re-check („Einrichtung prüfen …“) is running.
+    var isChecking = false
     var pending: [PendingDecision] = []
     var selectedProject: ProjectID?
     var selectedJob: JobID?
@@ -52,6 +56,8 @@ final class AppModel {
         case resolveConflicts(CandidateID)
         case startReview(CandidateID)
         case importReview(CandidateID)
+        /// The onboarding checks with „Erneut prüfen“ (ADR 0012 D7), reachable from the menu.
+        case setupCheck
 
         var id: String {
             switch self {
@@ -66,6 +72,7 @@ final class AppModel {
             case .resolveConflicts(let id): "conflicts:\(id.uuidString)"
             case .startReview(let id): "review:\(id.uuidString)"
             case .importReview(let id): "import:\(id.uuidString)"
+            case .setupCheck: "setupCheck"
             }
         }
     }
@@ -94,6 +101,7 @@ final class AppModel {
             phase = .recovery(issue, backups)
         case .ready(let services):
             self.services = services
+            profileSync = services.profileSync
             if launch.isUITest { await seedForUITests(services.store) }
             var seeded = launch.seed == "candidate" ? await seedCandidateForUITests(services) : nil
             var fixtureJob: JobID?
@@ -163,11 +171,23 @@ final class AppModel {
         }
         var adjusted = results
         adjusted.projects = state.projects.count
-        // The start-up profile sync (ADR 0012): which models are usable, or why the sync failed.
-        adjusted.profileSync = services.profileSync
+        // The latest profile sync (ADR 0012): which models are usable, or why the sync failed.
+        adjusted.profileSync = profileSync
         adjusted.profiles = (try? await services.store.modelProfiles()) ?? []
         let support = (try? AppPaths.supportFolder()) ?? ""
         onboarding = Onboarding.checklist(adjusted, configDirectories: [.claude: support + "/claude-config", .codex: support + "/codex-home"])
+    }
+
+    /// The user's re-check (ADR 0012 D7): the model profiles are synced again, so after a CLI
+    /// update the installed version's profiles become usable without a restart; then the local
+    /// probes run again. Never a login or a model call.
+    func recheck() async {
+        guard let services, !isChecking else { return }
+        isChecking = true
+        defer { isChecking = false }
+        if let outcome = await AppBootstrap.resyncProfiles(services) { profileSync = outcome }
+        await probe()
+        Accessibility.announce("Einrichtung geprüft")
     }
 
     private func startPump(_ projector: Projector) {

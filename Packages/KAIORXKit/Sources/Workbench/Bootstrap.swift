@@ -57,13 +57,14 @@ public struct AppConfiguration: Sendable {
 public enum ProfileRegistration: Sendable {
     /// None: whoever configures the app registers its own (tests, UI tests, benchmarks).
     case none
-    /// From `VerifiedModelProfiles`, synced at every start. `installed` names each provider's
+    /// From `VerifiedModelProfiles`, synced at every start and on the user's re-check
+    /// (`AppBootstrap.resyncProfiles`, ADR 0012 D7). `installed` names each provider's
     /// installed binary; nil asks the app's `AutomationGate` (which reads nothing in a channel
     /// without automation), so the version probe is the one the adapters cache for their starts.
     case verifiedCatalog(installed: (@Sendable (ProviderKind) async -> BinaryIdentity?)?)
 }
 
-/// How the start-up profile sync went; a failure is recorded, never fatal.
+/// How a profile sync went (at start or on the user's re-check); a failure is recorded, never fatal.
 public enum ProfileSyncOutcome: Sendable, Equatable {
     case synced(ModelProfileSyncReport)
     case failed(String)
@@ -196,6 +197,14 @@ public enum AppBootstrap {
             workspace: workspace, integration: integration, memory: memory, scheduler: scheduler, chain: chain, recovery: recovery,
             restored: restored, profileSync: profileSync
         ))
+    }
+
+    /// The user's re-check (ADR 0012 D7, „Einrichtung prüfen …“): the same sync as at start, so
+    /// after a CLI update the installed version's profiles become usable without a restart. The
+    /// installed build is read again (the identity cache keys on the file's signature). Nil when
+    /// the configuration registers no profiles.
+    public static func resyncProfiles(_ services: AppServices) async -> ProfileSyncOutcome? {
+        await syncProfiles(services.configuration, store: services.store)
     }
 
     /// Registers the verified catalog's profiles (ADR 0012); a failure is reported, not fatal.

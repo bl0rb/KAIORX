@@ -5,7 +5,7 @@ import Storage
 
 /// Registers the real providers' model profiles from the verified catalog (ADR 0012). Outside
 /// tests this is the only place that makes Claude and Codex profiles usable; it runs at every
-/// app start and gives the same result when run twice.
+/// app start and on the user's re-check (ADR 0012 D7) and gives the same result when run twice.
 ///
 /// Per provider, one catalog version is active:
 /// - the installed version, when exactly that build passed the live acceptance;

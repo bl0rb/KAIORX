@@ -1,6 +1,6 @@
 # ADR 0011 · Kandidatenkette: Host-Schritte automatisch, Anbieter- und Testschritte beim Benutzer
 
-**Status:** Vorgeschlagen – wartet auf Abnahme durch den Kontoinhaber (21. November 2026) · **Betrifft:** `Plan/ARCHITEKTURPLAN.md` (Abschnitt 3, Koordinator), `Plan/macos-und-git.md` Schritte 3–6, ADR 0004, ADR 0005 §4, §6 und „Nicht in F“, ADR 0009 §8, ADR 0010
+**Status:** angenommen, 23. November 2026, vom Kontoinhaber mit allen Vorgaben aus Punkt 9 (vorgeschlagen 21. November 2026) · **Betrifft:** `Plan/ARCHITEKTURPLAN.md` (Abschnitt 3, Koordinator), `Plan/macos-und-git.md` Schritte 3–6, ADR 0004, ADR 0005 §4, §6 und „Nicht in F“, ADR 0009 §8, ADR 0010
 
 ## Kontext
 
