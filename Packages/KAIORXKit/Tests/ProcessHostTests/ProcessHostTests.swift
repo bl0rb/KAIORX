@@ -150,8 +150,15 @@ func isAlive(_ pid: pid_t) -> Bool {
     @Test func stubbornProcessGroupIsKilled() async throws {
         let dir = try scratchDirectory()
         let host = ProcessHost()
-        let process = try await host.launch(shell("trap '' INT TERM; sleep 30 & while :; do sleep 1; done", in: dir))
-        try await Task.sleep(for: .milliseconds(100))
+        // The marker appears once the traps are set: a fixed pause raced a slow runner, whose
+        // shell was still ended by SIGINT before it ignored the signal.
+        let marker = dir + "/trapped"
+        let process = try await host.launch(shell("trap '' INT TERM; : > trapped; sleep 30 & while :; do sleep 1; done", in: dir))
+        let deadline = ContinuousClock.now + .seconds(10)
+        while !FileManager.default.fileExists(atPath: marker), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(FileManager.default.fileExists(atPath: marker))
         await process.stop(grace: .milliseconds(100))
         let result = await process.wait()
         #expect(result.termination == .signaled(SIGKILL))
