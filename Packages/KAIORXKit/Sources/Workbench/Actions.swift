@@ -102,6 +102,9 @@ public struct WorkbenchActions: Sendable {
     /// The explicit start of a task by the user.
     public func start(_ task: TaskID) async throws {
         guard let scheduler = services.scheduler else { throw ActionError.unavailable("Scheduler") }
+        // A start that fails for sure spends an attempt for nothing (ADR 0013).
+        let reason = try await services.store.task(task)?.waitReason.flatMap(WaitReason.init(stored:))
+        if let blocker = DecisionSheet.startBlockers(reason).first { throw ActionError.unavailable(blocker) }
         _ = try await scheduler.start(task, actor: WorkbenchActor.user)
     }
 

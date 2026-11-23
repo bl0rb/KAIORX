@@ -216,19 +216,43 @@ public struct DecisionSheet: Sendable, Equatable {
         }
     }
 
-    /// The explicit start of a task that waits for the user.
-    public static func start(_ task: TaskRecord, provider: ProviderKind?, writePaths: [String]) -> DecisionSheet {
-        DecisionSheet(
+    /// The explicit start of a task that waits for the user. It names why the task waits; when
+    /// that reason makes the start fail for sure (not signed in, an unaccepted build, no
+    /// confinement), it is a blocker instead, so no attempt is spent (ADR 0013).
+    public static func start(_ task: TaskRecord, provider: ProviderKind?, writePaths: [String], reason: WaitReason? = nil) -> DecisionSheet {
+        var scope = [
+            "Anbieter: \(provider.map(Labels.provider) ?? "nach Plan")",
+            writePaths.isEmpty ? "Schreibbereich: keiner" : "Schreibbereich: \(writePaths.joined(separator: ", "))",
+            "Der Lauf erhält nur freigegebene Inhalte dieses Projekts.",
+        ]
+        if let reason { scope.insert("Wartet: \(Labels.wait(reason).text)", at: 0) }
+        return DecisionSheet(
             title: "Aufgabe starten",
             action: "Die Aufgabe „\(task.title)“ jetzt starten.",
-            scope: [
-                "Anbieter: \(provider.map(Labels.provider) ?? "nach Plan")",
-                writePaths.isEmpty ? "Schreibbereich: keiner" : "Schreibbereich: \(writePaths.joined(separator: ", "))",
-                "Der Lauf erhält nur freigegebene Inhalte dieses Projekts.",
-            ],
+            scope: scope,
             ifRejected: "Die Aufgabe wartet weiter auf deinen Start; nichts wird übertragen.",
-            approveLabel: "Starten", rejectLabel: "Nicht starten", reported: nil, blockers: [], shown: nil
+            approveLabel: "Starten", rejectLabel: "Nicht starten", reported: nil, blockers: startBlockers(reason), shown: nil
         )
+    }
+
+    /// Why an explicit start would fail for sure. A start by the user skips the automatic gate
+    /// (ADR 0009 §8), but the adapter still needs an accepted build, the confinement and a login.
+    /// Other reasons (a channel without automation, an unclear plan) leave the start allowed.
+    public static func startBlockers(_ reason: WaitReason?) -> [String] {
+        guard let reason, reason.kind == .awaitingUserStart, let detail = reason.detail,
+              let (provider, block) = AutomationBlock.parse(detail), let why = Labels.automation(block, provider: provider) else { return [] }
+        let remedy: String
+        switch block {
+        case .notSubscribed("signedOut"):
+            remedy = "Melde dich zuerst an: Ablage → „Einrichtung prüfen …“ → „Im Terminal anmelden …“. Danach startet die Aufgabe von selbst."
+        case .notInstalled, .identityUnknown, .versionNotListed, .versionNotLiveVerified, .buildNotVerified:
+            remedy = "Ein Start würde nur einen nicht abgenommenen Build treffen; „Einrichtung prüfen …“ zeigt den Stand."
+        case .confinementIneffective:
+            remedy = "Ohne wirksamen Schreibschutz startet kein Anbieter; „Einrichtung prüfen …“ prüft ihn erneut."
+        default:
+            return []
+        }
+        return ["\(why). \(remedy)"]
     }
 
     /// More attempts for a task that stopped for the user's decision.

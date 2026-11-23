@@ -38,6 +38,8 @@ Im Gesamtdurchlauf 0.7 wartete die erste Aufgabe mit „Claude ist in KAIORX nic
 
 6. **UI-Tests mit Test-CLIs.** Mit `-KAIORXUITest` und `KAIORX_UITEST_CLIS=1` legt die App (nur Debug) zwei Shellskripte `claude` und `codex` im Testordner an. Sie antworten auf `--version` wie die abgenommenen Builds; ihre „Anmeldung“ legt eine Markierung im Konfigurationsordner an, bei Claude nur mit gesetztem `DISABLE_AUTOUPDATER=1`. Die Prüfung liest bei Claude die Ausgabe über den Parser des Produkts (`ClaudeAuthStatus`). Kein UI-Test startet ein echtes `claude` oder `codex`.
 
+7. **Start von Hand, der sicher scheitert.** (Nachtrag, 23. November 2026.) Im Durchlauf 0.7 wurde der erste Claude-Lauf über „Entscheiden …“ → „Starten“ gestartet, während die Aufgabe mit „Claude ist in KAIORX nicht angemeldet“ wartete. Er scheiterte sofort und verbrauchte einen der drei Läufe. Das Blatt „Aufgabe starten“ nennt jetzt den Wartegrund. Ist es einer, an dem jeder Start scheitert, steht er unter „Noch offen“, und „Starten“ ist gesperrt. Das gilt für: nicht angemeldet, nicht installiert, nicht prüfbar, Version oder Build nicht abgenommen, Schreibschutz unwirksam. Der Hinweis zeigt den Weg, bei „nicht angemeldet“ etwa „Einrichtung prüfen …“ → „Im Terminal anmelden …“; danach startet die Aufgabe von selbst. `WorkbenchActions.start` verweigert denselben Fall auch ohne Blatt. Erlaubt bleiben der vertriebene Kanal ohne Freigabe (dort ist der Benutzerstart der vorgesehene Weg, ADR 0009 §8) und ein unklares oder anderes Abrechnungsurteil (die Entscheidung des Kontoinhabers).
+
 ## Abweichungen von früheren Entscheidungen
 
 - **`CLAUDE.md`:** „Do not run the real `claude`/`codex` binaries for inference or log-in from code or tests“ gilt weiter für automatische Abläufe und Tests. Das Anmeldeterminal startet die echte CLI nur auf den Klick des Benutzers, interaktiv, und die Anmeldung macht der Benutzer selbst. Vorschlag für `CLAUDE.md`, den der Kontoinhaber selbst einträgt: „The only exception is the user-started login terminal (ADR 0013): the real CLI, interactive, after the user's click; tests use fake CLIs.“
@@ -51,6 +53,7 @@ Im Gesamtdurchlauf 0.7 wartete die erste Aufgabe mit „Claude ist in KAIORX nic
 - `ProviderLoginTests`: Umgebung und Befehl des Anmeldeterminals, Zeilen für jedes Urteil, Hinweis auf einen anderen verlinkten Build, Prüfung über die Konfiguration oder das Gate.
 - Adaptertest: Claude-Läufe setzen `DISABLE_AUTOUPDATER=1`.
 - XCUITest `testTheLoginButtonsLogInAndCheckWithoutARestart` mit Test-CLIs.
+- `StartSheetTests`: „nicht angemeldet“ und die anderen sicheren Fehlschläge sperren „Starten“ mit Hinweis; vertriebener Kanal, unklares Abo und andere Wartegründe lassen den Start zu.
 
 ## Folgen
 

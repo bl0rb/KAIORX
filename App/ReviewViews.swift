@@ -75,7 +75,7 @@ struct DecisionView: View {
                 sheet = DecisionSheet.moreAttempts(task, reason: reason, rework: rework)
             } else {
                 let planned = try? await services.store.plannedTask(id)
-                sheet = DecisionSheet.start(task, provider: nil, writePaths: planned?.writePaths ?? [])
+                sheet = DecisionSheet.start(task, provider: nil, writePaths: planned?.writePaths ?? [], reason: reason)
             }
         case .uncertain(let id):
             guard let attempt = model.state.attempts[id] else { return }
