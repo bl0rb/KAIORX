@@ -21,6 +21,9 @@ public struct AppConfiguration: Sendable {
     /// Where the real providers' model profiles come from. The default registers none, so tests,
     /// UI tests and benchmarks keep their own fakes; the real app uses the verified catalog.
     public var profileRegistration: ProfileRegistration
+    /// Replaces the gate's subscription read for „Anmeldung prüfen“ (UI tests with fake CLIs);
+    /// nil uses the automatic gate (ADR 0013).
+    public var loginCheck: (@Sendable (ProviderKind) async -> SubscriptionVerdict?)?
 
     public init(
         databasePath: String, workspaceRoot: String, adapters: @escaping @Sendable (ProcessHost) -> [any AgentAdapter],

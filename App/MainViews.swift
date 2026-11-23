@@ -57,6 +57,7 @@ struct RootView: View {
             case .startReview(let candidate): StartReviewSheet(candidate: candidate)
             case .importReview(let candidate): ImportReviewSheet(candidate: candidate)
             case .setupCheck: SetupCheckSheet()
+            case .login(let provider): LoginTerminalSheet(provider: provider)
             }
         }
         .alert("Hinweis", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
@@ -248,19 +249,23 @@ struct OnboardingView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Willkommen bei KAIORX").font(.title).accessibilityAddTraits(.isHeader)
-            Text("KAIORX arbeitet nur in eigenen, vertrauenswürdigen Git-Repositories. Dein Checkout bleibt unverändert.")
-            OnboardingChecklist()
-            HStack {
-                RecheckButton()
-                Button("Projekt öffnen …") { model.requestOpenProject() }
-                    .keyboardShortcut(.defaultAction)
-                    .accessibilityIdentifier("onboardingOpenProject")
+        // Scrolls, so the buttons stay reachable in a small window.
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Willkommen bei KAIORX").font(.title).accessibilityAddTraits(.isHeader)
+                Text("KAIORX arbeitet nur in eigenen, vertrauenswürdigen Git-Repositories. Dein Checkout bleibt unverändert.")
+                    .fixedSize(horizontal: false, vertical: true)
+                OnboardingChecklist()
+                HStack {
+                    RecheckButton()
+                    Button("Projekt öffnen …") { model.requestOpenProject() }
+                        .keyboardShortcut(.defaultAction)
+                        .accessibilityIdentifier("onboardingOpenProject")
+                }
             }
+            .padding()
+            .frame(maxWidth: 560, alignment: .leading)
         }
-        .padding()
-        .frame(maxWidth: 560, alignment: .leading)
     }
 }
 
@@ -271,23 +276,36 @@ struct OnboardingChecklist: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             ForEach(model.onboarding) { item in
-                HStack(alignment: .top) {
-                    StatusBadge(label: item.label).labelStyle(.iconOnly).frame(width: 24)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(item.title).bold()
-                        Text(item.detail).foregroundStyle(.secondary)
-                        if let remedy = item.remedy { Text(remedy) }
+                VStack(alignment: .leading, spacing: 4) {
+                    // Status and text read as one element; the buttons stay separate controls.
+                    HStack(alignment: .top) {
+                        StatusBadge(label: item.label).labelStyle(.iconOnly).frame(width: 24)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.title).bold()
+                            Text(item.detail).foregroundStyle(.secondary)
+                            if let remedy = item.remedy { Text(remedy) }
+                        }
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("onboarding-\(item.id)")
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let provider = item.login {
+                            LoginButtons(provider: provider, checking: model.logins[provider] == .checking)
+                        }
                         if let command = item.command {
-                            Button("Befehl kopieren: \(command)") {
+                            Button("Befehl kopieren") {
                                 NSPasteboard.general.clearContents()
                                 NSPasteboard.general.setString(command, forType: .string)
                             }
                             .buttonStyle(.link)
+                            .help(command)
+                            .accessibilityLabel("\(item.title): Befehl kopieren")
+                            .accessibilityHint(command)
                         }
                     }
+                    .padding(.leading, 32)
                 }
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("onboarding-\(item.id)")
             }
         }
     }
@@ -310,6 +328,31 @@ struct RecheckButton: View {
     }
 }
 
+/// „Im Terminal anmelden …“ and „Anmeldung prüfen“ for a provider's own folder (ADR 0013).
+struct LoginButtons: View {
+    @Environment(AppModel.self) private var model
+    let provider: ProviderKind
+    let checking: Bool
+
+    var body: some View {
+        let name = provider == .claude ? "Claude" : "Codex"
+        HStack(spacing: 8) {
+            Button("Im Terminal anmelden …") {
+                // From „Einrichtung prüfen …“ the login returns there to show the result.
+                model.sheetAfterLogin = model.sheet
+                model.sheet = .login(provider)
+            }
+                .accessibilityLabel("\(name): im Terminal anmelden")
+                .accessibilityIdentifier("login-\(provider.rawValue)")
+            Button("Anmeldung prüfen") { Task { await model.checkLogin(provider) } }
+                .disabled(checking)
+                .accessibilityLabel("\(name): Anmeldung prüfen")
+                .accessibilityIdentifier("checkLogin-\(provider.rawValue)")
+            if checking { ProgressView().controlSize(.small).accessibilityLabel("Wird geprüft") }
+        }
+    }
+}
+
 /// „Einrichtung prüfen …“: the onboarding checks at any time, also with projects open.
 struct SetupCheckSheet: View {
     @Environment(\.dismiss) private var dismiss
@@ -319,7 +362,8 @@ struct SetupCheckSheet: View {
             Text("Einrichtung prüfen").font(.headline).accessibilityAddTraits(.isHeader)
             Text("Prüft Git, die installierten Programme und den Schreibschutz und gleicht die Modellprofile ab. Nach einem Update von Claude Code oder Codex ist so kein Neustart nötig.")
                 .foregroundStyle(.secondary)
-            OnboardingChecklist()
+            ScrollView { OnboardingChecklist().frame(maxWidth: .infinity, alignment: .leading) }
+                .frame(minHeight: 240, maxHeight: 560)
             HStack {
                 RecheckButton()
                 Spacer()

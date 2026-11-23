@@ -12,6 +12,13 @@ public enum AutomaticVerdict: Sendable, Equatable {
 /// Why a provider does not run automatically. Stored after the provider in the detail of an
 /// `awaitingUserStart` wait reason (`claude:versionNotLiveVerified:2.1.330`); the detail only
 /// carries stable codes and versions, so an unchanged reason records no new decision.
+/// The outcome of the user's login check (ADR 0013): the subscription verdict, or the cheaper
+/// stage that kept the gate from asking the CLI at all.
+public enum SubscriptionCheck: Sendable, Equatable {
+    case verdict(SubscriptionVerdict)
+    case blocked(AutomationBlock)
+}
+
 public enum AutomationBlock: Sendable, Equatable {
     /// A simple gate said no (no further reason).
     case notPermitted
@@ -156,7 +163,9 @@ public actor AutomationGate: CapabilityGate {
     private var clock: @Sendable () -> Int64
     private var confinement: ConfinementStatus?
     private var verdicts: [ProviderKind: (verdict: SubscriptionVerdict, at: Int64)] = [:]
-    private var pending: [ProviderKind: Task<SubscriptionVerdict, Never>] = [:]
+    /// The running read per provider and its number; a fresh read only joins one started after it was asked for.
+    private var pending: [ProviderKind: (task: Task<SubscriptionVerdict, Never>, number: Int)] = [:]
+    private var reads = 0
 
     /// Default TTL of a subscription verdict: long enough not to run the status read every
     /// tick, short enough that a log-out stops automation within minutes.
@@ -259,17 +268,38 @@ public actor AutomationGate: CapabilityGate {
 
     // MARK: Subscription
 
-    private func subscription(_ provider: ProviderKind, fresh: Bool) async -> SubscriptionVerdict {
+    /// The user's „Anmeldung prüfen“ (ADR 0013): the cheaper stages first (only an accepted,
+    /// confined build is ever asked), then a fresh read past the cache, kept as the latest
+    /// verdict, so a task waiting for a login starts at the next tick. Nil where the gate reads
+    /// nothing (a channel without automation for this provider, no adapters bound).
+    public func checkSubscription(_ provider: ProviderKind) async -> SubscriptionCheck? {
+        guard provider == .claude || provider == .codex, channelPermits(provider), sources != nil else { return nil }
+        if let block = await cheaperStages(provider) { return .blocked(block) }
+        return .verdict(await subscription(provider, fresh: true, startedAfterAsking: true))
+    }
+
+    /// `fresh` skips the cache; `startedAfterAsking` (the user's check) also never takes the
+    /// answer of a read that began before the call, which may predate a login. Other callers
+    /// share a read in flight (ADR 0009 §6).
+    private func subscription(_ provider: ProviderKind, fresh: Bool, startedAfterAsking: Bool = false) async -> SubscriptionVerdict {
         let now = clock()
         if !fresh, let cached = verdicts[provider], now - cached.at < subscriptionTTL, now >= cached.at { return cached.verdict }
-        if let running = pending[provider] { return await running.value }
+        let asked = reads
+        while let running = pending[provider] {
+            if !startedAfterAsking || running.number > asked { return await running.task.value }
+            _ = await running.task.value
+            // The finished read's own caller may not have resumed yet: never wait on it twice.
+            if pending[provider]?.number == running.number { pending[provider] = nil }
+        }
         guard let sources else { return .unclear("nicht geprüft") }
         let task = Task<SubscriptionVerdict, Never> {
             do { return try await sources.subscription(provider) } catch { return .unclear("Prüfung fehlgeschlagen") }
         }
-        pending[provider] = task
+        reads += 1
+        let number = reads
+        pending[provider] = (task, number)
         let verdict = await task.value
-        pending[provider] = nil
+        if pending[provider]?.number == number { pending[provider] = nil }
         verdicts[provider] = (verdict, clock())
         return verdict
     }

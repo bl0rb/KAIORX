@@ -26,6 +26,14 @@ final class AppModel {
     var profileSync: ProfileSyncOutcome?
     /// A re-check („Einrichtung prüfen …“) is running.
     var isChecking = false
+    /// The user's login checks („Anmeldung prüfen“, ADR 0013), per provider.
+    var logins: [ProviderKind: LoginCheck] = [:]
+    /// The latest probe with its profile and project details; the checklist is rebuilt from it.
+    private var lastProbe: ProbeResults?
+    /// A check asked for while one was running (for example „Fertig“ after a login): runs next.
+    private var loginRecheck: Set<ProviderKind> = []
+    /// The sheet the login terminal was opened from („Einrichtung prüfen …“), shown again after it.
+    var sheetAfterLogin: ActiveSheet?
     var pending: [PendingDecision] = []
     var selectedProject: ProjectID?
     var selectedJob: JobID?
@@ -58,6 +66,8 @@ final class AppModel {
         case importReview(CandidateID)
         /// The onboarding checks with „Erneut prüfen“ (ADR 0012 D7), reachable from the menu.
         case setupCheck
+        /// The login terminal for a provider's own configuration folder (ADR 0013).
+        case login(ProviderKind)
 
         var id: String {
             switch self {
@@ -73,6 +83,7 @@ final class AppModel {
             case .startReview(let id): "review:\(id.uuidString)"
             case .importReview(let id): "import:\(id.uuidString)"
             case .setupCheck: "setupCheck"
+            case .login(let provider): "login:\(provider.rawValue)"
             }
         }
     }
@@ -162,9 +173,15 @@ final class AppModel {
         guard let services else { return }
         let scratch = URL(filePath: services.configuration.workspaceRoot).appending(path: "probe")
         try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
-        let results = launch.isUITest
-            ? ProbeResults(gitPath: GitRunner.locate())
-            : await Onboarding.probe(host: services.agents, scratch: scratch, projects: state.projects.count)
+        let results: ProbeResults
+        if let folder = launch.fakeCLIFolder {
+            // UI tests with fake CLIs: the real probe, but only on the fakes (never a real binary).
+            results = await Onboarding.probe(host: services.agents, scratch: scratch, projects: state.projects.count) { UITestCLIs.path($0, in: folder) }
+        } else if launch.isUITest {
+            results = ProbeResults(gitPath: GitRunner.locate())
+        } else {
+            results = await Onboarding.probe(host: services.agents, scratch: scratch, projects: state.projects.count)
+        }
         // A fresh sandbox check is the automatic gate's latest probe result too (ADR 0009).
         if let gate = services.configuration.gate as? AutomationGate, let confinement = results.confinement {
             await gate.record(confinement: confinement)
@@ -174,8 +191,57 @@ final class AppModel {
         // The latest profile sync (ADR 0012): which models are usable, or why the sync failed.
         adjusted.profileSync = profileSync
         adjusted.profiles = (try? await services.store.modelProfiles()) ?? []
-        let support = (try? AppPaths.supportFolder()) ?? ""
-        onboarding = Onboarding.checklist(adjusted, configDirectories: [.claude: support + "/claude-config", .codex: support + "/codex-home"])
+        lastProbe = adjusted
+        rebuildChecklist()
+    }
+
+    private func rebuildChecklist() {
+        guard var probes = lastProbe else { return }
+        probes.logins = logins
+        onboarding = Onboarding.checklist(probes, configDirectories: [.claude: configDirectory(.claude), .codex: configDirectory(.codex)])
+    }
+
+    /// KAIORX' own configuration folder of a provider (the adapters never use `~/.claude` or
+    /// `~/.codex`); in UI tests below the test folder.
+    func configDirectory(_ provider: ProviderKind) -> String {
+        let base = launch.uiTestFolder ?? (try? AppPaths.supportFolder()) ?? ""
+        return base + (provider == .claude ? "/claude-config" : "/codex-home")
+    }
+
+    /// „Anmeldung prüfen“ (ADR 0013): reads the login state now (no inference, no login); a
+    /// subscription lets a task waiting for the login start at the next tick.
+    func checkLogin(_ provider: ProviderKind) async {
+        guard let services else { return }
+        // A running check may have read before a login just finished: check once more after it.
+        if logins[provider] == .checking {
+            loginRecheck.insert(provider)
+            return
+        }
+        repeat {
+            loginRecheck.remove(provider)
+            logins[provider] = .checking
+            rebuildChecklist()
+            logins[provider] = await ProviderLogin.check(provider, services: services)
+            rebuildChecklist()
+        } while loginRecheck.contains(provider)
+        if let item = onboarding.first(where: { $0.login == provider }) { Accessibility.announce("\(item.title): \(item.detail)") }
+    }
+
+    /// The login terminal's command: the CLI the app runs (the accepted build), in KAIORX' own
+    /// folder. In UI tests only the fake CLIs, never a real binary.
+    func loginSpec(_ provider: ProviderKind) async -> TerminalSpec? {
+        let directory = configDirectory(provider)
+        try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let executable: String?
+        if let folder = launch.fakeCLIFolder {
+            executable = UITestCLIs.path(provider, in: folder)
+        } else if launch.isUITest {
+            executable = nil
+        } else {
+            // Choosing the accepted build hashes the kept versions: off the main actor.
+            executable = await Task.detached { Onboarding.locate(provider, preferVerified: true) }.value
+        }
+        return executable.flatMap { ProviderLogin.terminalSpec(provider, executable: $0, configDirectory: directory) }
     }
 
     /// The user's re-check (ADR 0012 D7): the model profiles are synced again, so after a CLI
@@ -408,6 +474,11 @@ struct LaunchMode: Sendable {
     var seed: String? = nil
     /// A prepared state for one UI test (`KAIORX_UITEST_FIXTURE`), for example `published`.
     var fixture: String? = nil
+    /// `KAIORX_UITEST_CLIS=1`: fake `claude` and `codex` scripts for the onboarding and the login
+    /// buttons (ADR 0013); without it UI tests see no CLI at all.
+    var fakeCLIs = false
+
+    var fakeCLIFolder: String? { fakeCLIs ? uiTestFolder.map { $0 + "/clis" } : nil }
 
     static let current: LaunchMode = {
         let arguments = ProcessInfo.processInfo.arguments
@@ -422,7 +493,7 @@ struct LaunchMode: Sendable {
         let folder = environment["KAIORX_UITEST_FOLDER"] ?? NSTemporaryDirectory() + "kaiorx-uitest-\(UUID().uuidString)"
         return LaunchMode(
             isUITest: true, uiTestFolder: folder, fakeScript: environment["KAIORX_UITEST_SCRIPT"] ?? "success", seed: environment["KAIORX_UITEST_SEED"],
-            fixture: environment["KAIORX_UITEST_FIXTURE"]
+            fixture: environment["KAIORX_UITEST_FIXTURE"], fakeCLIs: environment["KAIORX_UITEST_CLIS"] == "1"
         )
     }()
 
@@ -433,7 +504,7 @@ struct LaunchMode: Sendable {
             try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
             let script = fakeScript
             let repository = uiTestRepository
-            return AppConfiguration(
+            var configuration = AppConfiguration(
                 databasePath: folder + "/kaiorx.sqlite", workspaceRoot: folder + "/workspace",
                 // Author and reviewer must differ: the fake provider writes, a second fake reviews.
                 adapters: { _ in [
@@ -442,10 +513,71 @@ struct LaunchMode: Sendable {
                 ] },
                 gate: UITestGate()
             )
+            if let clis = fakeCLIFolder {
+                try UITestCLIs.install(in: clis)
+                configuration.loginCheck = { provider in await UITestCLIs.check(provider, in: clis, configRoot: folder) }
+            }
+            return configuration
         }
         // The build's channel (Info.plist, per build configuration; unknown means distributed)
         // decides whether any real provider may run without the user's start (ADR 0009).
         return try AppConfiguration.standard(adapters: { host in RealAdapters.make(host: host) }, channel: .current())
+    }
+}
+
+/// Fake `claude` and `codex` for UI tests of the onboarding and the login buttons (ADR 0013).
+/// They answer `--version` like the accepted builds; „logging in“ leaves a marker in the
+/// configuration folder, which the login check reads. No real binary is ever started.
+enum UITestCLIs {
+    static func path(_ provider: ProviderKind, in folder: String) -> String? {
+        switch provider {
+        case .claude: folder + "/claude"
+        case .codex: folder + "/codex"
+        case .fake: nil
+        }
+    }
+
+    static func install(in folder: String) throws {
+        try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        let claude = """
+        #!/bin/sh
+        case "$1" in
+          --version) echo "2.1.329 (Claude Code)" ;;
+          auth) if [ -f "$CLAUDE_CONFIG_DIR/angemeldet" ]; then echo '{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max"}'; else echo '{"loggedIn":false}'; fi ;;
+          *) [ "$DISABLE_AUTOUPDATER" = 1 ] && : > "$CLAUDE_CONFIG_DIR/angemeldet"; echo "Testanmeldung erledigt."; while :; do sleep 1; done ;;
+        esac
+        """
+        let codex = """
+        #!/bin/sh
+        case "$1" in
+          --version) echo "codex-cli 0.170.0" ;;
+          login) : > "$CODEX_HOME/angemeldet"; echo "Testanmeldung erledigt." ;;
+        esac
+        """
+        for (name, text) in [("claude", claude), ("codex", codex)] {
+            let path = folder + "/" + name
+            try text.write(toFile: path, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+        }
+    }
+
+    /// Claude through the product's parser of `claude auth status --json`; Codex by its marker.
+    static func check(_ provider: ProviderKind, in folder: String, configRoot: String) async -> SubscriptionVerdict? {
+        switch provider {
+        case .claude:
+            guard let executable = path(.claude, in: folder) else { return nil }
+            let config = configRoot + "/claude-config"
+            guard let result = try? await ProcessHost().run(LaunchSpec(
+                executable: executable, arguments: ["auth", "status", "--json"], workingDirectory: folder,
+                environment: ["PATH": "/usr/bin:/bin", "CLAUDE_CONFIG_DIR": config], outputLimit: 4096, timeout: .seconds(10)
+            )) else { return .unclear("Testprogramm lief nicht") }
+            let code: Int32 = if case .exited(let value) = result.termination { value } else { -1 }
+            return ClaudeAuthStatus(output: result.stdout.text, exitCode: code).verdict
+        case .codex:
+            return FileManager.default.fileExists(atPath: configRoot + "/codex-home/angemeldet") ? .subscription(plan: "plus") : .signedOut
+        case .fake:
+            return nil
+        }
     }
 }
 
@@ -497,6 +629,7 @@ struct UITestGate: CapabilityGate {
 enum RealAdapters {
     static func make(host: ProcessHost) -> [any AgentAdapter] {
         guard let support = try? AppPaths.supportFolder() else { return [] }
-        return ProviderAdapters.make(host: host, support: support) { Onboarding.locate($0) }
+        // The accepted build, also when `claude` links to a newer one (ADR 0013).
+        return ProviderAdapters.make(host: host, support: support) { Onboarding.locate($0, preferVerified: true) }
     }
 }

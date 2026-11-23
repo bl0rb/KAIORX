@@ -19,6 +19,8 @@ public struct OnboardingItem: Sendable, Equatable, Identifiable {
     public var remedy: String?
     /// A command the user may copy and run themselves in their own terminal (never run by KAIORX).
     public var command: String?
+    /// A login row: the app offers „Im Terminal anmelden …“ and „Anmeldung prüfen“ (ADR 0013).
+    public var login: ProviderKind?
 
     public var label: StatusLabel {
         switch status {
@@ -36,6 +38,10 @@ public struct ProbeResults: Sendable, Equatable {
     public var gitPath: String?
     public var clis: [ProviderKind: BinaryIdentity] = [:]
     public var cliErrors: [ProviderKind: String] = [:]
+    /// The build the command links to when the app runs another, accepted one (ADR 0013).
+    public var linked: [ProviderKind: String] = [:]
+    /// The login checks the user asked for („Anmeldung prüfen“); missing means not checked yet.
+    public var logins: [ProviderKind: LoginCheck] = [:]
     public var confinement: ConfinementStatus?
     public var projects: Int = 0
     /// The latest sync of the real providers' model profiles (ADR 0012: at start or on the
@@ -64,19 +70,33 @@ public enum Onboarding {
     }
 
     /// The native executable of the first installed CLI (an npm launcher resolves to its
-    /// vendored binary, which the adapters can start without Node).
-    public static func locate(_ provider: ProviderKind, home: String = NSHomeDirectory()) -> String? {
+    /// vendored binary, which the adapters can start without Node). With `preferVerified` (the
+    /// app, ADR 0013) a kept, live-accepted Claude build replaces an unaccepted linked one; the
+    /// owner's acceptance kit keeps the default and tests exactly the linked build.
+    public static func locate(_ provider: ProviderKind, home: String = NSHomeDirectory(), preferVerified: Bool = false) -> String? {
         for path in candidatePaths(provider, home: home) where FileManager.default.isExecutableFile(atPath: path) {
-            if let native = try? NativeBinary.resolve(path) { return native }
+            if let native = try? NativeBinary.resolve(path) { return preferVerified ? VerifiedInstall.prefer(native, provider: provider) : native }
         }
         return nil
     }
 
-    /// Runs the local probes: Git, `--version` of each CLI found, the sandbox check.
-    public static func probe(host: ProcessHost, scratch: URL, home: String = NSHomeDirectory(), projects: Int) async -> ProbeResults {
+    /// Runs the local probes: Git, `--version` of each CLI found, the sandbox check. The CLIs are
+    /// the ones the app runs (`locate(…, preferVerified: true)`); `linked` names the one the
+    /// command itself points at when that differs. `locate` replaces the search (UI tests).
+    public static func probe(
+        host: ProcessHost, scratch: URL, home: String = NSHomeDirectory(), projects: Int, locate: (@Sendable (ProviderKind) -> String?)? = nil
+    ) async -> ProbeResults {
         var results = ProbeResults(gitPath: GitRunner.locate())
         for provider in [ProviderKind.claude, .codex] {
-            guard let path = locate(provider, home: home) else { continue }
+            let path: String?
+            if let locate {
+                path = locate(provider)
+            } else {
+                path = Self.locate(provider, home: home, preferVerified: true)
+                let linked = Self.locate(provider, home: home)
+                if let linked, linked != path { results.linked[provider] = linked }
+            }
+            guard let path else { continue }
             do { results.clis[provider] = try await BinaryIdentity.probe(path, host: host) }
             catch { results.cliErrors[provider] = String(describing: error) }
         }
@@ -90,7 +110,7 @@ public enum Onboarding {
     public static func loginCommand(_ provider: ProviderKind, configDirectory: String?) -> String {
         let quoted = configDirectory.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
         switch provider {
-        case .claude: return quoted.map { "CLAUDE_CONFIG_DIR=\($0) claude" } ?? "claude"
+        case .claude: return quoted.map { "DISABLE_AUTOUPDATER=1 CLAUDE_CONFIG_DIR=\($0) claude" } ?? "DISABLE_AUTOUPDATER=1 claude"
         case .codex: return quoted.map { "CODEX_HOME=\($0) codex login" } ?? "codex login"
         case .fake: return ""
         }
@@ -124,11 +144,12 @@ public enum Onboarding {
                         remedy: "Automatik gesperrt. Installiere eine geprüfte Version oder nutze die manuelle Übergabe."
                     ))
                 }
-                items.append(OnboardingItem(
-                    id: "\(binary)-login", title: "\(name)-Anmeldung", status: .unknown,
-                    detail: "KAIORX liest keine Anmeldedaten und prüft die Anmeldung erst beim ersten Lauf.",
-                    remedy: "KAIORX nutzt einen eigenen Konfigurationsordner. Melde dich dafür selbst im Terminal mit diesem Befehl an.",
-                    command: loginCommand(provider, configDirectory: configDirectories[provider])
+                if let linked = probes.linked[provider] {
+                    let last = items.count - 1
+                    items[last].detail += ". \(binary) zeigt auf einen anderen Build (\(URL(filePath: linked).lastPathComponent)); KAIORX nutzt den abgenommenen"
+                }
+                items.append(ProviderLogin.item(
+                    provider, check: probes.logins[provider], command: loginCommand(provider, configDirectory: configDirectories[provider])
                 ))
             } else if let error = probes.cliErrors[provider] {
                 items.append(OnboardingItem(

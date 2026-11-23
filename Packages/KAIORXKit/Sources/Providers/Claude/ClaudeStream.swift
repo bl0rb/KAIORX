@@ -52,6 +52,8 @@ public enum ClaudeCommand {
         [
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home, "TMPDIR": temporaryDirectory, "LANG": "en_US.UTF-8",
             "USER": user, "LOGNAME": user, "CLAUDE_CONFIG_DIR": configDirectory,
+            // KAIORX runs only accepted builds; Claude Code must not replace itself (ADR 0013).
+            "DISABLE_AUTOUPDATER": "1",
         ]
     }
 

@@ -23,7 +23,8 @@ public struct BinaryIdentity: Sendable, Equatable, Codable {
         }
         let result = try await host.run(LaunchSpec(
             executable: resolved, arguments: ["--version"], workingDirectory: "/",
-            environment: Environment.minimal(temporaryDirectory: NSTemporaryDirectory(), inherit: ["HOME"]),
+            // No self-update while KAIORX reads the version (ADR 0013).
+            environment: Environment.minimal(temporaryDirectory: NSTemporaryDirectory(), inherit: ["HOME"]).merging(["DISABLE_AUTOUPDATER": "1"]) { $1 },
             outputLimit: 4096, timeout: .seconds(20)
         ))
         guard result.termination.isSuccess else { throw ProviderError.versionProbeFailed(result.stderr.text) }

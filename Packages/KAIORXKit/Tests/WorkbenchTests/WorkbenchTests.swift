@@ -700,7 +700,7 @@ struct FakeGate: CapabilityGate {
 
     @Test func loginCommandsUseKAIORXsOwnFolders() {
         #expect(Onboarding.loginCommand(.codex, configDirectory: "/A B/codex-home") == "CODEX_HOME='/A B/codex-home' codex login")
-        #expect(Onboarding.loginCommand(.claude, configDirectory: "/x/claude-config") == "CLAUDE_CONFIG_DIR='/x/claude-config' claude")
+        #expect(Onboarding.loginCommand(.claude, configDirectory: "/x/claude-config") == "DISABLE_AUTOUPDATER=1 CLAUDE_CONFIG_DIR='/x/claude-config' claude")
         let items = Onboarding.checklist(ProbeResults(gitPath: "/usr/bin/git"))
         #expect(items.contains { $0.id == "git" && $0.status == .ok })
         let sheet = DecisionSheet.moreAttempts(TaskRecord(id: TaskID(), jobID: JobID(), title: "T", state: .ready, currentAttemptID: nil, version: 1, createdAt: 1), reason: WaitReason(.userDecision, "attemptLimit"))

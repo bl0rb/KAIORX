@@ -6,15 +6,18 @@ import XCTest
 @MainActor
 final class KAIORXUITests: XCTestCase {
     var app: XCUIApplication!
+    var folder: String!
 
-    func launch(script: String = "success", seed: String? = nil) {
+    func launch(script: String = "success", seed: String? = nil, environment: [String: String] = [:]) {
         app = XCUIApplication()
         app.launchArguments = ["-KAIORXUITest"]
+        folder = NSTemporaryDirectory() + "kaiorx-uitest-\(UUID().uuidString)"
         app.launchEnvironment = [
-            "KAIORX_UITEST_FOLDER": NSTemporaryDirectory() + "kaiorx-uitest-\(UUID().uuidString)",
+            "KAIORX_UITEST_FOLDER": folder,
             "KAIORX_UITEST_SCRIPT": script,
         ]
         if let seed { app.launchEnvironment["KAIORX_UITEST_SEED"] = seed }
+        app.launchEnvironment.merge(environment) { $1 }
         app.launch()
     }
 
@@ -60,6 +63,32 @@ final class KAIORXUITests: XCTestCase {
         launch()
         XCTAssertTrue(app.otherElements["onboarding-git"].waitForExistence(timeout: 20) || app.staticTexts["Git"].waitForExistence(timeout: 5))
         openProject()
+    }
+
+    /// ADR 0013 with fake CLIs (never the real ones): the login row offers both buttons, the
+    /// check reads „Nicht angemeldet“, the login terminal logs in (the fake does so only with
+    /// the self-update lock set) and „Fertig“ checks again, without a restart.
+    func testTheLoginButtonsLogInAndCheckWithoutARestart() {
+        launch(environment: ["KAIORX_UITEST_CLIS": "1"])
+        let check = app.buttons["checkLogin-claude"]
+        XCTAssertTrue(check.waitForExistence(timeout: 30), "no login buttons")
+        XCTAssertTrue(app.buttons["login-codex"].exists, "no login button for Codex")
+        check.click()
+        XCTAssertTrue(label(containing: "Nicht angemeldet.").waitForExistence(timeout: 20), "the check did not run")
+        app.buttons["login-claude"].click()
+        XCTAssertTrue(app.descendants(matching: .any)["loginTerminal"].waitForExistence(timeout: 10), "no login terminal")
+        // The fake logs in only with the self-update lock set.
+        let marker = folder + "/claude-config/angemeldet"
+        let deadline = Date().addingTimeInterval(10)
+        while !FileManager.default.fileExists(atPath: marker), Date() < deadline { Thread.sleep(forTimeInterval: 0.2) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker), "the fake CLI did not log in (DISABLE_AUTOUPDATER missing?)")
+        app.buttons["loginDone"].click()
+        XCTAssertTrue(app.buttons["loginDone"].waitForNonExistence(timeout: 5), "the login sheet stayed open")
+        XCTAssertTrue(label(containing: "Angemeldet mit Abo (max).").waitForExistence(timeout: 20), "the login was not checked after „Fertig“")
+    }
+
+    func label(containing text: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch
     }
 
     /// ADR 0012 D7: „Einrichtung prüfen …“ shows the checks with a project open and runs them

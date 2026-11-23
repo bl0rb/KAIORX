@@ -294,6 +294,8 @@ func received(_ root: String, _ spec: AttemptSpec) throws -> JSONValue {
         let seen = try received(root, spec)
         #expect(seen["prompt"]?.string == "Ändere etwas")
         #expect(seen["env"]?["CLAUDE_CONFIG_DIR"]?.string == root + "/claude-config")
+        // Claude Code must not replace the accepted build while KAIORX runs it (ADR 0013).
+        #expect(seen["env"]?["DISABLE_AUTOUPDATER"]?.string == "1")
         // The keychain login is found under the account name (third live run).
         #expect(seen["env"]?["USER"]?.string == NSUserName())
         #expect(seen["env"]?["LOGNAME"]?.string == NSUserName())

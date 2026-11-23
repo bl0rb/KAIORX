@@ -366,6 +366,105 @@ struct TerminalWindow: View {
     }
 }
 
+/// The login terminal (ADR 0013): the provider's CLI itself in KAIORX' own folder, started by
+/// the user's click; only the user types. Closing it stops the CLI and checks the login.
+struct LoginTerminalSheet: View {
+    @SwiftUI.Environment(AppModel.self) private var model
+    @SwiftUI.Environment(\.dismiss) private var dismiss
+    let provider: ProviderKind
+    @State private var session: TerminalBridge?
+    @State private var failed = false
+    @State private var open = true
+    /// This terminal's own link and clipboard requests, apart from the user's shell.
+    @State private var requests: [TerminalRequest] = []
+
+    private var name: String { provider == .claude ? "Claude" : "Codex" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Bei \(name) anmelden").font(.headline).accessibilityAddTraits(.isHeader)
+            Text(provider == .claude
+                 ? "Claude Code läuft hier in KAIORX' eigenem Konfigurationsordner, ohne Selbst-Update. Melde dich mit deinem Abo an (falls nicht gefragt: /login) und beende mit /exit, ohne eine Anfrage zu schicken."
+                 : "„codex login“ läuft hier in KAIORX' eigenem Konfigurationsordner und öffnet die Anmeldung im Browser. Melde dich mit ChatGPT an; danach endet der Befehl.")
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Die Anmeldeseite öffnet \(name) selbst im Browser. Links, die du im Terminal anklickst, öffnen sich erst, wenn du sie unten bestätigst. „Fertig“ beendet das Programm und prüft die Anmeldung.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(Array(requests.enumerated()), id: \.offset) { index, request in
+                HStack {
+                    Text(request.prompt).lineLimit(2)
+                    Button("Ausführen") { execute(request, at: index) }
+                    Button("Verwerfen") { requests.remove(at: index) }
+                }
+                .padding(6)
+                .background(.yellow.opacity(0.2))
+            }
+            Group {
+                if let session {
+                    VStack { TerminalHost(bridge: session) }
+                        .accessibilityElement(children: .contain)
+                        .accessibilityLabel("Anmeldeterminal \(name)")
+                        .accessibilityIdentifier("loginTerminal")
+                } else if failed {
+                    ContentUnavailableView("Konnte nicht starten", systemImage: "exclamationmark.triangle", description: Text("\(name) wurde nicht gefunden. Prüfe die Installation mit „Einrichtung prüfen …“."))
+                } else {
+                    ProgressView("Startet …")
+                }
+            }
+            .frame(minWidth: 640, minHeight: 360)
+            HStack {
+                Spacer()
+                // No Return shortcut: Return belongs to the terminal (the login needs it).
+                Button("Fertig") { finish() }
+                    .accessibilityIdentifier("loginDone")
+            }
+        }
+        .padding()
+        .task { await start() }
+        .onDisappear {
+            open = false
+            let old = session
+            session = nil
+            Task { await old?.stop() }
+        }
+    }
+
+    private func start() async {
+        guard let host = model.services?.terminals, let spec = await model.loginSpec(provider),
+              let bridge = await TerminalBridge.start(spec: spec, host: host, onRequest: { request in
+                  if !requests.contains(request), requests.count < 3 { requests.append(request) }
+              }) else {
+            failed = true
+            return
+        }
+        if open { session = bridge } else { await bridge.stop() }
+    }
+
+    private func finish() {
+        let old = session
+        session = nil
+        // Back to „Einrichtung prüfen …“ when the login started there, else closed.
+        let back = model.sheetAfterLogin
+        model.sheetAfterLogin = nil
+        if back != nil { model.sheet = back } else { dismiss() }
+        Task {
+            await old?.stop()
+            await model.checkLogin(provider)
+        }
+    }
+
+    private func execute(_ request: TerminalRequest, at index: Int) {
+        switch request {
+        case .copyToClipboard(let text):
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        case .openLink(let url):
+            NSWorkspace.shared.open(url)
+        }
+        requests.remove(at: index)
+    }
+}
+
 @MainActor
 final class TerminalBridge: NSObject, TerminalViewDelegate {
     let folder: String
@@ -388,8 +487,13 @@ final class TerminalBridge: NSObject, TerminalViewDelegate {
     /// `onRequest` runs synchronously on the main actor (where SwiftTerm calls the delegate), so
     /// a flood of requests is bounded by the receiver instead of queueing tasks.
     static func start(folder: String, host: ProcessHost, onRequest: @escaping @MainActor (TerminalRequest) -> Void) async -> TerminalBridge? {
-        guard let process = try? await host.launchTerminal(TerminalSessions.spec(folder: folder, rows: 30, columns: 100)) else { return nil }
-        let bridge = TerminalBridge(folder: folder, process: process, onRequest: onRequest)
+        await start(spec: TerminalSessions.spec(folder: folder, rows: 30, columns: 100), host: host, onRequest: onRequest)
+    }
+
+    /// Any terminal program, for example the login terminal (ADR 0013).
+    static func start(spec: TerminalSpec, host: ProcessHost, onRequest: @escaping @MainActor (TerminalRequest) -> Void) async -> TerminalBridge? {
+        guard let process = try? await host.launchTerminal(spec) else { return nil }
+        let bridge = TerminalBridge(folder: spec.workingDirectory, process: process, onRequest: onRequest)
         bridge.startPump()
         return bridge
     }

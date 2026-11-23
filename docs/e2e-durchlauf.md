@@ -119,7 +119,7 @@ shasum -a 256 "$CODEX_PKG/node_modules/@openai/codex-darwin-arm64/vendor/aarch64
 
 - **Erwartet:** beide Prüfsummen wie in der Tabelle.
 - Weicht eine ab, startet dieser Anbieter weder automatisch noch auf deinen Start („Dieser Build von … ist nicht live abgenommen“). Dann brauchst du zuerst eine neue Live-Abnahme (`docs/live-acceptance/README.md`).
-- **Selbst-Update von Claude Code:** Claude Code hat sich schon einmal selbst aktualisiert (2.1.328 → 2.1.329). Nutze Claude Code während des Durchlaufs nicht nebenbei, oder setze vorher in deiner Shell `export DISABLE_AUTOUPDATER=1`. Prüfe die Version vor Schritt 9 noch einmal.
+- **Selbst-Update von Claude Code:** Claude Code aktualisiert sich selbst (2.1.328 → 2.1.329, im Durchlauf 2.1.329 → 2.1.330). KAIORX startet Claude nie mit Selbst-Update und nutzt einen aufbewahrten, abgenommenen Build unter `~/.local/share/claude/versions/`, auch wenn `claude` schon auf einen neueren zeigt (ADR 0013); das Onboarding nennt das dann („claude zeigt auf einen anderen Build …“). Setze trotzdem in jedem Terminal, in dem du `claude` startest, vorher `export DISABLE_AUTOUPDATER=1`: Claude Code löscht alte Versionen irgendwann.
 
 **Anmeldung in KAIORX' eigenen Konfigurationsordnern.** KAIORX nutzt nicht `~/.claude` oder `~/.codex`, sondern eigene Ordner unter Application Support (dieselben wie bei der Live-Abnahme). Prüfe den Stand dort:
 
@@ -131,9 +131,8 @@ CODEX_HOME="$SUPPORT/codex-home" codex login status
 
 - **Erwartet:** Claude ist mit dem Abo angemeldet (kein API-Schlüssel), Codex mit ChatGPT.
 - Die Ausgabe enthält deine E-Mail-Adresse. Gib sie nicht weiter; notiere nur „angemeldet, Abo“.
-- **Nicht angemeldet:** Nutze die Befehle, die das Onboarding der App unter „Befehl kopieren: …“ anbietet (Schritt 5):
-  - Claude: `CLAUDE_CONFIG_DIR='…/claude-config' claude`, dort anmelden und mit `/exit` beenden, ohne eine Anfrage zu schicken;
-  - Codex: `CODEX_HOME='…/codex-home' codex login`.
+- **Nicht angemeldet:** Am einfachsten in der App (ADR 0013): In der Zeile „Claude-Anmeldung“ bzw. „Codex-Anmeldung“ (Willkommensseite oder Menü „Ablage“ → „Einrichtung prüfen …“) öffnet **„Im Terminal anmelden …“** ein Terminal in KAIORX' eigenem Ordner, ohne Selbst-Update. Bei Claude meldest du dich dort an und beendest mit `/exit`, ohne eine Anfrage zu schicken; Codex öffnet die Anmeldung im Browser. **„Fertig“** schließt das Terminal und prüft die Anmeldung; **„Anmeldung prüfen“** prüft sie jederzeit neu, und eine wartende Aufgabe startet danach ohne die sonst bis zu fünf Minuten Wartezeit.
+  - Im eigenen Terminal gehen weiter die Befehle unter „Befehl kopieren“: Claude `DISABLE_AUTOUPDATER=1 CLAUDE_CONFIG_DIR='…/claude-config' claude`, Codex `CODEX_HOME='…/codex-home' codex login`.
 - **Zusatzguthaben ausschalten:** Schalte bei beiden Anbietern das Zusatzguthaben aus (Claude: usage credits; ChatGPT: Guthaben für andere Apps oder ein App-Limit unter 100 %). Ein Konto, das nicht nur über das Abo abrechnet, sperrt die Automatik („… rechnet nicht nur über das Abo ab“).
 
 ### 4.3 Wegwerf-Repository
@@ -291,7 +290,7 @@ Ein Blatt deckt beide Anbieter ab: jeder als Autor **und** als Reviewer. Der Sch
 |---|---|
 | „Wartet auf deinen Start: Die installierte Version Claude … ist nicht live abgenommen“ | falsche Version (4.2) |
 | „Wartet auf deinen Start: Dieser Build von Claude 2.1.329 ist nicht live abgenommen“ | gleiche Version, anderer Build |
-| „Wartet auf deinen Start: Claude ist in KAIORX nicht angemeldet“ | Anmeldung im KAIORX-Ordner fehlt (4.2) |
+| „Wartet auf deinen Start: Claude ist in KAIORX nicht angemeldet“ | Anmeldung im KAIORX-Ordner fehlt: „Im Terminal anmelden …“, dann „Fertig“ (4.2) |
 | „Wartet auf deinen Start: Claude rechnet nicht nur über das Abo ab“ | Zusatzguthaben aktiv |
 | „Wartet auf deinen Start: Der Schreibschutz für Agenten wirkt nicht“ | Sandbox-Prüfung gescheitert |
 | „Wartet auf deinen Start: Claude startet in dieser Ausgabe von KAIORX nie automatisch (keine Anbieterfreigabe)“ | falscher Build (Release statt Debug, 4.1) |
